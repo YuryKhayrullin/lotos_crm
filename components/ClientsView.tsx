@@ -3,7 +3,7 @@
 import { observer } from 'mobx-react-lite'
 import { useStore } from '@/store/StoreProvider'
 import { useState } from 'react'
-import { CreateClientDto } from '@/store/models'
+import { CreateClientDto, IBranch, IClient } from '@/store/models'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'

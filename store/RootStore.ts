@@ -1,5 +1,5 @@
 import { flow, types, Instance } from 'mobx-state-tree'
-import { apiClient, fetchClients, createClient, ApiError } from '@/lib/api-client'
+import { apiClient, ApiError } from '@/lib/api-client'
 import { ClientStore } from './ClientStore'
 import { AuthStore } from './AuthStore'
 import {
@@ -213,9 +213,9 @@ const RootStoreModel = types
         try {
           console.log('Fetching data...')
           const [branches, coaches, lessons] = yield Promise.all([
-            apiClient.getBranches(),
-            apiClient.getCoaches(),
-            apiClient.getLessons(),
+            apiClient.fetchBranches(),
+            apiClient.fetchCoaches(),
+            apiClient.fetchLessons(),
           ])
           
           console.log('Data fetched:', { branches, coaches, lessons })

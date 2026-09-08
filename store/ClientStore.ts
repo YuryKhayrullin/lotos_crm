@@ -1,6 +1,6 @@
 import { types, flow, Instance } from 'mobx-state-tree'
 import { ClientModel, IClient, CreateClientDto } from './models/Client'
-import { fetchClients, createClient, apiClient } from '@/lib/api-client'
+import { apiClient } from '@/lib/api-client'
 
 export const ClientStore = types
   .model('ClientStore', {
@@ -13,7 +13,7 @@ export const ClientStore = types
       self.isLoading = true
       self.error = null
       try {
-        const rawData = yield fetchClients()
+        const rawData = yield apiClient.fetchClients()
         console.log('RAW API RESPONSE:', rawData)
         
         const validStatuses = ['Активен', 'Пауза', 'Архив'];
@@ -57,7 +57,7 @@ export const ClientStore = types
       self.clients.push(newClient as any)
 
       try {
-        yield createClient(data)
+        yield apiClient.createClient(data)
         yield (self as any).loadClients()
       } catch (error: any) {
         self.clients = self.clients.filter(c => c.id !== tempId) as any
