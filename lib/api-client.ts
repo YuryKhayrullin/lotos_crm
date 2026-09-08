@@ -39,10 +39,29 @@ class ApiClient {
     const response = await fetch(GAS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(clientData),
+      body: JSON.stringify({ ...clientData, action: 'createClient' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to create client')
     return response.json()
+  }
+
+  async updateClient(id: string, data: Partial<IClient>): Promise<IClient> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...data, id, action: 'updateClient' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to update client')
+    return response.json()
+  }
+
+  async deleteClient(id: string): Promise<void> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ id, action: 'deleteClient' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to delete client')
   }
 
   async fetchBranches(): Promise<IBranch[]> {
@@ -52,11 +71,15 @@ class ApiClient {
   }
 
   async fetchCoaches(): Promise<ICoach[]> {
-    return []
+    const response = await fetch(GAS_URL + '?sheet=Тренеры')
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch coaches')
+    return response.json()
   }
 
   async fetchLessons(): Promise<ILesson[]> {
-    return []
+    const response = await fetch(GAS_URL + '?sheet=Расписание')
+    if (!response.ok) throw new ApiError(response.status, 'Failed to fetch lessons')
+    return response.json()
   }
 
   async createBranch(branchData: { name: string; address: string }): Promise<IBranch> {
@@ -70,44 +93,15 @@ class ApiClient {
     return response.json()
   }
 
-  async uploadReceipt(clientId: string, file: File, lessonsCount: number) {
-    const fileBase64 = await fileToBase64(file);
+  async createCoach(coachData: any): Promise<ICoach> {
     const response = await fetch(GAS_URL, {
-      method: "POST",
-      body: JSON.stringify({
-        action: "uploadReceipt",
-        clientId,
-        fileBase64,
-        fileName: file.name,
-        mimeType: file.type,
-        lessonsCount
-      }),
-      headers: { "Content-Type": "application/json" }
-    });
-    return response.json();
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...coachData, action: 'createCoach' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to create coach')
+    return response.json()
   }
 
-  async markAttendance(clientId: string) {
-    const response = await fetch(GAS_URL, {
-      method: "POST",
-      body: JSON.stringify({
-        action: "markAttendance",
-        clientId
-      }),
-      headers: { "Content-Type": "application/json" }
-    });
-    return response.json();
-  }
-
-  async getBranches(): Promise<IBranch[]> { return this.fetchBranches() }
-  async getCoaches(): Promise<ICoach[]> { return this.fetchCoaches() }
-  async getLessons(): Promise<ILesson[]> { return this.fetchLessons() }
-  async getClients(): Promise<IClient[]> { return this.fetchClients() }
-  async createClient(data: CreateClientDto): Promise<IClient> { return this.createClient(data) }
-  async deleteClient(id: string): Promise<void> { throw new Error('Not implemented') }
-  async createCoach(data: any): Promise<ICoach> { throw new Error('Not implemented') }
-  async updateCoach(id: string, data: any): Promise<ICoach> { throw new Error('Not implemented') }
-  async deleteCoach(id: string): Promise<void> { throw new Error('Not implemented') }
-}
-
-export const apiClient = new ApiClient()
+  async updateCoach(id: string, coachData: any): Promise<ICoach> {
+    const r
