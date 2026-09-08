@@ -298,11 +298,11 @@ const RootStoreModel = types
         }
       }),
       toggleClientPaid: flow(function* (clientId: string) {
-        const client = s.clients.find((c: any) => c.id === clientId)
+        const client = s.clientStore.clients.find((c: any) => c.id === clientId)
         if (!client || !client.subscription) return
         try {
           const updated = yield apiClient.updateClient(clientId, {
-            subscription: { ...client.subscription, paid: !client.subscription.paid } as ISubscription,
+            subscription: { ...client.subscription, paid: !client.subscription.paid } as any,
           })
           if (client.subscription) {
             client.subscription.paid = updated.subscription?.paid ?? !client.subscription.paid
@@ -314,8 +314,8 @@ const RootStoreModel = types
       deleteClient: flow(function* (clientId: string) {
         try {
           yield apiClient.deleteClient(clientId)
-          const client = s.clients.find((c: any) => c.id === clientId)
-          if (client) s.clients.remove(client)
+          const client = s.clientStore.clients.find((c: any) => c.id === clientId)
+          if (client) s.clientStore.clients.remove(client)
           s.closeClientModal()
         } catch (error) {
           s.error = error instanceof ApiError ? error.message : 'Ошибка удаления клиента'
