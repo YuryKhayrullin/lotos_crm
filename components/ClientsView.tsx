@@ -1,8 +1,9 @@
 'use client'
 
 import { observer } from 'mobx-react-lite'
+import { useStore } from '@/store/StoreProvider'
 import { useState } from 'react'
-import { getStore } from '@/store/RootStore'
+import { CreateClientDto } from '@/store/models'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -12,7 +13,7 @@ import { Plus } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-const store = getStore()
+  const store = useStore()
 
 const calculateAge = (birthDate: string) => {
   const [day, month, year] = birthDate.split('.').map(Number)
@@ -71,22 +72,17 @@ export const ClientsView = observer(() => {
   const handleSubmit = async () => {
     const initials = formData.childName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
 
-    await store.clientStore.addClient({
+    const clientData: CreateClientDto = {
       childName: formData.childName,
       parentName: formData.parentName,
       phone: formData.phone,
       email: formData.email,
       birthDate: formData.birthDate,
-      age,
+      age: age,
       branchId: formData.branchId,
       status: 'Активен',
       initials,
-      totalLessons: 0,
-      remainingLessons: 0,
-      isActive: false,
-      hasSubscription: false,
-      subscriptionPaid: false
-    })
+    }
     setIsAddClientOpen(false)
     resetForm()
   }
@@ -116,13 +112,13 @@ export const ClientsView = observer(() => {
               </div>
               <Select 
                 value={formData.branchId} 
-                onValueChange={(val) => setFormData({...formData, branchId: val})}
+                onValueChange={(val) => setFormData({...formData, branchId: val ?? ''})}
               >
                 <SelectTrigger className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12 px-4 shadow-sm">
                   <SelectValue placeholder="Выберите филиал" />
                 </SelectTrigger>
                 <SelectContent className="rounded-2xl border-cyan-100 shadow-xl p-2 bg-white" sideOffset={5}>
-                  {store.branches.map(b => (
+                  {store.branches.map((b: IBranch) => (
                     <SelectItem 
                       key={b.id} 
                       value={b.id} 
@@ -180,7 +176,7 @@ export const ClientsView = observer(() => {
                   <TableCell colSpan={5} className="text-center py-4 text-slate-500">Нет клиентов</TableCell>
                 </TableRow>
               ) : (
-                clients.map((client) => (
+                clients.map((client: IClient) => (
                   <TableRow key={client.id} className="cursor-pointer hover:bg-slate-50" onClick={() => store.selectClient(client)}>
                     <TableCell className="font-medium">{client.childName}</TableCell>
                     <TableCell>{client.birthDate} / {client.age}</TableCell>

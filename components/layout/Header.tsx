@@ -59,7 +59,7 @@ export const Header = observer(() => {
             color="inherit"
           >
             <Avatar sx={{ bgcolor: 'primary.main', width: 32, height: 32, fontSize: '0.875rem' }}>
-              {store.auth?.isAuthenticated ? store.auth.userInitials : 'ВХ'}
+              {store.authStore.isAuthenticated ? store.authStore.user?.username.slice(0, 2).toUpperCase() : 'ВХ'}
             </Avatar>
           </IconButton>
           <Menu
@@ -78,11 +78,11 @@ export const Header = observer(() => {
             onClose={handleClose}
           >
             <MenuItem disabled sx={{ opacity: '1 !important', fontWeight: 600 }}>
-              {store.auth?.isAuthenticated ? store.auth.username : 'Гость'}
+              {store.authStore.isAuthenticated ? store.authStore.user?.username : 'Гость'}
             </MenuItem>
             <Divider />
-            {store.auth?.isAuthenticated ? (
-              <MenuItem onClick={() => { handleClose(); store.auth?.logout(); }}>Выйти</MenuItem>
+            {store.authStore.isAuthenticated ? (
+              <MenuItem onClick={() => { handleClose(); store.authStore.logout(); }}>Выйти</MenuItem>
             ) : (
               <MenuItem onClick={() => { handleClose(); store.openLogin(); }}>Войти</MenuItem>
             )}

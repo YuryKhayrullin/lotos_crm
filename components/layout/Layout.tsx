@@ -17,6 +17,7 @@ export const Layout: React.FC<LayoutProps> = observer(({ children }) => {
     return null // LoaderFullScreen is rendered by StoreProvider
   }
 
+
   return (
     <div className="flex min-h-screen bg-muted/40">
       <Sidebar />

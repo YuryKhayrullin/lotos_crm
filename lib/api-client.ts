@@ -52,7 +52,7 @@ export const createBranch = async (branchData: { name: string; address: string }
 
 // Старый класс для обратной совместимости (RootStore)
 class ApiClient {
-  async login(username, password): Promise<{ user: any; token: string }> {
+  async login(username: string, password: string): Promise<{ user: any; token: string }> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },

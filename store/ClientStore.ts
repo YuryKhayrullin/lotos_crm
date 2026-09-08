@@ -1,6 +1,6 @@
 import { types, flow, Instance } from 'mobx-state-tree'
 import { ClientModel, IClient, CreateClientDto } from './models/Client'
-import { fetchClients, createClient } from '@/lib/api-client'
+import { fetchClients, createClient, apiClient } from '@/lib/api-client'
 
 export const ClientStore = types
   .model('ClientStore', {
@@ -16,7 +16,6 @@ export const ClientStore = types
         const rawData = yield fetchClients()
         console.log('RAW API RESPONSE:', rawData)
         
-        // Преобразование данных перед записью в стор с безопасными значениями по умолчанию
         const validStatuses = ['Активен', 'Пауза', 'Архив'];
         const formattedClients = (rawData as any[]).map(client => {
           console.log('Mapping client:', client)
@@ -28,7 +27,7 @@ export const ClientStore = types
             email: String(client.email || 'Нет'),
             birthDate: String(client.birthDate || '01.01.2000'),
             age: String(client.age || '0 лет'),
-            branchId: String(client.branchId || ''), // Убрали дефолтное значение '1', берем из API
+            branchId: String(client.branchId || ''),
             status: validStatuses.includes(client.status) ? client.status : 'Активен',
             initials: String(client.initials || 'XX'),
             subscription: client.subscription ? {
@@ -38,6 +37,7 @@ export const ClientStore = types
               remainingLessons: Number(client.subscription.remainingLessons || 0),
               paid: Boolean(client.subscription.paid || false),
               purchasedAt: String(client.subscription.purchasedAt || new Date().toISOString()),
+              receiptUrl: String(client.subscription.receiptUrl || ''),
             } : null,
           }
         });
@@ -52,19 +52,62 @@ export const ClientStore = types
       }
     }),
     addClient: flow(function* (data: CreateClientDto) {
-      // Optimistic update
       const tempId = `temp-${Date.now()}`
       const newClient = { ...data, id: tempId }
       self.clients.push(newClient as any)
 
       try {
         yield createClient(data)
-        // После успешного добавления в Google Sheet, перезагружаем список, чтобы получить актуальные данные
         yield (self as any).loadClients()
       } catch (error: any) {
-        // Rollback
         self.clients = self.clients.filter(c => c.id !== tempId) as any
         self.error = error.message || 'Failed to add client'
+      }
+    }),
+
+    // НОВАЯ ФУНКЦИЯ: Добавление подписки
+    addSubscription: flow(function* (clientId: string, file: File, lessonsCount: number) {
+      const client = self.clients.find(c => c.id === clientId);
+      if (!client) return;
+
+      try {
+        self.isLoading = true;
+        const result = yield apiClient.uploadReceipt(clientId, file, lessonsCount);
+        
+        if (result.success) {
+          client.updateSubscription(
+            result.remainingLessons,
+            lessonsCount,
+            result.receiptUrl,
+            result.status
+          );
+        } else {
+          self.error = result.message || "Failed to add subscription";
+        }
+      } catch (err: any) {
+        self.error = err.message || "Failed to add subscription";
+      } finally {
+        self.isLoading = false;
+      }
+    }),
+
+    // НОВАЯ ФУНКЦИЯ: Отметка посещения
+    markAttendance: flow(function* (clientId: string) {
+      const client = self.clients.find(c => c.id === clientId);
+      if (!client || client.remainingLessons <= 0) return;
+
+      const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
+      
+      // Optimistic Update
+      client.consumeLesson(client.remainingLessons - 1, (client.remainingLessons - 1) <= 0 ? 'Пауза' : 'Активен');
+
+      try {
+        const result = yield apiClient.markAttendance(clientId);
+        if (!result.success) throw new Error("Server rejected attendance");
+      } catch (err: any) {
+        // Rollback
+        client.consumeLesson(snapshotBefore.remaining, snapshotBefore.status as any);
+        self.error = err.message || "Attendance failed";
       }
     }),
 
