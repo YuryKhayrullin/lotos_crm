@@ -104,4 +104,58 @@ class ApiClient {
   }
 
   async updateCoach(id: string, coachData: any): Promise<ICoach> {
-    const r
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...coachData, id, action: 'updateCoach' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to update coach')
+    return response.json()
+  }
+
+  async deleteCoach(id: string): Promise<void> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ id, action: 'deleteCoach' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to delete coach')
+  }
+
+  async uploadReceipt(clientId: string, file: File, lessonsCount: number) {
+    const fileBase64 = await fileToBase64(file);
+    const response = await fetch(GAS_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "uploadReceipt",
+        clientId,
+        fileBase64,
+        fileName: file.name,
+        mimeType: file.type,
+        lessonsCount
+      }),
+      headers: { "Content-Type": "application/json" }
+    });
+    return response.json();
+  }
+
+  async markAttendance(clientId: string) {
+    const response = await fetch(GAS_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "markAttendance",
+        clientId
+      }),
+      headers: { "Content-Type": "application/json" }
+    });
+    return response.json();
+  }
+
+  async getBranches(): Promise<IBranch[]> { return this.fetchBranches() }
+  async getCoaches(): Promise<ICoach[]> { return this.fetchCoaches() }
+  async getLessons(): Promise<ILesson[]> { return this.fetchLessons() }
+  async getClients(): Promise<IClient[]> { return this.fetchClients() }
+}
+}
+
+export const apiClient = new ApiClient()
