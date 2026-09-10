@@ -1,6 +1,6 @@
 import { IBranch, ICoach, IClient, ILesson, CreateClientDto } from '@/store/models'
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycby_97Oww186uc2aYfvdRh7RWWeERasRC0AqEMPstNoAaj56djvqF-h72FMmWgP6CeuL4Q/exec'
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbwMQwvQvPuujUIeP5KsjtQ6koqdf5L-wL7eAbeWenAy50IDpgRYNJTwMC5I4aSzwzVAeQ/exec'
 
 export class ApiError extends Error {
   constructor(public status: number | string, public data: any) {
@@ -26,6 +26,16 @@ class ApiClient {
     })
     
     if (!response.ok) throw new ApiError(response.status, 'Failed to login')
+    return response.json()
+  }
+
+  async register(username: string, password: string): Promise<any> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'register', username, password }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to register')
     return response.json()
   }
 
@@ -82,7 +92,7 @@ class ApiClient {
     return response.json()
   }
 
-  async createBranch(branchData: { name: string; address: string }): Promise<IBranch> {
+  async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -122,6 +132,16 @@ class ApiClient {
     if (!response.ok) throw new ApiError(response.status, 'Failed to delete coach')
   }
 
+  async updateClientAPI(id: string, data: any): Promise<any> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'updateClient', id, ...data }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to update client via API')
+    return response.json()
+  }
+
   async uploadReceipt(clientId: string, file: File, lessonsCount: number) {
     const fileBase64 = await fileToBase64(file);
     const response = await fetch(GAS_URL, {
@@ -155,7 +175,6 @@ class ApiClient {
   async getCoaches(): Promise<ICoach[]> { return this.fetchCoaches() }
   async getLessons(): Promise<ILesson[]> { return this.fetchLessons() }
   async getClients(): Promise<IClient[]> { return this.fetchClients() }
-}
 }
 
 export const apiClient = new ApiClient()

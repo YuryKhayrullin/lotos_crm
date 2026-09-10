@@ -10,6 +10,22 @@ export const AuthStore = types
     token: types.maybeNull(types.string),
   })
   .actions(self => ({
+    register: flow(function* (username, password) {
+      self.isLoading = true
+      try {
+        const response = yield apiClient.register(username, password)
+        if (response.status === 'success') {
+           yield (self as any).login(username, password)
+        } else {
+           throw new Error(response.message || 'Ошибка регистрации')
+        }
+      } catch (e: any) {
+        console.error('Register error:', e)
+        throw new Error(e.message || 'Ошибка регистрации')
+      } finally {
+        self.isLoading = false
+      }
+    }),
     login: flow(function* (username, password) {
       self.isLoading = true
       try {

@@ -184,13 +184,13 @@ const RootStoreModel = types
       },
       addBranch: flow(function* (name: string, address: string) {
         try {
-          const response = yield apiClient.createBranch({ name, address })
+          const newId = Date.now().toString();
+          const response = yield apiClient.createBranch({ id: newId, name, address })
           
-          // If response is the branch object, use it. Otherwise, assume a successful message and create a local branch object.
           let newBranch = response
-          if (!newBranch.id) {
+          if (!newBranch || !newBranch.id) {
              newBranch = {
-               id: Date.now().toString(),
+               id: newId,
                name,
                address,
              }
@@ -222,12 +222,15 @@ const RootStoreModel = types
           
           yield s.clientStore.loadClients()
           
-          s.branches.replace(branches)
-          s.coaches.replace(coaches)
-          s.lessons.replace(lessons)
+          // Ensure IDs are strings
+          const branchesFormatted = Array.isArray(branches) ? branches.map(b => ({ ...b, id: String(b.id) })) : [];
           
-          if (branches.length > 0 && !s.selectedBranchId) {
-            s.selectedBranchId = branches[0].id
+          s.branches.replace(branchesFormatted)
+          s.coaches.replace(coaches)
+          s.lessons.replace(Array.isArray(lessons) ? lessons : [])
+          
+          if (branchesFormatted.length > 0 && !s.selectedBranchId) {
+            s.selectedBranchId = String(branchesFormatted[0].id)
           }
         } catch (error) {
           console.error('Failed to load data:', error)
@@ -330,14 +333,28 @@ const RootStoreModel = types
         if (!branch) throw new Error('Филиал не выбран')
         try {
           s.error = null
+          const newId = Date.now().toString()
           const initials = s.coachFormName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
           const coach = yield apiClient.createCoach({
+            id: newId,
             name: s.coachFormName.trim(),
             specialty: s.coachFormSpecialty.trim(),
             initials,
             branchId: branch.id,
           })
-          s.coaches.push(coach)
+          
+          let coachWithId = coach
+          if (!coachWithId || !coachWithId.id) {
+            coachWithId = {
+              id: newId,
+              name: s.coachFormName.trim(),
+              specialty: s.coachFormSpecialty.trim(),
+              initials,
+              branchId: branch.id,
+            }
+          }
+          
+          s.coaches.push(coachWithId)
           s.coachFormName = ''
           s.coachFormSpecialty = ''
         } catch (error) {

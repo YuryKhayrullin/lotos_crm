@@ -12,8 +12,9 @@ import { Input } from '@/components/ui/input'
 import { Plus } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { SubscriptionUpload } from './SubscriptionUpload'
+import { AdminAddLessons } from './AdminAddLessons'
 
-  const store = useStore()
 
 const calculateAge = (birthDate: string) => {
   const [day, month, year] = birthDate.split('.').map(Number)
@@ -44,6 +45,7 @@ const formatPhone = (value: string) => {
 }
 
 export const ClientsView = observer(() => {
+  const store = useStore()
   const clients = store.branchClients
   const [isAddClientOpen, setIsAddClientOpen] = useState(false)
   const [formData, setFormData] = useState({ 
@@ -55,6 +57,18 @@ export const ClientsView = observer(() => {
     branchId: store.selectedBranchId || ''
   })
 
+  // Синхронизируем branchId при открытии формы или смене выбранного филиала
+  const resetForm = () => {
+    setFormData({ 
+      childName: '', 
+      parentName: '', 
+      phone: '', 
+      email: '', 
+      birthDate: '', 
+      branchId: store.selectedBranchId || '' 
+    })
+  }
+
   const age = calculateAge(formData.birthDate)
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -65,11 +79,38 @@ export const ClientsView = observer(() => {
     setFormData({ ...formData, phone: formatPhone(e.target.value) })
   }
 
-  const resetForm = () => {
-    setFormData({ childName: '', parentName: '', phone: '', email: '', birthDate: '', branchId: store.selectedBranchId || '' })
-  }
-
   const handleSubmit = async () => {
+    // ВАЛИДАЦИЯ ВВОДА ПОЛЬЗОВАТЕЛЯ
+    if (!formData.childName.trim() || formData.childName.length < 2) {
+      alert("Введите корректное имя ребенка (минимум 2 символа)");
+      return;
+    }
+    if (!formData.parentName.trim() || formData.parentName.length < 2) {
+      alert("Введите корректное имя родителя");
+      return;
+    }
+    
+    // Валидация телефона (должен содержать 11 цифр)
+    const digitsOnly = formData.phone.replace(/\D/g, "");
+    if (digitsOnly.length < 11) {
+      alert("Введите полный номер телефона (11 цифр)");
+      return;
+    }
+
+    // Валидация email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (formData.email && !emailRegex.test(formData.email)) {
+      alert("Введите корректный email (или оставьте поле пустым)");
+      return;
+    }
+
+    // Валидация даты рождения (ДД.ММ.ГГГГ)
+    const dateRegex = /^\d{2}\.\d{2}\.\d{4}$/;
+    if (!dateRegex.test(formData.birthDate)) {
+      alert("Введите дату рождения в формате ДД.ММ.ГГГГ");
+      return;
+    }
+
     const initials = formData.childName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
 
     const clientData: CreateClientDto = {
@@ -83,6 +124,7 @@ export const ClientsView = observer(() => {
       status: 'Активен',
       initials,
     }
+    await store.clientStore.addClient(clientData)
     setIsAddClientOpen(false)
     resetForm()
   }
@@ -152,6 +194,11 @@ export const ClientsView = observer(() => {
                 <p><strong>Дата рождения:</strong> {store.selectedClient.birthDate}</p>
                 <p><strong>Возраст:</strong> {store.selectedClient.age}</p>
                 <p><strong>Статус:</strong> <Badge className="bg-cyan-100 text-cyan-800">{store.selectedClient.status}</Badge></p>
+                <SubscriptionUpload clientId={store.selectedClient.id} />
+                <AdminAddLessons clientId={store.selectedClient.id} />
+                <Button onClick={() => store.clientStore.markAttendance(store.selectedClient!.id)} className="w-full">
+                  Отметить занятие
+                </Button>
               </div>
             </>
           )}

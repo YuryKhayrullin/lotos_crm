@@ -16,20 +16,29 @@ export const ClientStore = types
         const rawData = yield apiClient.fetchClients()
         console.log('RAW API RESPONSE:', rawData)
         
+        const clientsArray = Array.isArray(rawData) ? rawData : (rawData && typeof rawData === 'object' ? Object.values(rawData) : []);
+        
         const validStatuses = ['Активен', 'Пауза', 'Архив'];
-        const formattedClients = (rawData as any[]).map(client => {
+        const formattedClients = clientsArray.map(client => {
           console.log('Mapping client:', client)
+          
+          // Функция защиты от отображения ошибок из ячеек Google Sheets
+          const cleanVal = (val: any, fallback: string = "") => {
+            const s = String(val || "").trim();
+            return (s === "#ERROR!" || s === "#VALUE!" || s.indexOf("#") === 0) ? fallback : s;
+          };
+
           return {
             id: String(client.id || ''),
-            childName: String(client.childName || 'Без имени'),
-            parentName: String(client.parentName || 'Без имени'),
-            phone: String(client.phone || 'Нет'),
-            email: String(client.email || 'Нет'),
-            birthDate: String(client.birthDate || '01.01.2000'),
-            age: String(client.age || '0 лет'),
+            childName: cleanVal(client.childName, 'Без имени'),
+            parentName: cleanVal(client.parentName, 'Без имени'),
+            phone: cleanVal(client.phone, 'Нет'),
+            email: cleanVal(client.email, 'Нет'),
+            birthDate: cleanVal(client.birthDate, '01.01.2000'),
+            age: cleanVal(client.age, '0 лет'),
             branchId: String(client.branchId || ''),
             status: validStatuses.includes(client.status) ? client.status : 'Активен',
-            initials: String(client.initials || 'XX'),
+            initials: cleanVal(client.initials, 'XX'),
             subscription: client.subscription ? {
               id: String(client.subscription.id || Date.now().toString()),
               clientId: String(client.id || ''),
@@ -52,16 +61,20 @@ export const ClientStore = types
       }
     }),
     addClient: flow(function* (data: CreateClientDto) {
-      const tempId = `temp-${Date.now()}`
-      const newClient = { ...data, id: tempId }
-      self.clients.push(newClient as any)
+      const newId = String(Date.now());
+      const clientWithId = { ...data, id: newId };
+      
+      // Добавляем временно в стейт для мгновенного UI-обновления
+      self.clients.push(clientWithId as any);
 
       try {
-        yield apiClient.createClient(data)
-        yield (self as any).loadClients()
+        yield apiClient.createClient(clientWithId);
+        // Перезагружаем список, чтобы получить актуальные данные с сервера (включая правильный branchId)
+        yield (self as any).loadClients();
       } catch (error: any) {
-        self.clients = self.clients.filter(c => c.id !== tempId) as any
-        self.error = error.message || 'Failed to add client'
+        // Откат при ошибке
+        self.clients = self.clients.filter(c => c.id !== newId) as any;
+        self.error = error.message || 'Failed to add client';
       }
     }),
 
@@ -79,7 +92,7 @@ export const ClientStore = types
             result.remainingLessons,
             lessonsCount,
             result.receiptUrl,
-            result.status
+            result.status // 'Активен' or 'Пауза'
           );
         } else {
           self.error = result.message || "Failed to add subscription";
@@ -91,6 +104,28 @@ export const ClientStore = types
       }
     }),
 
+    // НОВАЯ ФУНКЦИЯ: Добавление занятий
+    addLessons: flow(function* (clientId: string, count: number) {
+      const client = self.clients.find(c => c.id === clientId);
+      if (!client || !client.subscription) return;
+
+      const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
+      
+      const newRemaining = client.remainingLessons + count;
+      client.updateSubscription(newRemaining, client.totalLessons + count, client.subscription.receiptUrl || '', 'Активен');
+
+      try {
+        const result = yield apiClient.updateClientAPI(clientId, { 
+          remainingLessons: newRemaining, 
+          status: 'Активен' 
+        });
+        if (!result.success) throw new Error("Server rejected addLessons");
+      } catch (err: any) {
+        client.updateSubscription(snapshotBefore.remaining, client.totalLessons, client.subscription.receiptUrl || '', snapshotBefore.status as any);
+        self.error = err.message || "Failed to add lessons";
+      }
+    }),
+
     // НОВАЯ ФУНКЦИЯ: Отметка посещения
     markAttendance: flow(function* (clientId: string) {
       const client = self.clients.find(c => c.id === clientId);
@@ -98,11 +133,17 @@ export const ClientStore = types
 
       const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
       
+      const newRemaining = client.remainingLessons - 1;
+      const newStatus = newRemaining <= 0 ? 'Пауза' : 'Активен';
+      
       // Optimistic Update
-      client.consumeLesson(client.remainingLessons - 1, (client.remainingLessons - 1) <= 0 ? 'Пауза' : 'Активен');
+      client.consumeLesson(newRemaining, newStatus);
 
       try {
-        const result = yield apiClient.markAttendance(clientId);
+        const result = yield apiClient.updateClientAPI(clientId, { 
+          remainingLessons: newRemaining, 
+          status: newStatus 
+        });
         if (!result.success) throw new Error("Server rejected attendance");
       } catch (err: any) {
         // Rollback
