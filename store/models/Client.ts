@@ -14,6 +14,8 @@ export const ClientModel = types
     status: types.enumeration(['Активен', 'Пауза', 'Архив']),
     initials: types.string,
     subscription: types.maybeNull(SubscriptionModel),
+    assignedLessonId: types.maybeNull(types.string),
+    assignedLessonIds: types.optional(types.array(types.string), []),
   })
   .views((self) => ({
     get isActive(): boolean {
@@ -31,8 +33,31 @@ export const ClientModel = types
     get subscriptionPaid(): boolean {
       return self.subscription?.paid ?? false
     },
+    isAssignedTo(lessonId: string): boolean {
+      return self.assignedLessonIds.includes(lessonId) || self.assignedLessonId === lessonId
+    }
   }))
   .actions((self) => ({
+    setAssignedLessons(lessonIds: string[]) {
+      self.assignedLessonIds.replace(lessonIds)
+      if (lessonIds.length > 0) {
+        self.assignedLessonId = lessonIds[0]
+      } else {
+        self.assignedLessonId = null
+      }
+    },
+    toggleAssignedLesson(lessonId: string) {
+      if (self.assignedLessonIds.includes(lessonId)) {
+        self.assignedLessonIds.remove(lessonId)
+      } else {
+        self.assignedLessonIds.push(lessonId)
+      }
+      if (self.assignedLessonIds.length > 0) {
+        self.assignedLessonId = self.assignedLessonIds[0]
+      } else {
+        self.assignedLessonId = null
+      }
+    },
     updateSubscription(remaining: number, total: number, receiptUrl: string, status: 'Активен' | 'Пауза') {
       if (!self.subscription) {
         self.subscription = { 
@@ -75,4 +100,6 @@ export type CreateClientDto = {
   status: 'Активен' | 'Пауза' | 'Архив'
   initials: string
   subscription?: Omit<ISubscriptionSnapshot, 'id' | 'clientId'>
+  assignedLessonId?: string | null
+  assignedLessonIds?: string[]
 }

@@ -180,25 +180,98 @@ export const ClientsView = observer(() => {
       </div>
 
       <Dialog open={!!store.selectedClient} onOpenChange={(open) => !open && store.closeClientModal()}>
-        <DialogContent className="max-w-[400px] rounded-3xl border-pink-100 bg-white">
+        <DialogContent className="max-w-[480px] rounded-3xl border-pink-100 bg-white max-h-[85vh] overflow-y-auto p-6">
           {store.selectedClient && (
             <>
               <DialogHeader className="border-b border-pink-50 pb-4">
-                <DialogTitle className="text-xl font-bold text-cyan-950">Карточка клиента</DialogTitle>
+                <DialogTitle className="text-xl font-bold text-cyan-950">
+                  Карточка клиента: {store.selectedClient.childName}
+                </DialogTitle>
+                <p className="text-sm text-slate-500 mt-1">Родитель: {store.selectedClient.parentName} · {store.selectedClient.phone}</p>
               </DialogHeader>
-              <div className="grid gap-4 py-4 text-slate-700">
-                <p><strong>Ребенок:</strong> {store.selectedClient.childName}</p>
-                <p><strong>Родитель:</strong> {store.selectedClient.parentName}</p>
-                <p><strong>Телефон:</strong> {store.selectedClient.phone}</p>
-                <p><strong>Email:</strong> {store.selectedClient.email}</p>
-                <p><strong>Дата рождения:</strong> {store.selectedClient.birthDate}</p>
-                <p><strong>Возраст:</strong> {store.selectedClient.age}</p>
-                <p><strong>Статус:</strong> <Badge className="bg-cyan-100 text-cyan-800">{store.selectedClient.status}</Badge></p>
-                <SubscriptionUpload clientId={store.selectedClient.id} />
-                <AdminAddLessons clientId={store.selectedClient.id} />
-                <Button onClick={() => store.clientStore.markAttendance(store.selectedClient!.id)} className="w-full">
-                  Отметить занятие
-                </Button>
+
+              <div className="grid gap-6 py-4 text-slate-700">
+                {/* Статус и абонемент */}
+                <div className="bg-cyan-50/50 p-4 rounded-2xl border border-cyan-100 flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-cyan-900">Абонемент и статус</span>
+                    <Badge className={store.selectedClient.isActive ? "bg-emerald-500 text-white font-semibold" : "bg-amber-500 text-white font-semibold"}>
+                      {store.selectedClient.status}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-600">Остаток занятий:</span>
+                    <span className="font-extrabold text-cyan-950 text-base">
+                      {store.selectedClient.remainingLessons} / {store.selectedClient.totalLessons || store.selectedClient.remainingLessons} зан.
+                    </span>
+                  </div>
+
+                  <div className="pt-2 border-t border-cyan-100 flex flex-col gap-2">
+                    <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Быстрое начисление абонемента</span>
+                    <div className="flex items-center gap-2">
+                      <Button 
+                        onClick={() => store.clientStore.addLessons(store.selectedClient!.id, 8)}
+                        size="sm" 
+                        className="flex-1 bg-cyan-500 hover:bg-cyan-600 text-white font-bold rounded-xl"
+                      >
+                        +8 занятий
+                      </Button>
+                      <Button 
+                        onClick={() => store.clientStore.addLessons(store.selectedClient!.id, 12)}
+                        size="sm" 
+                        className="flex-1 bg-pink-500 hover:bg-pink-600 text-white font-bold rounded-xl"
+                      >
+                        +12 занятий
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Привязка к расписанию занятий */}
+                <div className="grid gap-3">
+                  <h4 className="text-sm font-semibold text-slate-800 uppercase tracking-wider">Дни и время тренировок в расписании</h4>
+                  <p className="text-xs text-slate-500">Выберите слоты, которые посещает ребенок:</p>
+                  
+                  {store.branchLessons.length === 0 ? (
+                    <p className="text-sm text-slate-500 italic">В данном филиале пока нет занятий в расписании</p>
+                  ) : (
+                    <div className="grid gap-2 max-h-44 overflow-y-auto pr-1">
+                      {store.branchLessons.map(lesson => {
+                        const isAssigned = store.selectedClient!.isAssignedTo(lesson.id)
+                        return (
+                          <div 
+                            key={lesson.id}
+                            onClick={() => store.clientStore.toggleClientLesson(store.selectedClient!.id, lesson.id)}
+                            className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                              isAssigned 
+                                ? 'border-cyan-400 bg-cyan-50/80 text-cyan-950 font-semibold shadow-sm' 
+                                : 'border-slate-100 hover:border-cyan-200 hover:bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <div className="flex flex-col">
+                              <span className="text-sm font-bold">{lesson.time} · {lesson.title}</span>
+                              <span className="text-xs text-slate-500">{lesson.coachName} ({lesson.pool})</span>
+                            </div>
+                            <div className={`size-5 rounded-full border flex items-center justify-center text-xs font-bold ${
+                              isAssigned ? 'bg-cyan-500 text-white border-cyan-500' : 'border-slate-300 text-transparent'
+                            }`}>
+                              ✓
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-slate-100">
+                  <Button 
+                    onClick={() => store.closeClientModal()}
+                    className="w-full rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold h-11"
+                  >
+                    Готово
+                  </Button>
+                </div>
               </div>
             </>
           )}

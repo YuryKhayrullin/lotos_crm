@@ -1,51 +1,133 @@
 'use client'
 
+import { useState } from 'react'
 import { observer } from 'mobx-react-lite'
 import { getStore } from '@/store/RootStore'
 import { Card, CardContent } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { AttendanceModal } from './AttendanceModal'
+import { ILesson } from '@/store/models'
+import { CalendarDays, Plus } from 'lucide-react'
 
 const store = getStore()
 
+const DAYS = [
+  { key: 'Пн', label: 'Пн 14' },
+  { key: 'Вт', label: 'Вт 15' },
+  { key: 'Ср', label: 'Ср 16' },
+  { key: 'Чт', label: 'Чт 17' },
+  { key: 'Пт', label: 'Пт 18' },
+  { key: 'Сб', label: 'Сб 19' },
+  { key: 'Вс', label: 'Вс 20' },
+]
+
 export const ScheduleView = observer(() => {
-  const lessons = store.sortedBranchLessons
+  const [selectedDay, setSelectedDay] = useState('Пн')
+  const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
+  const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
+
+  const lessons = store.sortedBranchLessons.filter(l => viewMode === 'неделя' || l.dayOfWeek === selectedDay)
+
+  const branch = store.currentBranch
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-        <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Расписание</h2>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+            Расписание · {branch ? branch.name : 'Филиал'}
+          </h2>
+          <p className="text-sm text-slate-500 mt-1">
+            Неделя 14–20 октября 2024 · отдельное расписание филиала
+          </p>
+        </div>
+        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
+          <Button 
+            variant={viewMode === 'день' ? 'default' : 'ghost'} 
+            size="sm"
+            onClick={() => setViewMode('день')}
+            className={viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+          >
+            День
+          </Button>
+          <Button 
+            variant={viewMode === 'неделя' ? 'default' : 'ghost'} 
+            size="sm"
+            onClick={() => setViewMode('неделя')}
+            className={viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+          >
+            Неделя
+          </Button>
+        </div>
       </div>
 
-      <Card className="rounded-2xl border-slate-100 shadow-sm">
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="border-slate-100">
-                <TableHead>Время</TableHead>
-                <TableHead>Занятие</TableHead>
-                <TableHead>Тренер</TableHead>
-                <TableHead>Бассейн</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {lessons.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={4} className="text-center py-10 text-slate-500">Нет занятий на сегодня</TableCell>
-                </TableRow>
-              ) : (
-                lessons.map((lesson) => (
-                  <TableRow key={lesson.id} className="border-slate-100 hover:bg-slate-50">
-                    <TableCell className="font-semibold text-cyan-700">{lesson.time}</TableCell>
-                    <TableCell className="font-medium text-slate-900">{lesson.title}</TableCell>
-                    <TableCell className="text-slate-600">{lesson.coachName}</TableCell>
-                    <TableCell className="text-slate-600">{lesson.pool}</TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {/* Горизонтальный селектор дней недели */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-2">
+        {DAYS.map(d => (
+          <button
+            key={d.key}
+            onClick={() => { setSelectedDay(d.key); setViewMode('день'); }}
+            className={`px-5 py-2.5 rounded-2xl font-semibold text-sm transition-all whitespace-nowrap shadow-sm border ${
+              viewMode === 'день' && selectedDay === d.key
+                ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
+                : 'bg-white text-slate-700 border-slate-100 hover:border-cyan-200 hover:bg-slate-50'
+            }`}
+          >
+            {d.label}
+          </button>
+        ))}
+      </div>
+
+      <AttendanceModal 
+        isOpen={!!selectedLesson} 
+        onClose={() => setSelectedLesson(null)} 
+        lesson={selectedLesson} 
+      />
+
+      <div className="grid gap-4">
+        {lessons.length === 0 ? (
+          <Card className="rounded-2xl border-slate-100 shadow-sm p-12 text-center">
+            <p className="text-slate-500">Нет занятий на выбранный день</p>
+          </Card>
+        ) : (
+          lessons.map((lesson) => {
+            // Подсчет реально записанных детей в филиале на это занятие
+            const enrolledCount = store.branchClients.filter(c => c.isAssignedTo(lesson.id)).length
+            const maxCap = lesson.maxCapacity || 10
+            const countStr = `${enrolledCount} / ${maxCap}`
+
+            return (
+              <Card 
+                key={lesson.id} 
+                className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
+                onClick={() => setSelectedLesson(lesson)}
+              >
+                <CardContent className="p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
+                    <div>
+                      <p className="text-lg font-bold text-cyan-950">{lesson.time}</p>
+                      <p className="text-sm font-semibold text-slate-800 mt-0.5">{lesson.title}</p>
+                      <p className="text-xs text-slate-500 mt-1">{lesson.coachName} · {lesson.pool}</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center gap-4">
+                    <Badge className="bg-cyan-50 text-cyan-700 font-bold px-3 py-1 text-sm rounded-xl">
+                      {countStr}
+                    </Badge>
+                    <div className="text-slate-400 group-hover:text-cyan-600 transition-colors font-bold text-xl px-2">
+                      ›
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })
+        )}
+      </div>
     </div>
   )
 })
+

@@ -224,9 +224,10 @@ const RootStoreModel = types
           
           // Ensure IDs are strings
           const branchesFormatted = Array.isArray(branches) ? branches.map(b => ({ ...b, id: String(b.id) })) : [];
+          const coachesFormatted = Array.isArray(coaches) ? coaches.map(c => ({ ...c, id: String(c.id), branchId: String(c.branchId) })) : [];
           
           s.branches.replace(branchesFormatted)
-          s.coaches.replace(coaches)
+          s.coaches.replace(coachesFormatted)
           s.lessons.replace(Array.isArray(lessons) ? lessons : [])
           
           if (branchesFormatted.length > 0 && !s.selectedBranchId) {

@@ -3,11 +3,13 @@ import { types, Instance } from 'mobx-state-tree'
 export const LessonModel = types.model('Lesson', {
   id: types.identifier,
   branchId: types.string,
-  time: types.string, // HH:MM
+  dayOfWeek: types.optional(types.string, 'Пн'), // 'Пн' | 'Вт' | 'Ср' | 'Чт' | 'Пт' | 'Сб' | 'Вс'
+  time: types.string, // e.g. "09:00", "12:00", "16:30", "17:00 - 19:00"
   title: types.string,
   coachName: types.string,
   pool: types.string,
-  count: types.string, // e.g. "8 / 10"
+  maxCapacity: types.optional(types.number, 10),
+  count: types.optional(types.string, '0 / 10'),
 })
 
 export type ILesson = Instance<typeof LessonModel>

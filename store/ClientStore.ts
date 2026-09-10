@@ -28,6 +28,11 @@ export const ClientStore = types
             return (s === "#ERROR!" || s === "#VALUE!" || s.indexOf("#") === 0) ? fallback : s;
           };
 
+          const rawAssigned = client.assignedLessonIds || client.assignedLessonId;
+          const assignedLessonIds = rawAssigned 
+            ? (Array.isArray(rawAssigned) ? rawAssigned.map(String) : String(rawAssigned).split(',').map(s => s.trim()).filter(Boolean))
+            : [];
+
           return {
             id: String(client.id || ''),
             childName: cleanVal(client.childName, 'Без имени'),
@@ -39,6 +44,8 @@ export const ClientStore = types
             branchId: String(client.branchId || ''),
             status: validStatuses.includes(client.status) ? client.status : 'Активен',
             initials: cleanVal(client.initials, 'XX'),
+            assignedLessonId: assignedLessonIds[0] || null,
+            assignedLessonIds: assignedLessonIds,
             subscription: client.subscription ? {
               id: String(client.subscription.id || Date.now().toString()),
               clientId: String(client.id || ''),
@@ -47,7 +54,15 @@ export const ClientStore = types
               paid: Boolean(client.subscription.paid || false),
               purchasedAt: String(client.subscription.purchasedAt || new Date().toISOString()),
               receiptUrl: String(client.subscription.receiptUrl || ''),
-            } : null,
+            } : (client.remainingLessons !== undefined && client.remainingLessons !== "" ? {
+              id: Date.now().toString(),
+              clientId: String(client.id || ''),
+              totalLessons: Number(client.totalLessons || client.remainingLessons || 0),
+              remainingLessons: Number(client.remainingLessons || 0),
+              paid: true,
+              purchasedAt: new Date().toISOString(),
+              receiptUrl: '',
+            } : null),
           }
         });
         console.log('Formatted clients:', formattedClients)
@@ -107,22 +122,56 @@ export const ClientStore = types
     // НОВАЯ ФУНКЦИЯ: Добавление занятий
     addLessons: flow(function* (clientId: string, count: number) {
       const client = self.clients.find(c => c.id === clientId);
-      if (!client || !client.subscription) return;
+      if (!client) return;
 
-      const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
+      const hasSub = client.hasSubscription;
+      const snapshotBefore = { 
+        remaining: client.remainingLessons, 
+        total: client.totalLessons, 
+        status: client.status, 
+        hasSub 
+      };
       
       const newRemaining = client.remainingLessons + count;
-      client.updateSubscription(newRemaining, client.totalLessons + count, client.subscription.receiptUrl || '', 'Активен');
+      const newTotal = (hasSub ? client.totalLessons : 0) + count;
+      
+      client.updateSubscription(newRemaining, newTotal, client.subscription?.receiptUrl || '', 'Активен');
 
       try {
         const result = yield apiClient.updateClientAPI(clientId, { 
-          remainingLessons: newRemaining, 
+          remainingLessons: newRemaining,
+          totalLessons: newTotal,
           status: 'Активен' 
         });
         if (!result.success) throw new Error("Server rejected addLessons");
       } catch (err: any) {
-        client.updateSubscription(snapshotBefore.remaining, client.totalLessons, client.subscription.receiptUrl || '', snapshotBefore.status as any);
+        if (snapshotBefore.hasSub) {
+          client.updateSubscription(snapshotBefore.remaining, snapshotBefore.total, client.subscription?.receiptUrl || '', snapshotBefore.status as any);
+        } else {
+          client.subscription = null;
+          client.status = snapshotBefore.status as any;
+        }
         self.error = err.message || "Failed to add lessons";
+      }
+    }),
+
+    toggleClientLesson: flow(function* (clientId: string, lessonId: string) {
+      const client = self.clients.find(c => c.id === clientId);
+      if (!client) return;
+
+      const oldLessons = [...client.assignedLessonIds];
+      client.toggleAssignedLesson(lessonId);
+      const newLessons = [...client.assignedLessonIds];
+
+      try {
+        const result = yield apiClient.updateClientAPI(clientId, {
+          assignedLessonIds: newLessons.join(','),
+          assignedLessonId: newLessons[0] || ''
+        });
+        if (!result.success) throw new Error("Server rejected schedule update");
+      } catch (err: any) {
+        client.setAssignedLessons(oldLessons);
+        self.error = err.message || "Failed to update schedule";
       }
     }),
 
