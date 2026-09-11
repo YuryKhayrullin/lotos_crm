@@ -124,34 +124,40 @@ export const ClientStore = types
       const client = self.clients.find(c => c.id === clientId);
       if (!client) return;
 
-      const hasSub = client.hasSubscription;
       const snapshotBefore = { 
         remaining: client.remainingLessons, 
         total: client.totalLessons, 
-        status: client.status, 
-        hasSub 
+        status: client.status,
+        subscription: client.subscription ? JSON.parse(JSON.stringify(client.subscription)) : null
       };
       
-      const newRemaining = client.remainingLessons + count;
-      const newTotal = (hasSub ? client.totalLessons : 0) + count;
+      // Если подписки нет или оставшихся занятий 0, начинаем с count (например, 2/2).
+      // Если остаток есть (например, 1 занятие), прибавляем count к существующим (например, 1 + 2 = 3).
+      const isNew = !client.subscription || client.remainingLessons <= 0;
+      const newRemaining = isNew ? count : client.remainingLessons + count;
+      const newTotal = isNew ? count : client.totalLessons + count;
       
       client.updateSubscription(newRemaining, newTotal, client.subscription?.receiptUrl || '', 'Активен');
 
       try {
+        self.isLoading = true;
         const result = yield apiClient.updateClientAPI(clientId, { 
           remainingLessons: newRemaining,
           totalLessons: newTotal,
           status: 'Активен' 
         });
-        if (!result.success) throw new Error("Server rejected addLessons");
+        if (result && result.success === false) throw new Error("Server rejected addLessons");
       } catch (err: any) {
-        if (snapshotBefore.hasSub) {
-          client.updateSubscription(snapshotBefore.remaining, snapshotBefore.total, client.subscription?.receiptUrl || '', snapshotBefore.status as any);
+        // Откат
+        if (snapshotBefore.subscription) {
+            client.updateSubscription(snapshotBefore.remaining, snapshotBefore.total, snapshotBefore.subscription.receiptUrl, snapshotBefore.status as any);
         } else {
-          client.subscription = null;
-          client.status = snapshotBefore.status as any;
+            client.subscription = null;
+            client.status = snapshotBefore.status as any;
         }
         self.error = err.message || "Failed to add lessons";
+      } finally {
+        self.isLoading = false;
       }
     }),
 
@@ -174,25 +180,48 @@ export const ClientStore = types
         self.error = err.message || "Failed to update schedule";
       }
     }),
+markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 'attended' | 'absent' }[], lessonId: string, date: string) {
+  const snapshots = new Map();
+  attendanceList.forEach(({ clientId, status }) => {
+    const client = self.clients.find(c => c.id === clientId);
+    if (client) {
+      snapshots.set(clientId, { remaining: client.remainingLessons, status: client.status });
+      if (status === 'attended') {
+        const newRem = Math.max(0, client.remainingLessons - 1);
+        const newStat = newRem <= 0 ? 'Пауза' : 'Активен';
+        client.consumeLesson(newRem, newStat);
+      }
+    }
+  });
 
+  try {
+    const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, new Date().toLocaleDateString());
+    if (!result.success) throw new Error("Server rejected bulk attendance");
+  } catch (err: any) {
+    // Откат
+    snapshots.forEach((snap, clientId) => {
+        const client = self.clients.find(c => c.id === clientId);
+        if (client) client.consumeLesson(snap.remaining, snap.status);
+    });
+    self.error = err.message || "Bulk attendance failed";
+  }
+}),
+    
     // НОВАЯ ФУНКЦИЯ: Отметка посещения
-    markAttendance: flow(function* (clientId: string) {
+    markAttendance: flow(function* (clientId: string, lessonId: string, status: 'attended' | 'absent') {
       const client = self.clients.find(c => c.id === clientId);
       if (!client || client.remainingLessons <= 0) return;
 
       const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
       
-      const newRemaining = client.remainingLessons - 1;
+      const newRemaining = status === 'attended' ? client.remainingLessons - 1 : client.remainingLessons;
       const newStatus = newRemaining <= 0 ? 'Пауза' : 'Активен';
       
       // Optimistic Update
       client.consumeLesson(newRemaining, newStatus);
 
       try {
-        const result = yield apiClient.updateClientAPI(clientId, { 
-          remainingLessons: newRemaining, 
-          status: newStatus 
-        });
+        const result = yield apiClient.recordAttendance(clientId, lessonId, status, new Date().toLocaleDateString());
         if (!result.success) throw new Error("Server rejected attendance");
       } catch (err: any) {
         // Rollback

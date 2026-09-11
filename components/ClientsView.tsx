@@ -48,6 +48,15 @@ export const ClientsView = observer(() => {
   const store = useStore()
   const clients = store.branchClients
   const [isAddClientOpen, setIsAddClientOpen] = useState(false)
+  const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false)
+  const [scheduleForm, setScheduleForm] = useState({
+    dayOfWeek: 'Вт',
+    time: '17:00',
+    duration: '1 час',
+    title: 'Плавание',
+    coachName: store.branchCoaches[0]?.name || 'Тренер',
+    pool: 'Основной бассейн'
+  })
   const [formData, setFormData] = useState({ 
     childName: '', 
     parentName: '', 
@@ -210,18 +219,15 @@ export const ClientsView = observer(() => {
                     <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Быстрое начисление абонемента</span>
                     <div className="flex items-center gap-2">
                       <Button 
-                        onClick={() => store.clientStore.addLessons(store.selectedClient!.id, 8)}
+                        onClick={async () => {
+                          await store.clientStore.addLessons(store.selectedClient!.id, 2);
+                          // Если в филиале нет слотов расписания, сразу открываем форму создания слота для привязки
+                          setIsScheduleModalOpen(true);
+                        }}
                         size="sm" 
-                        className="flex-1 bg-cyan-500 hover:bg-cyan-600 text-white font-bold rounded-xl"
+                        className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold rounded-xl"
                       >
-                        +8 занятий
-                      </Button>
-                      <Button 
-                        onClick={() => store.clientStore.addLessons(store.selectedClient!.id, 12)}
-                        size="sm" 
-                        className="flex-1 bg-pink-500 hover:bg-pink-600 text-white font-bold rounded-xl"
-                      >
-                        +12 занятий
+                        +2 занятия
                       </Button>
                     </div>
                   </div>
@@ -263,11 +269,117 @@ export const ClientsView = observer(() => {
                     </div>
                   )}
                 </div>
+              {/* Модальное окно создания слота расписания */}
+              <Dialog open={isScheduleModalOpen} onOpenChange={setIsScheduleModalOpen}>
+                <DialogContent className="max-w-[400px] p-6 rounded-3xl bg-white border-cyan-100 shadow-2xl">
+                  <DialogHeader className="pb-4 border-b border-cyan-50">
+                    <DialogTitle className="text-xl font-bold text-cyan-950">Записать в расписание</DialogTitle>
+                    <p className="text-xs text-slate-500 mt-1">Укажите день, время и продолжительность занятия</p>
+                  </DialogHeader>
+                  <div className="grid gap-4 py-4">
+                    <div className="grid gap-2">
+                      <label className="text-xs font-bold text-slate-700">День недели</label>
+                      <Select 
+                        value={scheduleForm.dayOfWeek} 
+                        onValueChange={(val) => val && setScheduleForm({...scheduleForm, dayOfWeek: val})}
+                      >
+                        <SelectTrigger className="rounded-xl border-cyan-100 h-11">
+                          <SelectValue placeholder="Выберите день" />
+                        </SelectTrigger>
+                        <SelectContent className="rounded-xl bg-white shadow-xl">
+                          {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(d => (
+                            <SelectItem key={d} value={d}>{d}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
 
-                <div className="pt-2 border-t border-slate-100">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="grid gap-2">
+                        <label className="text-xs font-bold text-slate-700">Время</label>
+                        <Input 
+                          value={scheduleForm.time} 
+                          onChange={e => setScheduleForm({...scheduleForm, time: e.target.value})} 
+                          placeholder="17:00"
+                          className="rounded-xl border-cyan-100 h-11"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <label className="text-xs font-bold text-slate-700">Продолжительность</label>
+                        <Select 
+                          value={scheduleForm.duration} 
+                          onValueChange={(val) => val && setScheduleForm({...scheduleForm, duration: val})}
+                        >
+                          <SelectTrigger className="rounded-xl border-cyan-100 h-11">
+                            <SelectValue placeholder="Длительность" />
+                          </SelectTrigger>
+                          <SelectContent className="rounded-xl bg-white shadow-xl">
+                            {['30 минут', '45 минут', '1 час', '1.5 часа', '2 часа'].map(dur => (
+                              <SelectItem key={dur} value={dur}>{dur}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <label className="text-xs font-bold text-slate-700">Название тренировки</label>
+                      <Input 
+                        value={scheduleForm.title} 
+                        onChange={e => setScheduleForm({...scheduleForm, title: e.target.value})} 
+                        placeholder="Плавание"
+                        className="rounded-xl border-cyan-100 h-11"
+                      />
+                    </div>
+
+                    <div className="grid gap-2">
+                      <label className="text-xs font-bold text-slate-700">Тренер</label>
+                      <Input 
+                        value={scheduleForm.coachName} 
+                        onChange={e => setScheduleForm({...scheduleForm, coachName: e.target.value})} 
+                        placeholder="Тренер"
+                        className="rounded-xl border-cyan-100 h-11"
+                      />
+                    </div>
+
+                    <Button 
+                      onClick={async () => {
+                        const newLessonId = String(Date.now());
+                        const newLessonData = {
+                          id: newLessonId,
+                          branchId: store.selectedBranchId,
+                          dayOfWeek: scheduleForm.dayOfWeek,
+                          time: scheduleForm.time,
+                          title: scheduleForm.title,
+                          coachName: scheduleForm.coachName,
+                          pool: scheduleForm.pool,
+                          duration: scheduleForm.duration,
+                          maxCapacity: 10,
+                          count: '0 / 10'
+                        };
+                        store.addLessonToStore(newLessonData as any);
+                        await store.clientStore.toggleClientLesson(store.selectedClient!.id, newLessonId);
+                        setIsScheduleModalOpen(false);
+                      }}
+                      className="w-full rounded-xl bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-12 mt-2"
+                    >
+                      Создать и записать
+                    </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
+
+                <div className="pt-2 border-t border-slate-100 flex gap-2">
+                  <Button 
+                    onClick={() => setIsScheduleModalOpen(true)}
+                    variant="outline"
+                    className="w-1/2 rounded-2xl border-cyan-200 text-cyan-800 hover:bg-cyan-50 font-semibold h-11"
+                  >
+                    + Добавить слот
+                  </Button>
                   <Button 
                     onClick={() => store.closeClientModal()}
-                    className="w-full rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold h-11"
+                    className="w-1/2 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-bold h-11"
                   >
                     Готово
                   </Button>

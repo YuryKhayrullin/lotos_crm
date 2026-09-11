@@ -32,7 +32,13 @@ export const AuthStore = types
         console.log('Sending login request:', { username })
         const response = yield apiClient.login(username, password)
         console.log('Login response:', response)
-        self.user = response.user
+        // Гарантируем наличие role и branchId перед созданием модели
+        const user = {
+            ...response.user,
+            role: response.user.role || '2',
+            branchId: response.user.branchId || null
+        };
+        self.user = user
         self.token = response.token
         self.isAuthenticated = true
         localStorage.setItem('crm_token', response.token)

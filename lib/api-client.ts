@@ -92,6 +92,16 @@ class ApiClient {
     return response.json()
   }
 
+  async createLesson(lessonData: any): Promise<ILesson> {
+    const response = await fetch(GAS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...lessonData, action: 'createLesson' }),
+    })
+    if (!response.ok) throw new ApiError(response.status, 'Failed to create lesson')
+    return response.json()
+  }
+
   async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
@@ -156,19 +166,36 @@ class ApiClient {
       }),
       headers: { "Content-Type": "application/json" }
     });
-    return response.json();
+    return response.json()
   }
 
-  async markAttendance(clientId: string) {
+  async recordBulkAttendance(attendanceList: { clientId: string, status: 'attended' | 'absent' }[], lessonId: string, date: string) {
     const response = await fetch(GAS_URL, {
       method: "POST",
       body: JSON.stringify({
-        action: "markAttendance",
-        clientId
+        action: "recordBulkAttendance",
+        attendanceList,
+        lessonId,
+        date
       }),
       headers: { "Content-Type": "application/json" }
     });
-    return response.json();
+    return response.json()
+  }
+
+  async recordAttendance(clientId: string, lessonId: string, status: 'attended' | 'absent', date: string) {
+    const response = await fetch(GAS_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "recordAttendance",
+        clientId,
+        lessonId,
+        status,
+        date
+      }),
+      headers: { "Content-Type": "application/json" }
+    });
+    return response.json()
   }
 
   async getBranches(): Promise<IBranch[]> { return this.fetchBranches() }

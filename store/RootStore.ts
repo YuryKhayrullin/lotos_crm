@@ -417,6 +417,9 @@ const RootStoreModel = types
           s.error = error instanceof ApiError ? error.message : 'Ошибка прикрепления тренера'
         }
       }),
+      addLessonToStore: (lessonData: any) => {
+        s.lessons.push(lessonData);
+      },
     }
   })
 

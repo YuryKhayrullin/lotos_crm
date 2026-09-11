@@ -25,7 +25,7 @@ export const AttendanceList = observer(() => {
               </Badge>
             </div>
             <Button 
-              onClick={() => store.clientStore.markAttendance(client.id)}
+              onClick={() => store.clientStore.markAttendance(client.id, 'UNKNOWN_LESSON', 'attended')}
               disabled={isDisabled}
               variant={isDisabled ? "secondary" : "default"}
             >

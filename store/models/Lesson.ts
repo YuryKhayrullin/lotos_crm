@@ -8,6 +8,7 @@ export const LessonModel = types.model('Lesson', {
   title: types.string,
   coachName: types.string,
   pool: types.string,
+  duration: types.optional(types.string, '1 час'),
   maxCapacity: types.optional(types.number, 10),
   count: types.optional(types.string, '0 / 10'),
 })

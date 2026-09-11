@@ -3,7 +3,7 @@ import { types, Instance } from 'mobx-state-tree'
 export const AuthModel = types.model('Auth', {
   id: types.union(types.string, types.number),
   username: types.string,
-  role: types.union(types.string, types.number), // Временно принимаем любое
+  role: types.maybe(types.union(types.string, types.number)),
   branchId: types.maybeNull(types.union(types.string, types.number)),
 })
 

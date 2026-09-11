@@ -28,7 +28,7 @@ export const AttendanceModal = observer(({
   const unassignedClients = store.branchClients.filter(c => !c.isAssignedTo(lesson.id))
 
   const handleMark = async (clientId: string, status: 'attended' | 'missed') => {
-    if (status === 'attended') await store.clientStore.markAttendance(clientId)
+    if (status === 'attended') await store.clientStore.markAttendance(clientId, lesson.id, 'attended')
     setMarkedClients(prev => ({ ...prev, [clientId]: status }))
   }
 
