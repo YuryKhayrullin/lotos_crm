@@ -12,17 +12,9 @@ import {
   LessonModel,
   ILesson,
   CreateClientDto,
-  ISubscription,
 } from '@/store/models'
 
-const SCREENS = [
-  'Дашборд',
-  'Клиенты и дети',
-  'Тренеры',
-  'Расписание',
-  'Абонементы',
-  'Финансы',
-] as const
+const SCREENS = ['Дашборд', 'Клиенты и дети', 'Тренеры', 'Расписание', 'Абонементы', 'Финансы'] as const
 
 const RootStoreModel = types
   .model('RootStore', {
@@ -58,368 +50,308 @@ const RootStoreModel = types
     isLoading: types.optional(types.boolean, true),
     error: types.maybeNull(types.string),
   })
-  .views((self) => {
-    const s = self as any
-    return {
-      get currentBranch(): IBranch | undefined {
-        return s.branches.find((b: any) => b.id === s.selectedBranchId)
-      },
-      get branchClients(): IClient[] {
-        return s.clientStore.clients.filter((c: any) => c.branchId === s.selectedBranchId)
-      },
-      get branchCoaches(): ICoach[] {
-        return s.coaches.filter((c: any) => c.branchId === s.selectedBranchId)
-      },
-      get branchLessons(): ILesson[] {
-        return s.lessons.filter((l: any) => l.branchId === s.selectedBranchId)
-      },
-      get sortedBranchLessons(): ILesson[] {
-        return [...s.branchLessons].sort((a: any, b: any) => a.time.localeCompare(b.time))
-      },
-      get dummy(): boolean { return true },
-    }
-  })
+  .views((self) => ({
+    get currentBranch(): IBranch | undefined {
+      return self.branches.find((b: IBranch) => b.id === self.selectedBranchId)
+    },
+    get branchClients(): IClient[] {
+      if (!self.selectedBranchId) return self.clientStore.clients.slice()
+      return self.clientStore.clients.filter((c: IClient) => c.branchId === self.selectedBranchId)
+    },
+    get branchCoaches(): ICoach[] {
+      if (!self.selectedBranchId) return self.coaches.slice()
+      return self.coaches.filter((c: ICoach) => c.branchId === self.selectedBranchId)
+    },
+    get branchLessons(): ILesson[] {
+      if (!self.selectedBranchId) return self.lessons.slice()
+      return self.lessons.filter((l: ILesson) => l.branchId === self.selectedBranchId)
+    },
+  }))
+  .views((self) => ({
+    get sortedBranchLessons(): ILesson[] {
+      return [...self.branchLessons].sort((a: ILesson, b: ILesson) => a.time.localeCompare(b.time))
+    },
+  }))
   .actions((self) => {
-    const s = self as any
+    const closeClientForm = () => {
+      self.clientFormOpen = false
+      self.clientFormData = {}
+    }
+    const closeBranchMenu = () => {
+      self.branchMenuOpen = false
+    }
+    const cancelEditClient = () => {
+      self.editingClient = null
+      closeClientForm()
+    }
+    const closeClientModal = () => {
+      self.selectedClient = null
+    }
+    const cancelEditCoach = () => {
+      self.editingCoach = null
+      self.coachFormName = ''
+      self.coachFormSpecialty = ''
+    }
+    const setScreen = (screen: string) => {
+      if (SCREENS.includes(screen as any)) {
+        self.currentScreen = screen as any
+        self.sidebarOpen = false
+      }
+    }
+    const setBranch = (branchId: string) => {
+      self.selectedBranchId = branchId
+      self.branchMenuOpen = false
+    }
+    const toggleSidebar = () => {
+      self.sidebarOpen = !self.sidebarOpen
+    }
+    const closeSidebar = () => {
+      self.sidebarOpen = false
+    }
+    const toggleBranchMenu = () => {
+      self.branchMenuOpen = !self.branchMenuOpen
+      if (self.branchMenuOpen) self.error = null
+    }
+    const openClientForm = () => {
+      self.clientFormData = {
+        childName: '',
+        parentName: '',
+        phone: '',
+        email: '',
+        birthDate: '',
+      }
+      self.clientFormOpen = true
+    }
+    const setClientFormField = <K extends keyof CreateClientDto>(field: K, value: string) => {
+      self.clientFormData = { ...self.clientFormData, [field]: value }
+    }
+    const selectClient = (client: IClient) => {
+      self.selectedClient = client
+    }
+    const startEditClient = (client: IClient) => {
+      self.editingClient = client
+      self.clientFormData = {
+        childName: client.childName,
+        parentName: client.parentName,
+        phone: client.phone,
+        email: client.email,
+        birthDate: client.birthDate,
+      }
+      self.clientFormOpen = true
+    }
+    const openAttendance = () => {
+      self.attendanceOpen = true
+    }
+    const closeAttendance = () => {
+      self.attendanceOpen = false
+    }
+    const openLogin = () => {
+      self.loginOpen = true
+    }
+    const closeLogin = () => {
+      self.loginOpen = false
+    }
+    const selectCoach = (coach: ICoach) => {
+      self.selectedCoach = coach
+    }
+    const closeCoachModal = () => {
+      self.selectedCoach = null
+    }
+    const startEditCoach = (coach: ICoach) => {
+      self.editingCoach = coach
+      self.coachFormName = coach.name
+      self.coachFormSpecialty = coach.specialty
+    }
+    const setCoachFormName = (value: string) => {
+      self.coachFormName = value
+    }
+    const setCoachFormSpecialty = (value: string) => {
+      self.coachFormSpecialty = value
+    }
+    const setAttachCoachId = (value: string) => {
+      self.attachCoachId = value
+    }
+    const setError = (message: string | null) => {
+      self.error = message
+    }
+    const addLessonToStore = (lessonData: any) => {
+      self.lessons.push(lessonData);
+    }
+    
     return {
-      setScreen(screen: string) {
-        if (SCREENS.includes(screen as any)) {
-          s.currentScreen = screen as any
-          s.sidebarOpen = false
-        }
-      },
-      setBranch(branchId: string) {
-        s.selectedBranchId = branchId
-        s.branchMenuOpen = false
-      },
-      toggleSidebar() {
-        s.sidebarOpen = !s.sidebarOpen
-      },
-      closeSidebar() {
-        s.sidebarOpen = false
-      },
-      toggleBranchMenu() {
-        s.branchMenuOpen = !s.branchMenuOpen
-        if (s.branchMenuOpen) {
-          s.error = null
-        }
-      },
-      closeBranchMenu() {
-        s.branchMenuOpen = false
-      },
-      openClientForm() {
-        s.clientFormData = {
-          childName: '',
-          parentName: '',
-          phone: '',
-          email: '',
-          birthDate: '',
-        }
-        s.clientFormOpen = true
-      },
-      closeClientForm() {
-        s.clientFormOpen = false
-        s.clientFormData = {}
-      },
-      setClientFormField<K extends keyof CreateClientDto>(field: K, value: string) {
-        s.clientFormData = { ...s.clientFormData, [field]: value }
-      },
-      selectClient(client: IClient) {
-        s.selectedClient = client
-      },
-      closeClientModal() {
-        s.selectedClient = null
-      },
-      startEditClient(client: IClient) {
-        s.editingClient = client
-        s.clientFormData = {
-          childName: client.childName,
-          parentName: client.parentName,
-          phone: client.phone,
-          email: client.email,
-          birthDate: client.birthDate,
-        }
-        s.clientFormOpen = true
-      },
-      cancelEditClient() {
-        s.editingClient = null
-        s.closeClientForm()
-      },
-      openAttendance() {
-        s.attendanceOpen = true
-      },
-      closeAttendance() {
-        s.attendanceOpen = false
-      },
-      openLogin() {
-        s.loginOpen = true
-      },
-      closeLogin() {
-        s.loginOpen = false
-      },
-      selectCoach(coach: ICoach) {
-        s.selectedCoach = coach
-      },
-      closeCoachModal() {
-        s.selectedCoach = null
-      },
-      startEditCoach(coach: ICoach) {
-        s.editingCoach = coach
-        s.coachFormName = coach.name
-        s.coachFormSpecialty = coach.specialty
-      },
-      cancelEditCoach() {
-        s.editingCoach = null
-        s.coachFormName = ''
-        s.coachFormSpecialty = ''
-      },
-      setCoachFormName(value: string) {
-        s.coachFormName = value
-      },
-      setCoachFormSpecialty(value: string) {
-        s.coachFormSpecialty = value
-      },
-      setAttachCoachId(value: string) {
-        s.attachCoachId = value
-      },
-      addBranch: flow(function* (name: string, address: string) {
-        try {
-          const newId = Date.now().toString();
-          const response = yield apiClient.createBranch({ id: newId, name, address })
-          
-          let newBranch = response
-          if (!newBranch || !newBranch.id) {
-             newBranch = {
-               id: newId,
-               name,
-               address,
-             }
-          }
-          
-          s.branches.push(newBranch)
-          s.setBranch(newBranch.id)
-          s.branchMenuOpen = false
-        } catch (error) {
-          console.error('Failed to create branch:', error)
-          s.error = 'Ошибка создания филиала'
-        }
-      }),
-      setError(message: string | null) {
-        s.error = message
-      },
+      closeClientForm,
+      closeBranchMenu,
+      cancelEditClient,
+      closeClientModal,
+      cancelEditCoach,
+      setScreen,
+      setBranch,
+      toggleSidebar,
+      closeSidebar,
+      toggleBranchMenu,
+      openClientForm,
+      setClientFormField,
+      selectClient,
+      startEditClient,
+      openAttendance,
+      closeAttendance,
+      openLogin,
+      closeLogin,
+      selectCoach,
+      closeCoachModal,
+      startEditCoach,
+      setCoachFormName,
+      setCoachFormSpecialty,
+      setAttachCoachId,
+      setError,
+      addLessonToStore,
       initialize: flow(function* () {
-        s.isLoading = true
-        s.error = null
+        self.isLoading = true
         try {
-          console.log('Fetching data...')
           const [branches, coaches, lessons] = yield Promise.all([
             apiClient.fetchBranches(),
             apiClient.fetchCoaches(),
             apiClient.fetchLessons(),
           ])
+          console.log('DEBUG INITIALIZE - Fetched:', { 
+            branchesCount: branches.length, 
+            coachesCount: coaches.length, 
+            lessonsCount: lessons.length 
+          });
+
+          yield self.clientStore.loadClients()
           
-          console.log('Data fetched:', { branches, coaches, lessons })
+          self.branches.replace(branches)
+          self.coaches.replace(coaches)
+          self.lessons.replace(lessons)
           
-          yield s.clientStore.loadClients()
+          console.log('DEBUG INITIALIZE - Store state:', { 
+            branches: self.branches.length, 
+            coaches: self.coaches.length, 
+            lessons: self.lessons.length,
+            clients: self.clientStore.clients.length
+          });
           
-          // Ensure IDs are strings
-          const branchesFormatted = Array.isArray(branches) ? branches.map(b => ({ ...b, id: String(b.id) })) : [];
-          const coachesFormatted = Array.isArray(coaches) ? coaches.map(c => ({ ...c, id: String(c.id), branchId: String(c.branchId) })) : [];
-          
-          s.branches.replace(branchesFormatted)
-          s.coaches.replace(coachesFormatted)
-          s.lessons.replace(Array.isArray(lessons) ? lessons : [])
-          
-          if (branchesFormatted.length > 0 && !s.selectedBranchId) {
-            s.selectedBranchId = String(branchesFormatted[0].id)
+          if (!self.selectedBranchId && branches.length > 0) {
+            setBranch(String(branches[0].id))
+            console.log('DEBUG INITIALIZE - Auto-selected branch:', branches[0].id);
           }
-        } catch (error) {
-          console.error('Failed to load data:', error)
-          s.error = 'Failed to load data'
-        } finally {
-          s.isLoading = false
+
+          self.isLoading = false
+        } catch (error: any) {
+          console.error('DEBUG INITIALIZE - Error:', error);
+          self.error = error instanceof ApiError ? error.message : 'Ошибка загрузки данных'
+          self.isLoading = false
         }
       }),
-      createClient: flow(function* () {
-        const data = s.clientFormData
-        if (!data.childName || !data.parentName || !data.phone || !data.email || !data.birthDate) {
-          s.error = 'Заполните все поля'
-          return
-        }
+      addBranch: flow(function* (name: string, address: string) {
         try {
-          s.error = null
-          const branch = s.currentBranch
-          if (!branch) throw new Error('Филиал не выбран')
-          const [day, month, year] = data.birthDate.split('.').map(Number)
-          const today = new Date()
-          let age = today.getFullYear() - year
-          if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) age--
-          const initials = data.childName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
-          const clientData: CreateClientDto = {
-            childName: data.childName!,
-            parentName: data.parentName!,
-            phone: data.phone!,
-            email: data.email!,
-            birthDate: data.birthDate!,
-            age: `${age} лет`,
-            branchId: branch.id,
-            status: 'Активен',
-            initials,
-          }
-          yield s.clientStore.addClient(clientData)
-          s.closeClientForm()
-        } catch (error: any) {
-          s.error = error.message || 'Ошибка создания клиента'
+          const response = yield apiClient.createBranch({ name, address })
+          self.branches.push(response)
+          setBranch(response.id)
+          self.branchMenuOpen = false
+        } catch (error) {
+          self.error = 'Ошибка создания филиала'
+        }
+      }),
+      addClient: flow(function* (clientData: CreateClientDto) {
+        try {
+          const newClient = yield apiClient.createClient(clientData)
+          self.clientStore.clients.push(newClient)
+          closeClientForm()
+        } catch (error) {
+          self.error = error instanceof ApiError ? error.message : 'Ошибка создания клиента'
         }
       }),
       updateClient: flow(function* () {
-        if (!s.editingClient) return
-        const data = s.clientFormData
-        if (!data.childName || !data.parentName || !data.phone || !data.email || !data.birthDate) {
-          s.error = 'Заполните все поля'
-          return
-        }
+        if (!self.editingClient) return
         try {
-          s.error = null
-          const [day, month, year] = data.birthDate.split('.').map(Number)
-          const today = new Date()
-          let age = today.getFullYear() - year
-          if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) age--
-          const initials = data.childName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
-          const updated = yield apiClient.updateClient(s.editingClient.id, {
-            childName: data.childName,
-            parentName: data.parentName,
-            phone: data.phone,
-            email: data.email,
-            birthDate: data.birthDate,
-            age: `${age} лет`,
-            initials,
-          })
-          Object.assign(s.editingClient, updated)
-          s.cancelEditClient()
+          const { subscription, assignedLessonIds, ...dataToUpdate } = self.clientFormData
+          const updated = yield apiClient.updateClient(self.editingClient.id, dataToUpdate as Partial<IClient>)
+          Object.assign(self.editingClient, updated)
+          cancelEditClient()
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка обновления клиента'
-        }
-      }),
-      toggleClientPaid: flow(function* (clientId: string) {
-        const client = s.clientStore.clients.find((c: any) => c.id === clientId)
-        if (!client || !client.subscription) return
-        try {
-          const updated = yield apiClient.updateClient(clientId, {
-            subscription: { ...client.subscription, paid: !client.subscription.paid } as any,
-          })
-          if (client.subscription) {
-            client.subscription.paid = updated.subscription?.paid ?? !client.subscription.paid
-          }
-        } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка обновления оплаты'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка обновления клиента'
         }
       }),
       deleteClient: flow(function* (clientId: string) {
         try {
           yield apiClient.deleteClient(clientId)
-          const client = s.clientStore.clients.find((c: any) => c.id === clientId)
-          if (client) s.clientStore.clients.remove(client)
-          s.closeClientModal()
+          const client = self.clientStore.clients.find((c: IClient) => c.id === clientId)
+          if (client) self.clientStore.clients.remove(client)
+          closeClientModal()
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка удаления клиента'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления клиента'
         }
       }),
       createCoach: flow(function* () {
-        if (!s.coachFormName.trim() || !s.coachFormSpecialty.trim()) {
-          s.error = 'Заполните все поля'
-          return
-        }
-        const branch = s.currentBranch
-        if (!branch) throw new Error('Филиал не выбран')
+        if (!self.coachFormName.trim() || !self.coachFormSpecialty.trim()) return
+        const branch = self.currentBranch
+        if (!branch) return
         try {
-          s.error = null
-          const newId = Date.now().toString()
-          const initials = s.coachFormName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
           const coach = yield apiClient.createCoach({
-            id: newId,
-            name: s.coachFormName.trim(),
-            specialty: s.coachFormSpecialty.trim(),
-            initials,
+            name: self.coachFormName.trim(),
+            specialty: self.coachFormSpecialty.trim(),
             branchId: branch.id,
           })
-          
-          let coachWithId = coach
-          if (!coachWithId || !coachWithId.id) {
-            coachWithId = {
-              id: newId,
-              name: s.coachFormName.trim(),
-              specialty: s.coachFormSpecialty.trim(),
-              initials,
-              branchId: branch.id,
-            }
-          }
-          
-          s.coaches.push(coachWithId)
-          s.coachFormName = ''
-          s.coachFormSpecialty = ''
+          self.coaches.push(coach)
+          self.coachFormName = ''
+          self.coachFormSpecialty = ''
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
         }
       }),
       updateCoach: flow(function* () {
-        if (!s.editingCoach) return
-        if (!s.coachFormName.trim() || !s.coachFormSpecialty.trim()) {
-          s.error = 'Заполните все поля'
-          return
-        }
+        if (!self.editingCoach) return
         try {
-          s.error = null
-          const initials = s.coachFormName.split(' ').map((x: any) => x[0]).join('').slice(0, 2).toUpperCase()
-          const updated = yield apiClient.updateCoach(s.editingCoach.id, {
-            name: s.coachFormName.trim(),
-            specialty: s.coachFormSpecialty.trim(),
-            initials,
+          const updated = yield apiClient.updateCoach(self.editingCoach.id, {
+            name: self.coachFormName.trim(),
+            specialty: self.coachFormSpecialty.trim(),
           })
-          Object.assign(s.editingCoach, updated)
-          s.cancelEditCoach()
+          Object.assign(self.editingCoach, updated)
+          cancelEditCoach()
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка обновления тренера'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка обновления тренера'
         }
       }),
       deleteCoach: flow(function* (coachId: string) {
         try {
           yield apiClient.deleteCoach(coachId)
-          const coach = s.coaches.find((c: any) => c.id === coachId)
-          if (coach) s.coaches.remove(coach)
-          s.closeCoachModal()
+          const coach = self.coaches.find((c: ICoach) => c.id === coachId)
+          if (coach) self.coaches.remove(coach)
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
         }
       }),
       attachCoach: flow(function* () {
-        if (!s.attachCoachId) return
-        const branch = s.currentBranch
+        if (!self.attachCoachId) return
+        const branch = self.currentBranch
         if (!branch) return
         try {
-          s.error = null
-          const coach = s.coaches.find((c: any) => c.id === s.attachCoachId)
-          if (!coach) throw new Error('Тренер не найден')
-          const existing = s.coaches.find((c: any) => c.name === coach.name && c.branchId === branch.id)
-          if (existing) {
-            s.error = 'Тренер уже прикреплён к этому филиалу'
-            return
-          }
+          const coach = self.coaches.find((c: ICoach) => c.id === self.attachCoachId)
+          if (!coach) return
           const attached = yield apiClient.createCoach({
             name: coach.name,
             specialty: coach.specialty,
             initials: coach.initials,
             branchId: branch.id,
           })
-          s.coaches.push(attached)
-          s.attachCoachId = ''
+          self.coaches.push(attached)
+          self.attachCoachId = ''
         } catch (error) {
-          s.error = error instanceof ApiError ? error.message : 'Ошибка прикрепления тренера'
+          self.error = error instanceof ApiError ? error.message : 'Ошибка прикрепления тренера'
         }
       }),
-      addLessonToStore: (lessonData: any) => {
-        s.lessons.push(lessonData);
-      },
+      createLesson: flow(function* (lessonData: any) {
+        try {
+          const newLesson = yield apiClient.createLesson(lessonData)
+          self.lessons.push(newLesson)
+          return newLesson
+        } catch (error: any) {
+          self.error = error instanceof ApiError ? error.message : 'Ошибка создания урока'
+          throw error
+        }
+      }),
     }
   })
 
@@ -449,6 +381,7 @@ export function getStore(): IRootStore {
       isLoading: true,
       error: null,
     })
+    storeInstance.authStore.init()
   }
   return storeInstance
 }

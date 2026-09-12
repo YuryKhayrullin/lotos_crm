@@ -28,7 +28,7 @@ export const AttendanceModal = observer(({
   const unassignedClients = store.branchClients.filter(c => !c.isAssignedTo(lesson.id))
 
   const handleMark = async (clientId: string, status: 'attended' | 'missed') => {
-    if (status === 'attended') await store.clientStore.markAttendance(clientId, lesson.id, 'attended')
+    if (status === 'attended') await store.clientStore.markAttendance(String(clientId), String(lesson.id), 'attended')
     setMarkedClients(prev => ({ ...prev, [clientId]: status }))
   }
 
@@ -74,7 +74,7 @@ export const AttendanceModal = observer(({
 
                     <div className="flex items-center gap-2">
                       <Button 
-                        onClick={() => handleMark(client.id, 'attended')}
+                        onClick={() => handleMark(String(client.id), 'attended')}
                         disabled={isDisabled || isAttended || store.clientStore.isLoading}
                         size="sm"
                         variant={isAttended ? "default" : "outline"}
@@ -83,7 +83,7 @@ export const AttendanceModal = observer(({
                         <Check className="size-4 mr-1" /> {isAttended ? "Был" : "Пришел"}
                       </Button>
                       <Button 
-                        onClick={() => handleMark(client.id, 'missed')}
+                        onClick={() => handleMark(String(client.id), 'missed')}
                         disabled={isMissed || store.clientStore.isLoading}
                         size="sm"
                         variant={isMissed ? "default" : "outline"}
@@ -109,7 +109,7 @@ export const AttendanceModal = observer(({
                       <p className="text-xs text-slate-500">Остаток: {client.remainingLessons} зан.</p>
                     </div>
                     <Button 
-                      onClick={() => store.clientStore.toggleClientLesson(client.id, lesson.id)}
+                      onClick={() => store.clientStore.toggleClientLesson(String(client.id), String(lesson.id))}
                       size="sm" 
                       variant="ghost" 
                       className="text-cyan-600 font-semibold"

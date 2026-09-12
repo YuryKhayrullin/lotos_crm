@@ -1,9 +1,11 @@
 import { types, Instance } from 'mobx-state-tree'
 
+export type UserRole = 'admin' | 'coach'
+
 export const AuthModel = types.model('Auth', {
   id: types.union(types.string, types.number),
   username: types.string,
-  role: types.maybe(types.union(types.string, types.number)),
+  role: types.optional(types.enumeration<UserRole>('UserRole', ['admin', 'coach']), 'coach'),
   branchId: types.maybeNull(types.union(types.string, types.number)),
 })
 

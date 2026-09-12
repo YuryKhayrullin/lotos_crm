@@ -11,7 +11,7 @@ export const AdminAddLessons = observer(({ clientId }: { clientId: string }) => 
   const [count, setCount] = useState<number>(8)
 
   const handleAdd = async () => {
-    await store.clientStore.addLessons(clientId, count)
+    await store.clientStore.addLessons(String(clientId), count)
   }
 
   return (

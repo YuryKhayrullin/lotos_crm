@@ -4,15 +4,15 @@ import { SubscriptionModel, ISubscription, ISubscriptionSnapshot } from './Subsc
 export const ClientModel = types
   .model('Client', {
     id: types.identifier,
-    childName: types.string,
-    parentName: types.string,
-    phone: types.string,
-    email: types.string,
-    birthDate: types.string, // DD.MM.YYYY
-    age: types.string, // e.g. "8 лет"
-    branchId: types.string,
-    status: types.enumeration(['Активен', 'Пауза', 'Архив']),
-    initials: types.string,
+    childName: types.optional(types.string, ''),
+    parentName: types.optional(types.string, ''),
+    phone: types.optional(types.string, ''),
+    email: types.optional(types.string, ''),
+    birthDate: types.optional(types.string, ''), 
+    age: types.optional(types.string, '0 лет'), 
+    branchId: types.optional(types.string, ''),
+    status: types.optional(types.enumeration(['Активен', 'Пауза', 'Архив']), 'Активен'),
+    initials: types.optional(types.string, ''),
     subscription: types.maybeNull(SubscriptionModel),
     assignedLessonId: types.maybeNull(types.string),
     assignedLessonIds: types.optional(types.array(types.string), []),
@@ -25,10 +25,10 @@ export const ClientModel = types
       return !!self.subscription
     },
     get remainingLessons(): number {
-      return self.subscription?.remainingLessons ?? 0
+      return Number(self.subscription?.remainingLessons ?? 0)
     },
     get totalLessons(): number {
-      return self.subscription?.totalLessons ?? 0
+      return Number(self.subscription?.totalLessons ?? 0)
     },
     get subscriptionPaid(): boolean {
       return self.subscription?.paid ?? false

@@ -10,7 +10,16 @@ export const AuthStore = types
     token: types.maybeNull(types.string),
   })
   .actions(self => ({
-    register: flow(function* (username, password) {
+    init() {
+      if (typeof window !== 'undefined') {
+        const token = localStorage.getItem('crm_token');
+        if (token) {
+          self.token = token;
+          self.isAuthenticated = true;
+        }
+      }
+    },
+    register: flow(function* (username: string, password: string) {
       self.isLoading = true
       try {
         const response = yield apiClient.register(username, password)
@@ -26,17 +35,17 @@ export const AuthStore = types
         self.isLoading = false
       }
     }),
-    login: flow(function* (username, password) {
+    login: flow(function* (username: string, password: string) {
       self.isLoading = true
       try {
-        console.log('Sending login request:', { username })
         const response = yield apiClient.login(username, password)
-        console.log('Login response:', response)
-        // Гарантируем наличие role и branchId перед созданием модели
+        // Нормализация роли: 1 -> admin, 2 -> coach
+        const normalizedRole = String(response.user.role) === '1' ? 'admin' : 'coach';
+
         const user = {
             ...response.user,
-            role: response.user.role || '2',
-            branchId: response.user.branchId || null
+            role: normalizedRole,
+            branchId: response.user.branchId || String(response.user.branchId) || null
         };
         self.user = user
         self.token = response.token
@@ -55,6 +64,14 @@ export const AuthStore = types
       self.token = null
       localStorage.removeItem('crm_token')
     }
-  }))
+    }))
+    .views(self => ({
+    get isAdmin() {
+      return self.user?.role === 'admin'
+    },
+    get isCoach() {
+      return self.user?.role === 'coach'
+    }
+    }))
 
 export type IAuthStore = Instance<typeof AuthStore>

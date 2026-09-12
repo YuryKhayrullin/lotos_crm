@@ -1,6 +1,6 @@
 import { IBranch, ICoach, IClient, ILesson, CreateClientDto } from '@/store/models'
 
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbwMQwvQvPuujUIeP5KsjtQ6koqdf5L-wL7eAbeWenAy50IDpgRYNJTwMC5I4aSzwzVAeQ/exec'
+const GAS_URL = '/api/crm'
 
 export class ApiError extends Error {
   constructor(public status: number | string, public data: any) {
@@ -15,6 +15,18 @@ const fileToBase64 = (file: File): Promise<string> => {
     reader.onload = () => resolve((reader.result as string).split(',')[1]);
     reader.onerror = error => reject(error);
   });
+};
+
+const getHeaders = () => {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('crm_token') : null;
+  console.log('DEBUG getHeaders - token found:', !!token);
+  const headers: HeadersInit = { 'Content-Type': 'text/plain;charset=utf-8' };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else {
+    console.warn('DEBUG getHeaders - No token found in localStorage');
+  }
+  return headers;
 };
 
 class ApiClient {
@@ -40,15 +52,20 @@ class ApiClient {
   }
 
   async fetchClients(): Promise<IClient[]> {
-    const response = await fetch(GAS_URL + '?sheet=Клиенты')
+    const response = await fetch(GAS_URL + '?sheet=Клиенты', { headers: getHeaders() })
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch clients')
-    return response.json()
+    const data = await response.json();
+    return (Array.isArray(data) ? data : []).map((c: any) => ({ 
+      ...c, 
+      id: String(c.id),
+      branchId: c.branchId ? String(c.branchId) : ''
+    }));
   }
 
   async createClient(clientData: CreateClientDto): Promise<IClient> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...clientData, action: 'createClient' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to create client')
@@ -58,7 +75,7 @@ class ApiClient {
   async updateClient(id: string, data: Partial<IClient>): Promise<IClient> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...data, id, action: 'updateClient' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to update client')
@@ -68,44 +85,60 @@ class ApiClient {
   async deleteClient(id: string): Promise<void> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ id, action: 'deleteClient' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to delete client')
   }
 
   async fetchBranches(): Promise<IBranch[]> {
-    const response = await fetch(GAS_URL + '?sheet=Филиалы')
+    const response = await fetch(GAS_URL + '?sheet=Филиалы', { headers: getHeaders() })
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch branches')
-    return response.json()
+    
+    const data = await response.json();
+    
+    return (Array.isArray(data) ? data : []).map((b: any) => ({ ...b, id: String(b.id) }));
   }
 
   async fetchCoaches(): Promise<ICoach[]> {
-    const response = await fetch(GAS_URL + '?sheet=Тренеры')
+    const response = await fetch(GAS_URL + '?sheet=Тренеры', { headers: getHeaders() })
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch coaches')
-    return response.json()
+    const data = await response.json();
+    return (Array.isArray(data) ? data : []).map((c: any) => ({ 
+      ...c, 
+      id: String(c.id),
+      branchId: c.branchId ? String(c.branchId) : ''
+    }));
   }
 
   async fetchLessons(): Promise<ILesson[]> {
-    const response = await fetch(GAS_URL + '?sheet=Расписание')
+    const response = await fetch(GAS_URL + '?sheet=Расписание', { headers: getHeaders() })
     if (!response.ok) throw new ApiError(response.status, 'Failed to fetch lessons')
-    return response.json()
+    const data = await response.json();
+    return (Array.isArray(data) ? data : []).map((l: any) => ({ 
+      ...l, 
+      id: String(l.id),
+      branchId: l.branchId ? String(l.branchId) : ''
+    }));
   }
+
+
 
   async createLesson(lessonData: any): Promise<ILesson> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...lessonData, action: 'createLesson' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to create lesson')
     return response.json()
   }
 
+
   async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...branchData, action: 'createBranch' }),
     })
     
@@ -116,7 +149,7 @@ class ApiClient {
   async createCoach(coachData: any): Promise<ICoach> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...coachData, action: 'createCoach' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to create coach')
@@ -126,7 +159,7 @@ class ApiClient {
   async updateCoach(id: string, coachData: any): Promise<ICoach> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ ...coachData, id, action: 'updateCoach' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to update coach')
@@ -136,7 +169,7 @@ class ApiClient {
   async deleteCoach(id: string): Promise<void> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      headers: getHeaders(),
       body: JSON.stringify({ id, action: 'deleteCoach' }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to delete coach')
@@ -145,7 +178,7 @@ class ApiClient {
   async updateClientAPI(id: string, data: any): Promise<any> {
     const response = await fetch(GAS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getHeaders(),
       body: JSON.stringify({ action: 'updateClient', id, ...data }),
     })
     if (!response.ok) throw new ApiError(response.status, 'Failed to update client via API')
@@ -164,7 +197,7 @@ class ApiClient {
         mimeType: file.type,
         lessonsCount
       }),
-      headers: { "Content-Type": "application/json" }
+      headers: getHeaders()
     });
     return response.json()
   }
@@ -178,7 +211,7 @@ class ApiClient {
         lessonId,
         date
       }),
-      headers: { "Content-Type": "application/json" }
+      headers: getHeaders()
     });
     return response.json()
   }
@@ -193,7 +226,7 @@ class ApiClient {
         status,
         date
       }),
-      headers: { "Content-Type": "application/json" }
+      headers: getHeaders()
     });
     return response.json()
   }

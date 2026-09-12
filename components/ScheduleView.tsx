@@ -12,24 +12,35 @@ import { CalendarDays, Plus } from 'lucide-react'
 
 const store = getStore()
 
-const DAYS = [
-  { key: 'Пн', label: 'Пн 14' },
-  { key: 'Вт', label: 'Вт 15' },
-  { key: 'Ср', label: 'Ср 16' },
-  { key: 'Чт', label: 'Чт 17' },
-  { key: 'Пт', label: 'Пт 18' },
-  { key: 'Сб', label: 'Сб 19' },
-  { key: 'Вс', label: 'Вс 20' },
-]
+const getStartOfWeek = () => {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const start = new Date(d.setDate(diff));
+  start.setHours(0, 0, 0, 0);
+  return start;
+};
 
 export const ScheduleView = observer(() => {
-  const [selectedDay, setSelectedDay] = useState('Пн')
+  const startOfWeek = getStartOfWeek();
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 6);
+
+  const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
+    const d = new Date(startOfWeek);
+    d.setDate(startOfWeek.getDate() + i);
+    return { key: label, label: `${label} ${d.getDate()}` };
+  });
+
+  const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1].key)
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
 
   const lessons = store.sortedBranchLessons.filter(l => viewMode === 'неделя' || l.dayOfWeek === selectedDay)
 
   const branch = store.currentBranch
+
+  const weekRange = `${startOfWeek.getDate()} ${startOfWeek.toLocaleString('ru-RU', { month: 'short' })} – ${endOfWeek.getDate()} ${endOfWeek.toLocaleString('ru-RU', { month: 'short' })} ${endOfWeek.getFullYear()}`;
 
   return (
     <div className="flex flex-col gap-6">
@@ -39,7 +50,7 @@ export const ScheduleView = observer(() => {
             Расписание · {branch ? branch.name : 'Филиал'}
           </h2>
           <p className="text-sm text-slate-500 mt-1">
-            Неделя 14–20 октября 2024 · отдельное расписание филиала
+            Неделя {weekRange} · отдельное расписание филиала
           </p>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
@@ -101,7 +112,7 @@ export const ScheduleView = observer(() => {
               <Card 
                 key={lesson.id} 
                 className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
-                onClick={() => setSelectedLesson(lesson)}
+                onClick={() => setSelectedLesson(lesson as any)}
               >
                 <CardContent className="p-5 flex items-center justify-between">
                   <div className="flex items-center gap-4">

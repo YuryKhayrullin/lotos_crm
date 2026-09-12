@@ -8,6 +8,11 @@ __v0_jsx-dev-runtime.ts
 
 # Environment variables
 .env*.local
+# Build cache and logs
+tsconfig.tsbuildinfo
+typescript_errors.log
+.env.local
+
 
 # Common ignores
 node_modules

@@ -105,7 +105,7 @@ export const ClientStore = types
         if (result.success) {
           client.updateSubscription(
             result.remainingLessons,
-            lessonsCount,
+            result.totalLessons || lessonsCount,
             result.receiptUrl,
             result.status // 'Активен' or 'Пауза'
           );
