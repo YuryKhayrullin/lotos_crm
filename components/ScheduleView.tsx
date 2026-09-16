@@ -8,21 +8,24 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { AttendanceModal } from './AttendanceModal'
 import { ILesson } from '@/store/models'
-import { CalendarDays, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 const store = getStore()
 
-const getStartOfWeek = () => {
+// Обновленная функция с учетом смещения
+const getStartOfWeek = (offset: number) => {
   const d = new Date();
   const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1) + (offset * 7);
   const start = new Date(d.setDate(diff));
   start.setHours(0, 0, 0, 0);
   return start;
 };
 
 export const ScheduleView = observer(() => {
-  const startOfWeek = getStartOfWeek();
+  const [weekOffset, setWeekOffset] = useState(0)
+  
+  const startOfWeek = getStartOfWeek(weekOffset);
   const endOfWeek = new Date(startOfWeek);
   endOfWeek.setDate(startOfWeek.getDate() + 6);
 
@@ -32,7 +35,7 @@ export const ScheduleView = observer(() => {
     return { key: label, label: `${label} ${d.getDate()}` };
   });
 
-  const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1].key)
+  const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн')
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
 
@@ -49,9 +52,17 @@ export const ScheduleView = observer(() => {
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
             Расписание · {branch ? branch.name : 'Филиал'}
           </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            Неделя {weekRange} · отдельное расписание филиала
-          </p>
+          <div className="flex items-center gap-2 mt-2">
+            <Button variant="ghost" size="sm" onClick={() => setWeekOffset(prev => prev - 1)}>
+                <ChevronLeft className="size-4" />
+            </Button>
+            <p className="text-sm text-slate-500">
+                Неделя {weekRange}
+            </p>
+            <Button variant="ghost" size="sm" onClick={() => setWeekOffset(prev => prev + 1)}>
+                <ChevronRight className="size-4" />
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
           <Button 
@@ -118,7 +129,14 @@ export const ScheduleView = observer(() => {
                   <div className="flex items-center gap-4">
                     <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
                     <div>
-                      <p className="text-lg font-bold text-cyan-950">{lesson.time}</p>
+                      <p className="text-lg font-bold text-cyan-950">
+                        {(() => {
+                          const date = new Date(lesson.time);
+                          return !isNaN(date.getTime()) && lesson.time.includes('T')
+                            ? date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+                            : lesson.time;
+                        })()}
+                      </p>
                       <p className="text-sm font-semibold text-slate-800 mt-0.5">{lesson.title}</p>
                       <p className="text-xs text-slate-500 mt-1">{lesson.coachName} · {lesson.pool}</p>
                     </div>
@@ -141,4 +159,3 @@ export const ScheduleView = observer(() => {
     </div>
   )
 })
-

@@ -7,6 +7,7 @@ export const AuthStore = types
     user: types.maybeNull(AuthModel),
     isAuthenticated: types.optional(types.boolean, false),
     isLoading: types.optional(types.boolean, false),
+    registrationSuccess: types.optional(types.boolean, false),
     token: types.maybeNull(types.string),
   })
   .actions(self => ({
@@ -19,12 +20,16 @@ export const AuthStore = types
         }
       }
     },
-    register: flow(function* (username: string, password: string) {
+    setRegistrationSuccess(value: boolean) {
+      self.registrationSuccess = value
+    },
+    register: flow(function* (username: string, password: string, branchId: string) {
       self.isLoading = true
+      self.registrationSuccess = false
       try {
-        const response = yield apiClient.register(username, password)
+        const response = yield apiClient.register({ username, password, branchId })
         if (response.status === 'success') {
-           yield (self as any).login(username, password)
+           self.registrationSuccess = true
         } else {
            throw new Error(response.message || 'Ошибка регистрации')
         }

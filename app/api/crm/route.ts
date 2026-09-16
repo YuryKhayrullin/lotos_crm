@@ -1,113 +1,43 @@
-import { NextResponse } from 'next/server';
-import { SignJWT, jwtVerify } from 'jose';
-import crypto from 'crypto';
+import { NextRequest, NextResponse } from 'next/server';
 
-const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || 'fallback-secret-key-change-me');
+const GAS_WEBAPP_URL = process.env.GAS_WEBAPP_URL;
+const GAS_API_SECRET = process.env.GAS_API_SECRET;
 
-function sha256(password: string): string {
-  return crypto.createHash('sha256').update(password).digest('hex');
-}
-
-async function verifyToken(request: Request) {
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    console.log('No auth header or invalid format');
-    return null;
-  }
-  
-  const token = authHeader.split(' ')[1];
+export async function POST(req: NextRequest) {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    return payload;
-  } catch (e: any) {
-    console.error('JWT verification error details:', e.message, e.code);
-    return null;
-  }
-}
+    const body = await req.json();
+    const { action, payload } = body;
 
-export async function GET(request: Request) {
-  try {
-    const user = await verifyToken(request);
-    if (!user) return NextResponse.json({ status: 'error', message: 'Unauthorized' }, { status: 401 });
+    console.log('Proxying POST request to GAS:', { action });
 
-    const { searchParams } = new URL(request.url);
-    const sheet = searchParams.get('sheet');
-    
-    const backendUrl = process.env.GAS_BACKEND_URL;
-    if (!backendUrl) return NextResponse.json({ status: 'error', message: 'Backend URL not configured' }, { status: 500 });
-    
-    const targetUrl = new URL(backendUrl);
-    if (sheet) targetUrl.searchParams.set('sheet', sheet);
-    
-    const response = await fetch(targetUrl.toString(), { method: 'GET' });
-    if (!response.ok) return NextResponse.json({ status: 'error', message: 'Backend request failed' }, { status: response.status });
-    
-    const data = await response.json();
-    return NextResponse.json(data);
-  } catch (error: any) {
-    return NextResponse.json({ status: 'error', message: error.message }, { status: 500 });
-  }
-}
-
-export async function POST(request: Request) {
-  try {
-    const backendUrl = process.env.GAS_BACKEND_URL;
-    if (!backendUrl) return NextResponse.json({ status: 'error', message: 'Backend URL not configured' }, { status: 500 });
-    
-    const body = await request.json();
-    const { action, username, password, ...rest } = body;
-
-    // Handle Auth Actions
-    if (action === 'register') {
-      const hashedPassword = sha256(password);
-      const response = await fetch(backendUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action, username, password: hashedPassword, ...rest }),
-      });
-      return NextResponse.json(await response.json());
+    if (!GAS_WEBAPP_URL || GAS_WEBAPP_URL === 'insert_gas_url_here' || !GAS_API_SECRET || GAS_API_SECRET === 'insert_secret_key_here') {
+      console.error('API configuration missing or placeholders found');
+      return NextResponse.json({ status: 'error', message: 'API configuration missing' }, { status: 500 });
     }
 
-    if (action === 'login') {
-      // Отправляем запрос на GAS с правильным action: 'login' и хэшированным паролем
-      const response = await fetch(backendUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: 'login', username, password: sha256(password) }),
-      });
-
-      const data = await response.json();
-
-      // Если GAS вернул ошибку или статус не success
-      if (!response.ok || data.status !== 'success') {
-        return NextResponse.json({ status: 'error', message: 'Invalid credentials' }, { status: 401 });
-      }
-
-      // GAS успешно подтвердил данные пользователя (data.user)
-      const user = data.user;
-
-      // 3. Создаем JWT токен
-      const token = await new SignJWT({ id: user.id, username, role: user.role })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setIssuedAt()
-        .setExpirationTime('24h')
-        .sign(JWT_SECRET);
-
-      return NextResponse.json({ user, token });
-    }
-
-    // Proxy other requests
-    const user = await verifyToken(request);
-    if (!user) return NextResponse.json({ status: 'error', message: 'Unauthorized' }, { status: 401 });
-
-    const response = await fetch(backendUrl, {
+    const response = await fetch(GAS_WEBAPP_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        apiKey: GAS_API_SECRET, 
+        action,
+        payload 
+      }),
     });
-    
-    return NextResponse.json(await response.json());
-  } catch (error: any) {
-    return NextResponse.json({ status: 'error', message: error.message }, { status: 500 });
+
+    // Log the raw response text to debug
+    const responseText = await response.text();
+    console.log('GAS raw response (first 200 chars):', responseText.substring(0, 200));
+
+    try {
+      const data = JSON.parse(responseText);
+      return NextResponse.json(data);
+    } catch (parseError) {
+      console.error('Failed to parse GAS response as JSON. Raw response:', responseText);
+      return NextResponse.json({ status: 'error', message: 'Invalid JSON from GAS' }, { status: 502 });
+    }
+  } catch (error) {
+    console.error('BFF Proxy error:', error);
+    return NextResponse.json({ status: 'error', message: 'Proxy internal error' }, { status: 500 });
   }
 }

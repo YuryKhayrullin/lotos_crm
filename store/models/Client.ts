@@ -31,7 +31,7 @@ export const ClientModel = types
       return Number(self.subscription?.totalLessons ?? 0)
     },
     get subscriptionPaid(): boolean {
-      return self.subscription?.paid ?? false
+      return !!self.subscription?.paid
     },
     isAssignedTo(lessonId: string): boolean {
       return self.assignedLessonIds.includes(lessonId) || self.assignedLessonId === lessonId

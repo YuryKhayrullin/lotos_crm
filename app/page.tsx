@@ -1,97 +1,4 @@
-"use client"
-
-import { observer } from 'mobx-react-lite'
-import { useState } from 'react'
-import { getStore } from '@/store/RootStore'
-import { LayoutDashboard, CalendarDays, UsersRound, UserRound, CreditCard, CircleDollarSign, Menu } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ClientsView } from '@/components/ClientsView'
-import { ScheduleView } from '@/components/ScheduleView'
-import { CoachesView } from '@/components/CoachesView'
-
-const store = getStore()
-
-const Dashboard = observer(() => {
- const getStartOfWeek = () => {
- const d = new Date();
- const day = d.getDay();
- const diff = d.getDate() - day + (day === 0 ? -6 : 1);
- const start = new Date(d.setDate(diff));
- start.setHours(0, 0, 0, 0);
- return start;
- };
-
- const startOfWeek = getStartOfWeek();
- const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
- const d = new Date(startOfWeek);
- d.setDate(startOfWeek.getDate() + i);
- return { key: label, label: label };
- });
-
- const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1].key)
- const branchLessons = store.sortedBranchLessons.filter(l => l.dayOfWeek === selectedDay)
-
- const stats = [
- { label: 'Клиенты', value: store.branchClients.length, color: 'text-cyan-600' },
- { label: 'Занятий сегодня', value: store.branchLessons.length, color: 'text-pink-500' },
- { label: 'Тренеры', value: store.branchCoaches.length, color: 'text-emerald-500' },
- { label: 'Выручка (мес)', value: '—', color: 'text-amber-500' },
- ]
-
- return (
- <div className='flex flex-col gap-8'>
- <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>
- {stats.map((stat, i) => (
- <Card key={i} className='rounded-2xl border-pink-50 shadow-sm'>
- <CardContent className='p-6'>
- <p className='text-sm font-medium text-slate-500'>{stat.label}</p>
- <p className="text-3xl font-extrabold mt-2">{stat.value}</p>
- </CardContent>
- </Card>
- ))}
- </div>
-
- <div className='grid grid-cols-1 lg:grid-cols-2 gap-8'>
- <Card className='rounded-2xl border-slate-100 shadow-sm'>
- <CardHeader className='p-6 border-b border-slate-50'>
- <CardTitle className='text-lg font-bold text-slate-900'>Расписание</CardTitle>
- </CardHeader>
- <CardContent className='p-0'>
- <div className='flex items-center gap-2 overflow-x-auto p-4 border-b border-slate-50'>
- {DAYS.map(d => (
- <button
- key={d.key}
- onClick={() => setSelectedDay(d.key)}
- className="px-3 py-1.5 rounded-xl font-medium text-xs transition-all border"
- >
- {d.label}
- </button>
- ))}
- </div>
-
- {branchLessons.length === 0 ? (
- <p className='p-6 text-sm text-slate-500'>Нет занятий на выбранный день</p>
- ) : (
- <div className='divide-y divide-slate-50'>
- {branchLessons.map(lesson => (
- <div key={lesson.id} className='p-4 flex items-center justify-between hover:bg-slate-50'>
- <div>
- <p className='font-semibold text-slate-900'>{lesson.title}</p>
- <p className='text-sm text-slate-500'>{lesson.coachName}</p>
- </div>
- <Badge variant='secondary' className='bg-cyan-50 text-cyan-700'>{lesson.time}</Badge>
- </div>
- ))}
- </div>
- )}
- </CardContent>
- </Card>
- </div>
- </div>
- )
-})
-
+'use client'
 'use client'
 
 import { observer } from 'mobx-react-lite'
@@ -113,17 +20,20 @@ const store = getStore()
 
 const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) => {
   const stats = [
-    { label: 'Клиенты', value: store.branchClients.length, color: 'text-cyan-600' },
-    { label: 'Занятий сегодня', value: store.branchLessons.length, color: 'text-pink-500' },
-    { label: 'Тренеры', value: store.branchCoaches.length, color: 'text-emerald-500' },
-    { label: 'Выручка (мес)', value: '—', color: 'text-amber-500' },
+    { label: 'Клиенты', value: store.branchClients.length, color: 'text-cyan-600', screen: 'Клиенты и дети' },
+    { label: 'Занятий сегодня', value: store.branchLessons.length, color: 'text-pink-500', screen: 'Расписание' },
+    { label: 'Тренеры', value: store.branchCoaches.length, color: 'text-emerald-500', screen: 'Тренеры' },
   ]
 
   return (
     <div className="flex flex-col gap-8">
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {stats.map((stat, i) => (
-          <Card key={i} className="rounded-2xl border-pink-50 shadow-sm">
+          <Card 
+            key={i} 
+            className="rounded-2xl border-pink-50 shadow-sm cursor-pointer hover:shadow-md transition-shadow"
+            onClick={() => setScreen(stat.screen)}
+          >
             <CardContent className="p-6">
               <p className="text-sm font-medium text-slate-500">{stat.label}</p>
               <p className={`text-3xl font-extrabold mt-2 ${stat.color}`}>{stat.value}</p>

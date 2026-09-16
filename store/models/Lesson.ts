@@ -6,7 +6,7 @@ export const LessonModel = types.model('Lesson', {
   dayOfWeek: types.optional(types.string, 'Пн'),
   time: types.string,
   title: types.string,
-  coachName: types.string,
+  coachName: types.optional(types.string, ''),
   pool: types.optional(types.string, ''),
   duration: types.optional(types.string, '1 час'),
   maxCapacity: types.optional(types.union(types.number, types.string), 10),

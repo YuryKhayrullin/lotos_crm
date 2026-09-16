@@ -10,16 +10,29 @@ export const RegisterForm = observer(({ onSwitchToLogin }: { onSwitchToLogin: ()
   const store = useStore()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [branchId, setBranchId] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   const handleRegister = async () => {
-    // Реализуем вызов регистрации через AuthStore (добавим метод позже)
-    await store.authStore.register(username, password)
+    setError(null)
+    try {
+      await store.authStore.register(username, password, branchId)
+      if (store.authStore.registrationSuccess) {
+        alert('Регистрация успешна. Ожидайте подтверждения администратором')
+        onSwitchToLogin()
+        store.authStore.setRegistrationSuccess(false)
+      }
+    } catch (e: any) {
+      setError(e.message)
+    }
   }
 
   return (
     <div className="grid gap-4">
+      {error && <p className="text-red-500 text-sm">{error}</p>}
       <Input placeholder="Логин" value={username} onChange={e => setUsername(e.target.value)} />
       <Input type="password" placeholder="Пароль" value={password} onChange={e => setPassword(e.target.value)} />
+      <Input placeholder="ID филиала" value={branchId} onChange={e => setBranchId(e.target.value)} />
       <Button onClick={handleRegister} disabled={store.authStore.isLoading}>
         {store.authStore.isLoading ? 'Регистрация...' : 'Зарегистрироваться'}
       </Button>

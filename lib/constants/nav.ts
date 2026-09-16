@@ -1,4 +1,9 @@
-import { LayoutDashboard, CalendarDays, UsersRound, UserRound, CreditCard, CircleDollarSign } from 'lucide-react'
+import { LayoutDashboard, CalendarDays, UsersRound, UserRound, CreditCard, CircleDollarSign, LucideIcon } from 'lucide-react'
+
+export interface NavItem {
+  label: string;
+  icon: LucideIcon;
+}
 
 export const NAV_ITEMS = [
   { name: 'Дашборд', icon: LayoutDashboard, screen: 'Дашборд' },
@@ -8,3 +13,9 @@ export const NAV_ITEMS = [
   { name: 'Абонементы', icon: CreditCard, screen: 'Абонементы' },
   { name: 'Финансы', icon: CircleDollarSign, screen: 'Финансы' },
 ]
+
+export const nav: NavItem[] = NAV_ITEMS.map((item) => ({
+  label: item.screen,
+  icon: item.icon,
+}))
+
