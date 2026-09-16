@@ -198,9 +198,9 @@ const Page = observer(() => {
                   {store.branches.map(branch => (
                     <button 
                       key={branch.id} 
-                      onClick={() => store.setBranch(branch.id)}
+                      onClick={() => store.setBranch(String(branch.id))}
                       className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
-                        store.selectedBranchId === branch.id 
+                        String(store.selectedBranchId) === String(branch.id) 
                           ? 'border-cyan-400 bg-cyan-50 text-cyan-900 font-semibold shadow-sm' 
                           : 'border-slate-100 hover:border-cyan-200 hover:bg-slate-50 text-slate-700'
                       }`}
