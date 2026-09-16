@@ -19,27 +19,80 @@ import { nav } from '@/lib/constants/nav'
 const store = getStore()
 
 const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) => {
-  const stats = [
-    { label: 'Клиенты', value: store.branchClients.length, color: 'text-cyan-600', screen: 'Клиенты и дети' },
-    { label: 'Занятий сегодня', value: store.branchLessons.length, color: 'text-pink-500', screen: 'Расписание' },
-    { label: 'Тренеры', value: store.branchCoaches.length, color: 'text-emerald-500', screen: 'Тренеры' },
-  ]
+  // Функция для очистки времени из строки формата ISO
+  const formatTime = (timeValue: string) => {
+    if (!timeValue) return '--:--';
+    
+    // Если формат уже HH:mm, просто возвращаем его
+    if (/^\d{2}:\d{2}$/.test(timeValue)) return timeValue;
+    
+    // Иначе пытаемся распарсить как дату
+    try {
+      const date = new Date(timeValue);
+      if (isNaN(date.getTime())) return timeValue; // Если не дата, возвращаем как есть (например, если это просто строка времени)
+      return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return timeValue;
+    }
+  }
 
   return (
-    <div className="flex flex-col gap-8">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {stats.map((stat, i) => (
-          <Card 
-            key={i} 
-            className="rounded-2xl border-pink-50 shadow-sm cursor-pointer hover:shadow-md transition-shadow"
-            onClick={() => setScreen(stat.screen)}
-          >
-            <CardContent className="p-6">
-              <p className="text-sm font-medium text-slate-500">{stat.label}</p>
-              <p className={`text-3xl font-extrabold mt-2 ${stat.color}`}>{stat.value}</p>
-            </CardContent>
-          </Card>
-        ))}
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      {/* Левая часть: Список клиентов */}
+      <div className="space-y-4">
+        <div className="flex justify-between items-center cursor-pointer" onClick={() => setScreen('Клиенты и дети')}>
+          <h2 className="text-xl font-bold text-slate-800 hover:text-cyan-700 transition-colors">Клиенты</h2>
+        </div>
+        <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
+          {store.branchClients.map(client => (
+            <div 
+              key={client.id} 
+              onClick={() => setScreen('Клиенты и дети')}
+              className="flex items-center justify-between p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-4">
+                <div className="size-12 rounded-full bg-cyan-100 text-cyan-700 flex items-center justify-center font-bold text-lg">
+                  {client.initials || client.childName.charAt(0)}
+                </div>
+                <div>
+                  <p className="font-bold text-slate-900 text-lg">{client.childName}</p>
+                  <p className="text-sm text-slate-500">Родитель: {client.parentName} • {client.phone}</p>
+                </div>
+              </div>
+              <Badge variant="secondary" className="bg-cyan-100 text-cyan-800 text-sm px-4 py-1.5 rounded-full font-bold">
+                {client.remainingLessons} занятий
+              </Badge>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Правая часть: Расписание */}
+      <div className="space-y-4">
+        <div className="flex justify-between items-center cursor-pointer" onClick={() => setScreen('Расписание')}>
+          <h2 className="text-xl font-bold text-slate-800 hover:text-cyan-700 transition-colors">Сегодня в расписании</h2>
+        </div>
+        <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
+          {store.sortedBranchLessons.length > 0 ? (
+            store.sortedBranchLessons.map(lesson => (
+              <div 
+                key={lesson.id} 
+                onClick={() => setScreen('Расписание')}
+                className="flex items-center gap-4 p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer"
+              >
+                <div className="font-bold text-cyan-900 bg-cyan-50 px-4 py-2 rounded-xl border border-cyan-100 text-lg">
+                  {formatTime(lesson.time)}
+                </div>
+                <div>
+                  <p className="font-bold text-slate-900 text-lg">{lesson.title}</p>
+                  <p className="text-sm text-slate-500">{lesson.coachName}</p>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="p-5 text-sm text-slate-500">На сегодня занятий нет</p>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -59,13 +112,13 @@ const Page = observer(() => {
   if (store.isLoading) return <div className="flex min-h-screen items-center justify-center">Загрузка...</div>
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Левая навигация */}
-      <aside className={`fixed inset-y-0 left-0 z-30 flex flex-col border-r border-rose-100 bg-white p-4 transition-all duration-300 ${store.sidebarOpen ? 'w-64 translate-x-0' : '-translate-x-full lg:translate-x-0 lg:w-20'}`}>
+    <div className="flex min-h-screen bg-slate-50">
+      {/* Левая навигация (фиксированная ширина) */}
+      <aside className="w-64 border-r border-rose-100 bg-white p-4 flex flex-col shrink-0">
         <div className="flex items-center gap-3 px-2 py-2 mb-8">
           <div className="flex size-10 items-center justify-center rounded-2xl bg-sky-500 text-lg font-bold text-white shrink-0">Л</div>
-          <div className={`${!store.sidebarOpen && 'lg:hidden'}`}>
-            <p className="font-semibold">Лотос</p>
+          <div>
+            <p className="font-semibold text-slate-900">Лотос</p>
             <p className="text-xs text-slate-500">CRM для бассейна</p>
           </div>
         </div>
@@ -76,28 +129,35 @@ const Page = observer(() => {
               <button
                 key={item.label}
                 onClick={() => store.setScreen(item.label)}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
+                className={`flex w-full items-center gap-3 px-4 py-3 rounded-xl transition-all ${
                   store.currentScreen === item.label
                     ? 'bg-cyan-50 text-cyan-700 font-semibold'
                     : 'text-slate-600 hover:bg-slate-50'
                 }`}
               >
                 <item.icon className="size-5 shrink-0" />
-                <span className={`${!store.sidebarOpen && 'lg:hidden'}`}>{item.label}</span>
+                <span className="font-medium">{item.label}</span>
               </button>
             )
           })}
         </nav>
       </aside>
 
-      {/* Основной контент */}
-      <div className={`transition-all duration-300 ${store.sidebarOpen ? 'lg:pl-64' : 'lg:pl-20'}`}>
+      {/* Основной контент (занимает всё оставшееся место) */}
+      <div className="flex-1 flex flex-col min-w-0">
         {/* Верхний хедер */}
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-pink-100 bg-white/80 backdrop-blur-md px-6 shadow-sm">
-          <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => store.toggleSidebar()}>
-            <Menu className="size-5" />
-          </Button>
-          <div className="text-xl font-bold text-slate-800 tracking-tight">{store.currentScreen}</div>
+        <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b border-pink-100 bg-white/80 backdrop-blur-md px-6 shadow-sm">
+          
+          <div className="flex flex-col">
+            <div className="text-2xl font-extrabold text-slate-900 tracking-tight">{store.currentScreen}</div>
+          </div>
+          
+          <div className="flex flex-col items-center">
+            <div className="text-sm text-cyan-700 font-semibold mt-0.5">
+              {store.currentBranch?.name || 'Все филиалы'} · {new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}
+            </div>
+          </div>
+          
           <div className="flex items-center gap-4">
             <select 
               aria-label="Выберите филиал" 
@@ -121,10 +181,6 @@ const Page = observer(() => {
                 <LogOut className="size-4 mr-2" /> Выйти
               </Button>
             )}
-            
-            <Button variant="ghost" size="icon" onClick={() => store.toggleBranchMenu()} className="rounded-full text-slate-500 hover:text-cyan-600">
-              <Menu className="size-5" />
-            </Button>
           </div>
         </header>
 
