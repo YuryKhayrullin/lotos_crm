@@ -77,9 +77,9 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
         </div>
         <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
           {(() => {
+            const now = new Date();
             const todayLessons = store.sortedBranchLessons.filter(lesson => {
               const d = lesson.date ? new Date(lesson.date) : new Date(lesson.time);
-              const now = new Date();
               return d.getDate() === now.getDate() && 
                      d.getMonth() === now.getMonth() && 
                      d.getFullYear() === now.getFullYear();
