@@ -32,8 +32,15 @@ export const ScheduleView = observer(() => {
   const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
     const d = new Date(startOfWeek);
     d.setDate(startOfWeek.getDate() + i);
-    return { key: label, label: `${label} ${d.getDate()}` };
+    return { key: label, label: `${label} ${d.getDate()}`, fullDate: d };
   });
+
+  const getDateForDay = (dayKey: string) => {
+    const dayIndex = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].indexOf(dayKey);
+    const d = new Date(startOfWeek);
+    d.setDate(startOfWeek.getDate() + dayIndex);
+    return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', weekday: 'long' });
+  };
 
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн')
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
@@ -86,19 +93,26 @@ export const ScheduleView = observer(() => {
 
       {/* Горизонтальный селектор дней недели */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2">
-        {DAYS.map(d => (
-          <button
-            key={d.key}
-            onClick={() => { setSelectedDay(d.key); setViewMode('день'); }}
-            className={`px-5 py-2.5 rounded-2xl font-semibold text-sm transition-all whitespace-nowrap shadow-sm border ${
-              viewMode === 'день' && selectedDay === d.key
-                ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
-                : 'bg-white text-slate-700 border-slate-100 hover:border-cyan-200 hover:bg-slate-50'
-            }`}
-          >
-            {d.label}
-          </button>
-        ))}
+        {DAYS.map(d => {
+          const isToday = d.fullDate.toDateString() === new Date().toDateString();
+          const isSelected = viewMode === 'день' && selectedDay === d.key;
+          
+          return (
+            <button
+              key={d.key}
+              onClick={() => { setSelectedDay(d.key); setViewMode('день'); }}
+              className={`px-5 py-2.5 rounded-2xl font-semibold text-sm transition-all whitespace-nowrap shadow-sm border ${
+                isSelected
+                  ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
+                  : isToday
+                  ? 'bg-cyan-50 text-cyan-700 border-cyan-200 shadow-sm'
+                  : 'bg-white text-slate-700 border-slate-100 hover:border-cyan-200 hover:bg-slate-50'
+              }`}
+            >
+              {d.label}
+            </button>
+          )
+        })}
       </div>
 
       <AttendanceModal 
@@ -122,6 +136,7 @@ export const ScheduleView = observer(() => {
             return (
               <Card 
                 key={lesson.id} 
+                title={getDateForDay(lesson.dayOfWeek)}
                 className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
                 onClick={() => setSelectedLesson(lesson as any)}
               >
@@ -137,7 +152,10 @@ export const ScheduleView = observer(() => {
                             : lesson.time;
                         })()}
                       </p>
-                      <p className="text-sm font-semibold text-slate-800 mt-0.5">{lesson.title}</p>
+                      <p className="text-xs font-medium text-cyan-600 mb-1">
+                        {getDateForDay(lesson.dayOfWeek)}
+                      </p>
+                      <p className="text-sm font-semibold text-slate-800">{lesson.title}</p>
                       <p className="text-xs text-slate-500 mt-1">{lesson.coachName} · {lesson.pool}</p>
                     </div>
                   </div>
@@ -146,6 +164,19 @@ export const ScheduleView = observer(() => {
                     <Badge className="bg-cyan-50 text-cyan-700 font-bold px-3 py-1 text-sm rounded-xl">
                       {countStr}
                     </Badge>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm('Удалить это занятие?')) {
+                          store.deleteLesson(lesson.id);
+                        }
+                      }}
+                    >
+                      Удалить
+                    </Button>
                     <div className="text-slate-400 group-hover:text-cyan-600 transition-colors font-bold text-xl px-2">
                       ›
                     </div>

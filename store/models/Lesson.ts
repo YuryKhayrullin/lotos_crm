@@ -4,6 +4,7 @@ export const LessonModel = types.model('Lesson', {
   id: types.identifier,
   branchId: types.string,
   dayOfWeek: types.optional(types.string, 'Пн'),
+  date: types.maybe(types.string),
   time: types.string,
   title: types.string,
   coachName: types.optional(types.string, ''),

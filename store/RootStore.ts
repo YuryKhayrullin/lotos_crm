@@ -323,6 +323,15 @@ const RootStoreModel = types
           self.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
         }
       }),
+      deleteLesson: flow(function* (lessonId: string) {
+        try {
+          yield apiClient.deleteLesson(lessonId)
+          const lesson = self.lessons.find((l: ILesson) => l.id === lessonId)
+          if (lesson) self.lessons.remove(lesson)
+        } catch (error) {
+          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления занятия'
+        }
+      }),
       attachCoach: flow(function* () {
         if (!self.attachCoachId) return
         const branch = self.currentBranch

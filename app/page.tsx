@@ -1,12 +1,10 @@
 'use client'
-'use client'
 
 import { observer } from 'mobx-react-lite'
 import { useEffect } from 'react'
 import { getStore } from '@/store/RootStore'
-import { LayoutDashboard, CalendarDays, UsersRound, CreditCard, CircleDollarSign, Menu, LogOut } from 'lucide-react'
+import { Menu, LogOut } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
@@ -15,30 +13,36 @@ import { ScheduleView } from '@/components/ScheduleView'
 import { CoachesView } from '@/components/CoachesView'
 import { LoginPage } from '@/components/LoginPage'
 import { nav } from '@/lib/constants/nav'
+import { RoleGuard } from '@/components/RoleGuard'
 
 const store = getStore()
 
 const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) => {
-  // Функция для очистки времени из строки формата ISO
   const formatTime = (timeValue: string) => {
     if (!timeValue) return '--:--';
-    
-    // Если формат уже HH:mm, просто возвращаем его
     if (/^\d{2}:\d{2}$/.test(timeValue)) return timeValue;
-    
-    // Иначе пытаемся распарсить как дату
     try {
       const date = new Date(timeValue);
-      if (isNaN(date.getTime())) return timeValue; // Если не дата, возвращаем как есть (например, если это просто строка времени)
+      if (isNaN(date.getTime())) return timeValue;
       return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     } catch {
       return timeValue;
     }
   }
 
+  // Проверка: является ли урок "текущим" (сравнение даты)
+  const isCurrentDate = (isoString: string) => {
+    try {
+      const lessonDate = new Date(isoString);
+      const now = new Date();
+      return lessonDate.getDate() === now.getDate() &&
+             lessonDate.getMonth() === now.getMonth() &&
+             lessonDate.getFullYear() === now.getFullYear();
+    } catch { return false; }
+  }
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-      {/* Левая часть: Список клиентов */}
       <div className="space-y-4">
         <div className="flex justify-between items-center cursor-pointer" onClick={() => setScreen('Клиенты и дети')}>
           <h2 className="text-xl font-bold text-slate-800 hover:text-cyan-700 transition-colors">Клиенты</h2>
@@ -67,31 +71,43 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
         </div>
       </div>
 
-      {/* Правая часть: Расписание */}
       <div className="space-y-4">
         <div className="flex justify-between items-center cursor-pointer" onClick={() => setScreen('Расписание')}>
           <h2 className="text-xl font-bold text-slate-800 hover:text-cyan-700 transition-colors">Сегодня в расписании</h2>
         </div>
         <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
-          {store.sortedBranchLessons.length > 0 ? (
-            store.sortedBranchLessons.map(lesson => (
+          {(() => {
+            const todayLessons = store.sortedBranchLessons.filter(lesson => {
+              const d = lesson.date ? new Date(lesson.date) : new Date(lesson.time);
+              const now = new Date();
+              return d.getDate() === now.getDate() && 
+                     d.getMonth() === now.getMonth() && 
+                     d.getFullYear() === now.getFullYear();
+            });
+            
+            if (todayLessons.length === 0) return <p className="p-5 text-sm text-slate-500">На сегодня занятий нет</p>;
+
+            return todayLessons.map(lesson => (
               <div 
                 key={lesson.id} 
                 onClick={() => setScreen('Расписание')}
-                className="flex items-center gap-4 p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer"
+                className="flex items-center justify-between p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer bg-cyan-50/50"
               >
-                <div className="font-bold text-cyan-900 bg-cyan-50 px-4 py-2 rounded-xl border border-cyan-100 text-lg">
-                  {formatTime(lesson.time)}
+                <div className="flex items-center gap-4">
+                  <div className="font-bold px-4 py-2 rounded-xl border text-lg bg-cyan-500 text-white border-cyan-600">
+                    {formatTime(lesson.time)}
+                  </div>
+                  <div>
+                    <p className="font-bold text-slate-900 text-lg">{lesson.title}</p>
+                    <p className="text-sm text-slate-500">{lesson.coachName}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="font-bold text-slate-900 text-lg">{lesson.title}</p>
-                  <p className="text-sm text-slate-500">{lesson.coachName}</p>
+                <div className="text-sm font-semibold text-slate-500 bg-slate-100 px-3 py-1 rounded-full">
+                    Сегодня
                 </div>
               </div>
             ))
-          ) : (
-            <p className="p-5 text-sm text-slate-500">На сегодня занятий нет</p>
-          )}
+          })()}
         </div>
       </div>
     </div>
@@ -113,7 +129,6 @@ const Page = observer(() => {
 
   return (
     <div className="flex min-h-screen bg-slate-50">
-      {/* Левая навигация (фиксированная ширина) */}
       <aside className="w-64 border-r border-rose-100 bg-white p-4 flex flex-col shrink-0">
         <div className="flex items-center gap-3 px-2 py-2 mb-8">
           <div className="flex size-10 items-center justify-center rounded-2xl bg-sky-500 text-lg font-bold text-white shrink-0">Л</div>
@@ -143,11 +158,8 @@ const Page = observer(() => {
         </nav>
       </aside>
 
-      {/* Основной контент (занимает всё оставшееся место) */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Верхний хедер */}
         <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b border-pink-100 bg-white/80 backdrop-blur-md px-6 shadow-sm">
-          
           <div className="flex flex-col">
             <div className="text-2xl font-extrabold text-slate-900 tracking-tight">{store.currentScreen}</div>
           </div>
@@ -184,7 +196,6 @@ const Page = observer(() => {
           </div>
         </header>
 
-        {/* Меню филиалов (справа) */}
         <Sheet open={store.branchMenuOpen} onOpenChange={store.closeBranchMenu}>
           <SheetContent side="right" className="w-[350px] bg-white border-l border-pink-100 p-0 shadow-2xl">
             <div className="p-6 border-b border-pink-50 bg-gradient-to-b from-cyan-50/50 to-white">

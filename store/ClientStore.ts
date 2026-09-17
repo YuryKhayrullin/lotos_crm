@@ -175,9 +175,11 @@ export const ClientStore = types
           assignedLessonId: newLessons[0] || ''
         });
         if (!result.success) throw new Error("Server rejected schedule update");
+        yield (self as any).loadClients(); // Перезагружаем данные для синхронизации
       } catch (err: any) {
         client.setAssignedLessons(oldLessons);
         self.error = err.message || "Failed to update schedule";
+        throw err;
       }
     }),
 markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 'attended' | 'absent' }[], lessonId: string, date: string) {

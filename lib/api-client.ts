@@ -107,6 +107,10 @@ class ApiClient {
     await this.request('deleteCoach', { id })
   }
 
+  async deleteLesson(id: string): Promise<void> {
+    await this.request('deleteLesson', { id })
+  }
+
   async updateClientAPI(id: string, data: any): Promise<any> {
     return this.request('updateClient', { id, ...data })
   }

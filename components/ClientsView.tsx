@@ -51,6 +51,7 @@ export const ClientsView = observer(() => {
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false)
   const [scheduleForm, setScheduleForm] = useState({
     dayOfWeek: 'Вт',
+    date: new Date().toISOString().split('T')[0], // Добавляем дату
     time: '17:00',
     duration: '1 час',
     title: 'Плавание',
@@ -255,24 +256,32 @@ export const ClientsView = observer(() => {
                       {store.branchLessons.map(lesson => {
                         const isAssigned = store.selectedClient!.isAssignedTo(lesson.id)
                         return (
-                          <div 
+                              <div 
                             key={lesson.id}
-                            onClick={() => store.clientStore.toggleClientLesson(String(store.selectedClient!.id), String(lesson.id))}
-                            className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                            className={`p-3 rounded-xl border transition-all flex items-center justify-between ${
                               isAssigned 
                                 ? 'border-cyan-400 bg-cyan-50/80 text-cyan-950 font-semibold shadow-sm' 
                                 : 'border-slate-100 hover:border-cyan-200 hover:bg-slate-50 text-slate-700'
                             }`}
                           >
-                            <div className="flex flex-col">
+                            <div className="flex flex-col cursor-pointer" onClick={() => store.clientStore.toggleClientLesson(String(store.selectedClient!.id), String(lesson.id))}>
                               <span className="text-sm font-bold">{lesson.time} · {lesson.title}</span>
                               <span className="text-xs text-slate-500">{lesson.coachName} ({lesson.pool})</span>
                             </div>
-                            <div className={`size-5 rounded-full border flex items-center justify-center text-xs font-bold ${
-                              isAssigned ? 'bg-cyan-500 text-white border-cyan-500' : 'border-slate-300 text-transparent'
-                            }`}>
-                              ✓
-                            </div>
+                            
+                            {isAssigned && (
+                               <Button 
+                                variant="ghost" 
+                                size="sm"
+                                className="h-8 w-8 p-0 rounded-full text-rose-500 hover:text-rose-600 hover:bg-rose-50"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    store.clientStore.toggleClientLesson(String(store.selectedClient!.id), String(lesson.id));
+                                }}
+                               >
+                                 ✕
+                               </Button>
+                            )}
                           </div>
                         )
                       })}
@@ -306,6 +315,26 @@ export const ClientsView = observer(() => {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="grid gap-2">
+                        <label className="text-xs font-bold text-slate-700">Дата</label>
+                        <Input 
+                          type="date"
+                          value={scheduleForm.date} 
+                          onChange={e => {
+                            const newDate = e.target.value;
+                            let autoDay = scheduleForm.dayOfWeek;
+                            if (newDate) {
+                              const d = new Date(newDate);
+                              if (!isNaN(d.getTime())) {
+                                const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+                                autoDay = days[d.getDay()];
+                              }
+                            }
+                            setScheduleForm({...scheduleForm, date: newDate, dayOfWeek: autoDay})
+                          }} 
+                          className="rounded-xl border-cyan-100 h-11"
+                        />
+                      </div>
+                      <div className="grid gap-2">
                         <label className="text-xs font-bold text-slate-700">Время</label>
                         <Input 
                           value={scheduleForm.time} 
@@ -313,22 +342,6 @@ export const ClientsView = observer(() => {
                           placeholder="17:00"
                           className="rounded-xl border-cyan-100 h-11"
                         />
-                      </div>
-                      <div className="grid gap-2">
-                        <label className="text-xs font-bold text-slate-700">Продолжительность</label>
-                        <Select 
-                          value={scheduleForm.duration} 
-                          onValueChange={(val) => val && setScheduleForm({...scheduleForm, duration: val})}
-                        >
-                          <SelectTrigger className="rounded-xl border-cyan-100 h-11">
-                            <SelectValue placeholder="Длительность" />
-                          </SelectTrigger>
-                          <SelectContent className="rounded-xl bg-white shadow-xl">
-                            {['30 минут', '45 минут', '1 час', '1.5 часа', '2 часа'].map(dur => (
-                              <SelectItem key={dur} value={dur}>{dur}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
                       </div>
                     </div>
 
@@ -359,6 +372,7 @@ export const ClientsView = observer(() => {
                           id: newLessonId,
                           branchId: store.selectedBranchId,
                           dayOfWeek: scheduleForm.dayOfWeek,
+                          date: scheduleForm.date, // Добавляем дату
                           time: scheduleForm.time,
                           title: scheduleForm.title,
                           coachName: scheduleForm.coachName,
