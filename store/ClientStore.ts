@@ -44,6 +44,7 @@ export const ClientStore = types
             branchId: String(client.branchId || ''),
             status: validStatuses.includes(client.status) ? client.status : 'Активен',
             initials: cleanVal(client.initials, 'XX'),
+            paidAmount: Number(client.paidAmount || 0),
             assignedLessonId: assignedLessonIds[0] || null,
             assignedLessonIds: assignedLessonIds,
             subscription: client.subscription ? {

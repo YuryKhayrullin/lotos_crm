@@ -209,11 +209,28 @@ function doPost(e) {
       throw new Error('Не найдено');
     }
     
-    // CREATE (Универсальный)
+    // CREATE
+    if (body.action === 'createClient') {
+      var sheet = ss.getSheetByName('Клиенты');
+      var headers = getHeaders(sheet);
+      
+      var newRow = headers.map(function(h) {
+        // Если поле находится внутри вложенного объекта subscription
+        if (body.subscription && body.subscription[h] !== undefined) {
+          return safeValue(body.subscription[h]);
+        }
+        // Иначе берем из основного тела
+        return safeValue(body[h] !== undefined ? body[h] : '');
+      });
+      
+      sheet.appendRow(newRow);
+      return createResponse({ success: true });
+    }
+    
+    // Универсальный CREATE для других сущностей
     if (body.action.indexOf('create') === 0) {
       var sheet = ss.getSheetByName(actionToSheet[body.action]);
       var headers = getHeaders(sheet);
-      // Важно: чтобы paidAmount сохранялся, колонка 'paidAmount' должна существовать на листе
       var newRow = headers.map(function(h) { return safeValue(body[h] || ''); });
       sheet.appendRow(newRow);
       var newObj = {}; headers.forEach(function(h, i) { newObj[h] = newRow[i]; });

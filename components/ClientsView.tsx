@@ -154,6 +154,15 @@ export const ClientsView = observer(() => {
       lessonsPerWeek: Number(formData.lessonsPerWeek) as any,
       paidAmount: Number(formData.paidAmount),
       initials,
+      subscription: {
+        id: Date.now().toString(),
+        clientId: 'temp-id', // Будет обновлен сервером
+        totalLessons: 8,
+        remainingLessons: 8,
+        paid: true,
+        purchasedAt: new Date().toISOString(),
+        receiptUrl: ''
+      }
     }
     await store.clientStore.addClient(clientData)
     setIsAddClientOpen(false)
