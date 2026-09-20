@@ -12,7 +12,10 @@ export const ClientModel = types
     age: types.optional(types.string, '0 лет'), 
     branchId: types.optional(types.string, ''),
     status: types.optional(types.enumeration(['Активен', 'Пауза', 'Архив']), 'Активен'),
+    category: types.optional(types.enumeration(['синхронное плавание', 'плавание']), 'плавание'),
+    lessonsPerWeek: types.optional(types.number, 1),
     initials: types.optional(types.string, ''),
+    paidAmount: types.optional(types.number, 0),
     subscription: types.maybeNull(SubscriptionModel),
     assignedLessonId: types.maybeNull(types.string),
     assignedLessonIds: types.optional(types.array(types.string), []),
@@ -98,6 +101,9 @@ export type CreateClientDto = {
   age: string
   branchId: string
   status: 'Активен' | 'Пауза' | 'Архив'
+  category: 'синхронное плавание' | 'плавание'
+  lessonsPerWeek: 1 | 2 | 3
+  paidAmount: number
   initials: string
   subscription?: Omit<ISubscriptionSnapshot, 'id' | 'clientId'>
   assignedLessonId?: string | null

@@ -11,6 +11,7 @@ import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
 import { ClientsView } from '@/components/ClientsView'
 import { ScheduleView } from '@/components/ScheduleView'
 import { CoachesView } from '@/components/CoachesView'
+import { SubscriptionsView } from '@/components/SubscriptionsView'
 import { LoginPage } from '@/components/LoginPage'
 import { nav } from '@/lib/constants/nav'
 import { RoleGuard } from '@/components/RoleGuard'
@@ -246,11 +247,16 @@ const Page = observer(() => {
           {store.currentScreen === 'Клиенты и дети' && <ClientsView />}
           {store.currentScreen === 'Расписание' && <ScheduleView />}
           {store.currentScreen === 'Тренеры' && <CoachesView />}
-          {store.currentScreen !== 'Дашборд' && store.currentScreen !== 'Клиенты и дети' && store.currentScreen !== 'Расписание' && store.currentScreen !== 'Тренеры' && <div>Раздел «{store.currentScreen}» в разработке</div>}
+          {store.currentScreen === 'Абонементы' && <SubscriptionsView />}
+          {store.currentScreen !== 'Дашборд' && 
+           store.currentScreen !== 'Клиенты и дети' && 
+           store.currentScreen !== 'Расписание' && 
+           store.currentScreen !== 'Тренеры' && 
+           store.currentScreen !== 'Абонементы' && 
+           <div>Раздел «{store.currentScreen}» в разработке</div>}
         </main>
       </div>
     </div>
   )
 })
-
 export default Page

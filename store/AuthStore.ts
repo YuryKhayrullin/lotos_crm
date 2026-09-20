@@ -14,9 +14,11 @@ export const AuthStore = types
     init() {
       if (typeof window !== 'undefined') {
         const token = localStorage.getItem('crm_token');
-        if (token) {
+        const user = localStorage.getItem('crm_user');
+        if (token && user) {
           self.token = token;
           self.isAuthenticated = true;
+          self.user = JSON.parse(user);
         }
       }
     },
@@ -56,6 +58,7 @@ export const AuthStore = types
         self.token = response.token
         self.isAuthenticated = true
         localStorage.setItem('crm_token', response.token)
+        localStorage.setItem('crm_user', JSON.stringify(user))
       } catch (e) {
         console.error('Login error:', e)
         throw new Error('Ошибка входа')
@@ -68,6 +71,7 @@ export const AuthStore = types
       self.isAuthenticated = false
       self.token = null
       localStorage.removeItem('crm_token')
+      localStorage.removeItem('crm_user')
     }
     }))
     .views(self => ({

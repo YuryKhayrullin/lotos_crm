@@ -17,7 +17,6 @@ function safeValue(val) {
   return str;
 }
 
-// Хэширование для безопасности
 function sha256(str) {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, str);
   var hex = '';
@@ -31,38 +30,21 @@ function sha256(str) {
   return hex;
 }
 
-// ==========================================
-// 2. GET
-// ==========================================
-function doGet(e) {
-  try {
-    var params = (e && e.parameter) ? e.parameter : { sheet: 'Клиенты' };
-    var requestedSheet = (params && params.sheet) ? params.sheet : 'Клиенты';
-    
-    var ALLOWED_SHEETS = ['Клиенты', 'Филиалы', 'Тренеры', 'Расписание'];
-    if (ALLOWED_SHEETS.indexOf(requestedSheet) === -1) {
-      return createResponse({ status: 'error', message: 'Доступ к листу запрещен' });
-    }
-    
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(requestedSheet);
-    if (!sheet) return createResponse({ status: 'error', message: 'Лист не найден' });
-    
-    var data = sheet.getDataRange().getValues();
-    if (data.length <= 1) return createResponse([]);
-    
-    var headers = data[0];
-    return createResponse(data.slice(1).map(function(row) {
-      var obj = {};
-      headers.forEach(function(h, i) { if (h) obj[h] = row[i]; });
-      return obj;
-    }));
-  } catch (err) {
-    return createResponse({ status: 'error', message: err.toString() });
+function getHeaders(sheet) {
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+}
+
+function getOrCreateUsersSheet(ss) {
+  var sheet = ss.getSheetByName('Users');
+  if (!sheet) {
+    sheet = ss.insertSheet('Users');
+    sheet.appendRow(['id', 'username', 'password', 'role', 'branchId']);
   }
+  return sheet;
 }
 
 // ==========================================
-// 3. POST
+// 2. ОСНОВНОЙ ОБРАБОТЧИК (doPost)
 // ==========================================
 function doPost(e) {
   if (!e || !e.postData || !e.postData.contents) return options();
@@ -71,12 +53,20 @@ function doPost(e) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var body = JSON.parse(e.postData.contents);
     
-    // --- АВТОРИЗАЦИЯ ---
+    // --- НОРМАЛИЗАТОР (объединяем payload и body) ---
+    if (body.payload) {
+      for (var key in body.payload) {
+        body[key] = body.payload[key];
+      }
+    }
+    
+    // --- 1. АВТОРИЗАЦИЯ И РЕГИСТРАЦИЯ ---
     if (body.action === 'login') {
-      var sheet = ss.getSheetByName('Users');
+      var sheet = getOrCreateUsersSheet(ss);
       var data = sheet.getDataRange().getValues();
       var headers = data[0].map(String);
       var hashedLoginPassword = sha256(String(body.password)); 
+      
       for (var i = 1; i < data.length; i++) {
         if (String(data[i][headers.indexOf('username')]) === String(body.username) && 
             String(data[i][headers.indexOf('password')]) === hashedLoginPassword) {
@@ -95,60 +85,68 @@ function doPost(e) {
     }
     
     if (body.action === 'register') {
-      var sheet = ss.getSheetByName('Users');
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-      sheet.appendRow(headers.map(function(h) { 
+      var sheet = getOrCreateUsersSheet(ss);
+      var headers = getHeaders(sheet);
+      
+      var newRow = headers.map(function(h) { 
         if (h === 'id') return new Date().getTime();
-        if (h === 'password') return sha256(body.password);
-        if (h === 'role') return body.role || '2';
-        // Явно берем branchId, если он есть в body
-        if (h === 'branchId') return safeValue(body.branchId || ''); 
-        return safeValue(body[h] || '');
-      }));
+        if (h === 'password') return sha256(String(body.password || ''));
+        if (h === 'role') return 'pending';
+        if (h === 'branchId') return String(body.branchId || '');
+        return safeValue(body[h] !== undefined ? body[h] : '');
+      });
+      
+      sheet.appendRow(newRow);
       return createResponse({ status: 'success' });
     }
-
-    // --- БИЗНЕС-ЛОГИКА ---
-    var actionToSheet = { 
-      'recordBulkAttendance': 'Клиенты',
-      'uploadReceipt': 'Клиенты',
-      'updateClient': 'Клиенты', 
-      'updateCoach': 'Тренеры', 
-      'deleteClient': 'Клиенты', 
-      'deleteCoach': 'Тренеры', 
-      'createClient': 'Клиенты', 
-      'createBranch': 'Филиалы', 
-      'createCoach': 'Тренеры', 
-      'createLesson': 'Расписание', 
-      'updateLesson': 'Расписание' 
-    };
-
-    if (body.action === 'recordAttendance') {
-      body.action = 'recordBulkAttendance';
-      body.attendanceList = [{ clientId: body.clientId, status: body.status }];
+    
+    // --- 2. GET (getSheet) ---
+    if (body.action === 'getSheet') {
+      var ALLOWED_SHEETS = ['Клиенты', 'Филиалы', 'Тренеры', 'Расписание'];
+      if (ALLOWED_SHEETS.indexOf(body.sheet) === -1) throw new Error('Доступ запрещен');
+      
+      var sheet = ss.getSheetByName(body.sheet);
+      if (!sheet) throw new Error('Лист не найден');
+      
+      var data = sheet.getDataRange().getValues();
+      if (data.length <= 1) return createResponse([]);
+      
+      var headers = data[0];
+      return createResponse(data.slice(1).map(function(row) {
+        var obj = {};
+        headers.forEach(function(h, i) { if (h) obj[h] = row[i]; });
+        return obj;
+      }));
     }
     
-    if (body.action === 'recordBulkAttendance') {
+    // --- 3. БИЗНЕС-ЛОГИКА ---
+    var actionToSheet = { 
+      'recordBulkAttendance': 'Клиенты', 'uploadReceipt': 'Клиенты',
+      'updateClient': 'Клиенты', 'updateCoach': 'Тренеры', 'updateLesson': 'Расписание',
+      'deleteClient': 'Клиенты', 'deleteCoach': 'Тренеры', 'deleteLesson': 'Расписание',
+      'createClient': 'Клиенты', 'createBranch': 'Филиалы', 
+      'createCoach': 'Тренеры', 'createLesson': 'Расписание'
+    };
+    
+    // Логика посещаемости
+    if (body.action === 'recordAttendance' || body.action === 'recordBulkAttendance') {
+      var list = (body.action === 'recordAttendance') ? [{ clientId: body.clientId, status: body.status }] : body.attendanceList;
       var sheet = ss.getSheetByName('Клиенты');
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      var headers = getHeaders(sheet);
       var data = sheet.getDataRange().getValues();
       var idIdx = headers.indexOf('id'), remIdx = headers.indexOf('remainingLessons'), statIdx = headers.indexOf('status'), histIdx = headers.indexOf('attendanceHistory');
       
-      (body.attendanceList || []).forEach(function(item) {
+      (list || []).forEach(function(item) {
         for (var i = 1; i < data.length; i++) {
           if (String(data[i][idIdx]) === String(item.clientId)) {
             var history = [];
             try { history = JSON.parse(data[i][histIdx] || '[]'); } catch(e) { history = []; }
             history.push({ date: body.date, lessonId: body.lessonId, status: item.status });
             if (histIdx !== -1) sheet.getRange(i + 1, histIdx + 1).setValue(JSON.stringify(history));
-            
             if (item.status === 'attended' && remIdx !== -1) {
-              var currentRemaining = Number(data[i][remIdx] || 0);
-              if (currentRemaining > 0) {
-                var newRemaining = currentRemaining - 1;
-                sheet.getRange(i + 1, remIdx + 1).setValue(newRemaining);
-                if (newRemaining <= 0 && statIdx !== -1) sheet.getRange(i + 1, statIdx + 1).setValue('Пауза');
-              }
+              var newRemaining = Math.max(0, Number(data[i][remIdx] || 0) - 1);
+              sheet.getRange(i + 1, remIdx + 1).setValue(newRemaining);
+              if (newRemaining <= 0 && statIdx !== -1) sheet.getRange(i + 1, statIdx + 1).setValue('Пауза');
             }
             break;
           }
@@ -156,18 +154,17 @@ function doPost(e) {
       });
       return createResponse({ success: true });
     }
-
+    
+    // Загрузка квитанций
     if (body.action === 'uploadReceipt') {
       var sheet = ss.getSheetByName('Клиенты');
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      var headers = getHeaders(sheet);
       var data = sheet.getDataRange().getValues();
       var idIdx = headers.indexOf('id'), remIdx = headers.indexOf('remainingLessons'), totIdx = headers.indexOf('totalLessons'), statIdx = headers.indexOf('status'), receiptIdx = headers.indexOf('receiptUrl');
       
-      var lessonsToAdd = Number(body.lessonsCount || 0);
       var receiptUrl = '';
       if (body.fileBase64 && body.fileName) {
-        var decoded = Utilities.base64Decode(body.fileBase64);
-        var blob = Utilities.newBlob(decoded, body.mimeType || 'image/jpeg', body.fileName);
+        var blob = Utilities.newBlob(Utilities.base64Decode(body.fileBase64), body.mimeType || 'image/jpeg', body.fileName);
         var file = DriveApp.createFile(blob);
         file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
         receiptUrl = file.getUrl();
@@ -175,22 +172,21 @@ function doPost(e) {
       
       for (var i = 1; i < data.length; i++) {
         if (String(data[i][idIdx]) === String(body.clientId)) {
-          var newRemaining = Number(data[i][remIdx] || 0) + lessonsToAdd;
-          var newTotal = Number(data[i][totIdx] || 0) + lessonsToAdd;
-          sheet.getRange(i + 1, remIdx + 1).setValue(newRemaining);
-          sheet.getRange(i + 1, totIdx + 1).setValue(newTotal);
+          var lessonsToAdd = Number(body.lessonsCount || 0);
+          sheet.getRange(i + 1, remIdx + 1).setValue(Number(data[i][remIdx] || 0) + lessonsToAdd);
+          sheet.getRange(i + 1, totIdx + 1).setValue(Number(data[i][totIdx] || 0) + lessonsToAdd);
           sheet.getRange(i + 1, statIdx + 1).setValue('Активен');
           if (receiptIdx !== -1 && receiptUrl) sheet.getRange(i + 1, receiptIdx + 1).setValue(receiptUrl);
-          return createResponse({ success: true, remainingLessons: newRemaining });
+          return createResponse({ success: true });
         }
       }
       throw new Error('Клиент не найден');
     }
     
-    // UPDATE / DELETE / CREATE
+    // UPDATE
     if (body.action.indexOf('update') === 0) {
       var sheet = ss.getSheetByName(actionToSheet[body.action]);
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      var headers = getHeaders(sheet);
       var data = sheet.getDataRange().getValues();
       var idIdx = headers.indexOf('id');
       for (var i = 1; i < data.length; i++) {
@@ -202,32 +198,29 @@ function doPost(e) {
       throw new Error('Не найдено');
     }
     
+    // DELETE
     if (body.action.indexOf('delete') === 0) {
       var sheet = ss.getSheetByName(actionToSheet[body.action]);
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      var idIdx = getHeaders(sheet).indexOf('id');
       var data = sheet.getDataRange().getValues();
-      var idIdx = headers.indexOf('id');
       for (var i = 1; i < data.length; i++) {
         if (String(data[i][idIdx]) === String(body.id)) { sheet.deleteRow(i + 1); return createResponse({ success: true }); }
       }
       throw new Error('Не найдено');
     }
     
-    // ИСПРАВЛЕННЫЙ БЛОК CREATE: ВОЗВРАЩАЕТ ОБЪЕКТ
-    if (['createClient', 'createBranch', 'createCoach', 'createLesson'].indexOf(body.action) !== -1) {
+    // CREATE (Универсальный)
+    if (body.action.indexOf('create') === 0) {
       var sheet = ss.getSheetByName(actionToSheet[body.action]);
-      var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-      
-      var newRow = headers.map(function(h) { return safeValue(body[h] !== undefined ? body[h] : ''); });
+      var headers = getHeaders(sheet);
+      // Важно: чтобы paidAmount сохранялся, колонка 'paidAmount' должна существовать на листе
+      var newRow = headers.map(function(h) { return safeValue(body[h] || ''); });
       sheet.appendRow(newRow);
-      
-      var newObj = {};
-      headers.forEach(function(h, i) { newObj[h] = newRow[i]; });
-      return createResponse(newObj); // ВЕРНУЛИ ОБЪЕКТ!
+      var newObj = {}; headers.forEach(function(h, i) { newObj[h] = newRow[i]; });
+      return createResponse(newObj);
     }
     
     return createResponse({ status: 'error', message: 'Действие не найдено' });
-      
   } catch (err) {
     return createResponse({ status: 'error', message: err.toString() });
   }

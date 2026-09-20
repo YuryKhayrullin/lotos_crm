@@ -52,7 +52,7 @@ export const ClientStore = types
               totalLessons: Number(client.subscription.totalLessons || 0),
               remainingLessons: Number(client.subscription.remainingLessons || 0),
               paid: Boolean(client.subscription.paid || false),
-              purchasedAt: String(client.subscription.purchasedAt || new Date().toISOString()),
+              purchasedAt: (client.subscription.purchasedAt && !String(client.subscription.purchasedAt).includes('1899-12-30')) ? String(client.subscription.purchasedAt) : new Date().toISOString(),
               receiptUrl: String(client.subscription.receiptUrl || ''),
             } : (client.remainingLessons !== undefined && client.remainingLessons !== "" ? {
               id: Date.now().toString(),
@@ -103,12 +103,8 @@ export const ClientStore = types
         const result = yield apiClient.uploadReceipt(clientId, file, lessonsCount);
         
         if (result.success) {
-          client.updateSubscription(
-            result.remainingLessons,
-            result.totalLessons || lessonsCount,
-            result.receiptUrl,
-            result.status // 'Активен' or 'Пауза'
-          );
+          // Перезагружаем данные для полной синхронизации с Google Sheets
+          yield (self as any).loadClients();
         } else {
           self.error = result.message || "Failed to add subscription";
         }
@@ -121,40 +117,14 @@ export const ClientStore = types
 
     // НОВАЯ ФУНКЦИЯ: Добавление занятий
     addLessons: flow(function* (clientId: string, count: number) {
-      const client = self.clients.find(c => c.id === clientId);
-      if (!client) return;
-
-      const snapshotBefore = { 
-        remaining: client.remainingLessons, 
-        total: client.totalLessons, 
-        status: client.status,
-        subscription: client.subscription ? JSON.parse(JSON.stringify(client.subscription)) : null
-      };
-      
-      // Если подписки нет или оставшихся занятий 0, начинаем с count (например, 2/2).
-      // Если остаток есть (например, 1 занятие), прибавляем count к существующим (например, 1 + 2 = 3).
-      const isNew = !client.subscription || client.remainingLessons <= 0;
-      const newRemaining = isNew ? count : client.remainingLessons + count;
-      const newTotal = isNew ? count : client.totalLessons + count;
-      
-      client.updateSubscription(newRemaining, newTotal, client.subscription?.receiptUrl || '', 'Активен');
-
       try {
         self.isLoading = true;
-        const result = yield apiClient.updateClientAPI(clientId, { 
-          remainingLessons: newRemaining,
-          totalLessons: newTotal,
-          status: 'Активен' 
-        });
-        if (result && result.success === false) throw new Error("Server rejected addLessons");
+        // Используем uploadReceipt или updateClientAPI в зависимости от вашей логики в Code.gs
+        // Если вы обновляете через uploadReceipt (без файла) или другой метод:
+        yield apiClient.updateClientAPI(clientId, { lessonsCount: count });
+        // Перезагружаем данные для полной синхронизации
+        yield (self as any).loadClients();
       } catch (err: any) {
-        // Откат
-        if (snapshotBefore.subscription) {
-            client.updateSubscription(snapshotBefore.remaining, snapshotBefore.total, snapshotBefore.subscription.receiptUrl, snapshotBefore.status as any);
-        } else {
-            client.subscription = null;
-            client.status = snapshotBefore.status as any;
-        }
         self.error = err.message || "Failed to add lessons";
       } finally {
         self.isLoading = false;
@@ -179,6 +149,22 @@ export const ClientStore = types
       } catch (err: any) {
         client.setAssignedLessons(oldLessons);
         self.error = err.message || "Failed to update schedule";
+        throw err;
+      }
+    }),
+    updateClientPayment: flow(function* (clientId: string, amount: number) {
+      const client = self.clients.find(c => c.id === clientId);
+      if (!client) return;
+
+      const oldAmount = client.paidAmount;
+      client.paidAmount = amount; // Optimistic update
+
+      try {
+        const result = yield apiClient.updateClientAPI(clientId, { paidAmount: amount });
+        if (!result.success) throw new Error("Server rejected payment update");
+      } catch (err: any) {
+        client.paidAmount = oldAmount; // Rollback
+        self.error = err.message || "Failed to update payment";
         throw err;
       }
     }),
@@ -212,22 +198,27 @@ markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 
     // НОВАЯ ФУНКЦИЯ: Отметка посещения
     markAttendance: flow(function* (clientId: string, lessonId: string, status: 'attended' | 'absent') {
       const client = self.clients.find(c => c.id === clientId);
-      if (!client || client.remainingLessons <= 0) return;
+      if (!client) return;
 
       const snapshotBefore = { remaining: client.remainingLessons, status: client.status };
       
-      const newRemaining = status === 'attended' ? client.remainingLessons - 1 : client.remainingLessons;
-      const newStatus = newRemaining <= 0 ? 'Пауза' : 'Активен';
+      // Только списываем занятие, если клиент пришел и у него есть уроки
+      const newRemaining = (status === 'attended' && client.remainingLessons > 0) ? client.remainingLessons - 1 : client.remainingLessons;
+      const newStatus = (status === 'attended' && newRemaining <= 0) ? 'Пауза' : client.status;
       
       // Optimistic Update
-      client.consumeLesson(newRemaining, newStatus);
+      if (status === 'attended') {
+          client.consumeLesson(newRemaining, newStatus as any);
+      }
 
       try {
         const result = yield apiClient.recordAttendance(clientId, lessonId, status, new Date().toLocaleDateString());
         if (!result.success) throw new Error("Server rejected attendance");
       } catch (err: any) {
         // Rollback
-        client.consumeLesson(snapshotBefore.remaining, snapshotBefore.status as any);
+        if (status === 'attended') {
+            client.consumeLesson(snapshotBefore.remaining, snapshotBefore.status as any);
+        }
         self.error = err.message || "Attendance failed";
       }
     }),
@@ -235,3 +226,4 @@ markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 
   }))
 
 export type IClientStore = Instance<typeof ClientStore>
+

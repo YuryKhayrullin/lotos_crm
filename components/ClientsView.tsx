@@ -15,6 +15,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { SubscriptionUpload } from './SubscriptionUpload'
 import { AdminAddLessons } from './AdminAddLessons'
 
+const PRICE_LIST: Record<string, Record<number, number>> = {
+  'синхронное плавание': { 3: 15000, 2: 12000, 1: 7000 },
+  'плавание': { 3: 10000, 2: 8000, 1: 5500 }
+};
 
 const calculateAge = (birthDate: string) => {
   const [day, month, year] = birthDate.split('.').map(Number)
@@ -51,23 +55,26 @@ export const ClientsView = observer(() => {
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false)
   const [scheduleForm, setScheduleForm] = useState({
     dayOfWeek: 'Вт',
-    date: new Date().toISOString().split('T')[0], // Добавляем дату
+    date: new Date().toISOString().split('T')[0],
     time: '17:00',
     duration: '1 час',
     title: 'Плавание',
     coachName: store.branchCoaches[0]?.name || 'Тренер',
     pool: 'Основной бассейн'
   })
+
   const [formData, setFormData] = useState({ 
     childName: '', 
     parentName: '', 
     phone: '', 
     email: '', 
     birthDate: '',
-    branchId: store.selectedBranchId || ''
+    category: '', 
+    lessonsPerWeek: '', 
+    paidAmount: '', 
+    branchId: store.branches.some((b: IBranch) => b.id === store.selectedBranchId) ? store.selectedBranchId : ''
   })
 
-  // Синхронизируем branchId при открытии формы или смене выбранного филиала
   const resetForm = () => {
     setFormData({ 
       childName: '', 
@@ -75,11 +82,26 @@ export const ClientsView = observer(() => {
       phone: '', 
       email: '', 
       birthDate: '', 
-      branchId: store.selectedBranchId || '' 
+      category: '', 
+      lessonsPerWeek: '', 
+      paidAmount: '', 
+      branchId: store.branches.some((b: IBranch) => b.id === store.selectedBranchId) ? store.selectedBranchId : ''
     })
   }
 
   const age = calculateAge(formData.birthDate)
+
+  const updateForm = (field: string, value: any) => {
+    const nextData = { ...formData, [field]: value };
+    if (field === 'category' || field === 'lessonsPerWeek') {
+      const cat = field === 'category' ? value : nextData.category;
+      const les = field === 'lessonsPerWeek' ? Number(value) : Number(nextData.lessonsPerWeek);
+      if (cat && les && PRICE_LIST[cat]?.[les]) {
+        nextData.paidAmount = String(PRICE_LIST[cat][les]);
+      }
+    }
+    setFormData(nextData);
+  }
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({ ...formData, birthDate: formatBirthDate(e.target.value) })
@@ -90,7 +112,6 @@ export const ClientsView = observer(() => {
   }
 
   const handleSubmit = async () => {
-    // ВАЛИДАЦИЯ ВВОДА ПОЛЬЗОВАТЕЛЯ
     if (!formData.childName.trim() || formData.childName.length < 2) {
       alert("Введите корректное имя ребенка (минимум 2 символа)");
       return;
@@ -100,21 +121,18 @@ export const ClientsView = observer(() => {
       return;
     }
     
-    // Валидация телефона (должен содержать 11 цифр)
     const digitsOnly = formData.phone.replace(/\D/g, "");
     if (digitsOnly.length < 11) {
       alert("Введите полный номер телефона (11 цифр)");
       return;
     }
 
-    // Валидация email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (formData.email && !emailRegex.test(formData.email)) {
+    if (formData.email && formData.email.trim() !== '' && !emailRegex.test(formData.email)) {
       alert("Введите корректный email (или оставьте поле пустым)");
       return;
     }
 
-    // Валидация даты рождения (ДД.ММ.ГГГГ)
     const dateRegex = /^\d{2}\.\d{2}\.\d{4}$/;
     if (!dateRegex.test(formData.birthDate)) {
       alert("Введите дату рождения в формате ДД.ММ.ГГГГ");
@@ -132,6 +150,9 @@ export const ClientsView = observer(() => {
       age: age,
       branchId: formData.branchId,
       status: 'Активен',
+      category: formData.category as any,
+      lessonsPerWeek: Number(formData.lessonsPerWeek) as any,
+      paidAmount: Number(formData.paidAmount),
       initials,
     }
     await store.clientStore.addClient(clientData)
@@ -148,29 +169,53 @@ export const ClientsView = observer(() => {
             <DialogTrigger className="rounded-full bg-cyan-100 hover:bg-cyan-200 text-cyan-800 shadow-sm transition-all px-4 py-2 text-sm inline-flex items-center justify-center font-medium">
               <Plus className="mr-2 size-4" /> Добавить клиента
             </DialogTrigger>
-            <DialogContent className="max-w-[450px] p-0 rounded-3xl overflow-hidden border-pink-100 bg-white">
-              <DialogHeader className="p-8 border-b border-pink-50 bg-gradient-to-br from-cyan-50 via-white to-pink-50/50">
+            <DialogContent className="max-w-[450px] p-0 rounded-3xl overflow-hidden border-pink-100 bg-white max-h-[90vh] overflow-y-auto">
+              <DialogHeader className="p-6 border-b border-pink-50 bg-gradient-to-br from-cyan-50 via-white to-pink-50/50">
                 <DialogTitle className="text-2xl font-extrabold text-cyan-950 tracking-tight">Новый клиент</DialogTitle>
               </DialogHeader>
-              <div className="grid gap-5 p-8">
-                <Input placeholder="Имя ребенка" value={formData.childName} onChange={e => setFormData({...formData, childName: e.target.value})} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12" />
-                <Input placeholder="Имя родителя" value={formData.parentName} onChange={e => setFormData({...formData, parentName: e.target.value})} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12" />
-                <Input placeholder="+7 (000) 000-00-00" value={formData.phone} onChange={handlePhoneChange} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12" />
-                <Input placeholder="Email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12" />
-                <div className="grid grid-cols-2 gap-4">
-                  <Input placeholder="ДД.ММ.ГГГГ" value={formData.birthDate} onChange={handleDateChange} maxLength={10} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12" />
-                  <div className="h-12 flex items-center px-4 bg-slate-50 border border-slate-100 rounded-xl font-semibold text-slate-700">
+              <div className="grid gap-4 p-6">
+                <Input placeholder="Имя ребенка" value={formData.childName} onChange={e => updateForm('childName', e.target.value)} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+                <Input placeholder="Имя родителя" value={formData.parentName} onChange={e => updateForm('parentName', e.target.value)} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+                <Input placeholder="+7 (000) 000-00-00" value={formData.phone} onChange={handlePhoneChange} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+                <Input placeholder="Email" value={formData.email} onChange={e => updateForm('email', e.target.value)} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+                <div className="grid grid-cols-2 gap-3">
+                  <Input placeholder="ДД.ММ.ГГГГ" value={formData.birthDate} onChange={handleDateChange} maxLength={10} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+                  <div className="h-11 flex items-center px-4 bg-slate-50 border border-slate-100 rounded-xl font-semibold text-slate-700 text-sm">
                       {age}
                   </div>
                 </div>
+
+                <Select value={formData.category} onValueChange={(val) => updateForm('category', val)}>
+                  <SelectTrigger className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11 px-4 shadow-sm">
+                    <SelectValue placeholder="Категория" />
+                  </SelectTrigger>
+                  <SelectContent className="rounded-xl border-cyan-100 shadow-xl bg-white">
+                    <SelectItem value="плавание">Плавание</SelectItem>
+                    <SelectItem value="синхронное плавание">Синхронное плавание</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select value={String(formData.lessonsPerWeek)} onValueChange={(val) => updateForm('lessonsPerWeek', Number(val))}>
+                   <SelectTrigger className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11 px-4 shadow-sm">
+                     <SelectValue placeholder="Занятий в неделю" />
+                   </SelectTrigger>
+                   <SelectContent className="rounded-xl border-cyan-100 shadow-xl bg-white">
+                    <SelectItem value="1">1</SelectItem>
+                    <SelectItem value="2">2</SelectItem>
+                    <SelectItem value="3">3</SelectItem>
+                   </SelectContent>
+                </Select>
+
+                <Input type="number" placeholder="Сумма оплаты" value={formData.paidAmount} onChange={e => updateForm('paidAmount', e.target.value)} className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11" />
+
                 <Select 
-                  value={formData.branchId} 
-                  onValueChange={(val) => setFormData({...formData, branchId: val ?? ''})}
+                  value={store.branches.some((b: IBranch) => b.id === formData.branchId) ? formData.branchId : ''} 
+                  onValueChange={(val) => updateForm('branchId', val ?? '')}
                 >
-                  <SelectTrigger className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-12 px-4 shadow-sm">
+                  <SelectTrigger className="border-cyan-100 focus:border-cyan-400 focus:ring-cyan-400 rounded-xl h-11 px-4 shadow-sm">
                     <SelectValue placeholder="Выберите филиал" />
                   </SelectTrigger>
-                  <SelectContent className="rounded-2xl border-cyan-100 shadow-xl p-2 bg-white" sideOffset={5}>
+                  <SelectContent className="rounded-xl border-cyan-100 shadow-xl p-2 bg-white" sideOffset={5}>
                     {store.branches.map((b: IBranch) => (
                       <SelectItem 
                         key={b.id} 
@@ -182,7 +227,8 @@ export const ClientsView = observer(() => {
                     ))}
                   </SelectContent>
                 </Select>
-                <Button onClick={handleSubmit} className="w-full rounded-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-12 transition-all shadow-lg">
+
+                <Button onClick={handleSubmit} className="w-full rounded-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-11 transition-all shadow-lg mt-2">
                   Сохранить клиента
                 </Button>
               </div>
@@ -203,7 +249,6 @@ export const ClientsView = observer(() => {
               </DialogHeader>
 
               <div className="grid gap-6 py-4 text-slate-700">
-                {/* Статус и абонемент */}
                 <div className="bg-cyan-50/50 p-4 rounded-2xl border border-cyan-100 flex flex-col gap-3">
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-semibold text-cyan-900">Абонемент и статус</span>
@@ -244,7 +289,6 @@ export const ClientsView = observer(() => {
                   </div>
                 </div>
 
-                {/* Привязка к расписанию занятий */}
                 <div className="grid gap-3">
                   <h4 className="text-sm font-semibold text-slate-800 uppercase tracking-wider">Дни и время тренировок в расписании</h4>
                   <p className="text-xs text-slate-500">Выберите слоты, которые посещает ребенок:</p>
@@ -256,7 +300,7 @@ export const ClientsView = observer(() => {
                       {store.branchLessons.map(lesson => {
                         const isAssigned = store.selectedClient!.isAssignedTo(lesson.id)
                         return (
-                              <div 
+                          <div 
                             key={lesson.id}
                             className={`p-3 rounded-xl border transition-all flex items-center justify-between ${
                               isAssigned 
@@ -288,7 +332,7 @@ export const ClientsView = observer(() => {
                     </div>
                   )}
                 </div>
-              {/* Модальное окно создания слота расписания */}
+
               <Dialog open={isScheduleModalOpen} onOpenChange={setIsScheduleModalOpen}>
                 <DialogContent className="max-w-[400px] p-6 rounded-3xl bg-white border-cyan-100 shadow-2xl">
                   <DialogHeader className="pb-4 border-b border-cyan-50">
@@ -372,7 +416,7 @@ export const ClientsView = observer(() => {
                           id: newLessonId,
                           branchId: store.selectedBranchId,
                           dayOfWeek: scheduleForm.dayOfWeek,
-                          date: scheduleForm.date, // Добавляем дату
+                          date: scheduleForm.date,
                           time: scheduleForm.time,
                           title: scheduleForm.title,
                           coachName: scheduleForm.coachName,
@@ -423,13 +467,14 @@ export const ClientsView = observer(() => {
                 <TableHead>Дата рождения / Возраст</TableHead>
                 <TableHead>Родитель</TableHead>
                 <TableHead>Телефон</TableHead>
+                <TableHead>Оплата</TableHead>
                 <TableHead>Статус</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {clients.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center py-4 text-slate-500">Нет клиентов</TableCell>
+                  <TableCell colSpan={6} className="text-center py-4 text-slate-500">Нет клиентов</TableCell>
                 </TableRow>
               ) : (
                 clients.map((client: IClient) => (
@@ -438,6 +483,9 @@ export const ClientsView = observer(() => {
                     <TableCell>{client.birthDate} / {client.age}</TableCell>
                     <TableCell>{client.parentName}</TableCell>
                     <TableCell>{client.phone}</TableCell>
+                    <TableCell className={client.paidAmount > 0 ? 'text-emerald-600' : 'text-rose-600 font-bold'}>
+                      {client.paidAmount > 0 ? `${client.paidAmount} ₽` : 'Нет оплаты'}
+                    </TableCell>
                     <TableCell>
                       <Badge variant={client.isActive ? 'default' : 'secondary'}>{client.status}</Badge>
                     </TableCell>

@@ -20,16 +20,20 @@ export const AttendanceModal = observer(({
   lesson: ILesson | null 
 }) => {
   const store = useStore()
-  const [markedClients, setMarkedClients] = useState<Record<string, 'attended' | 'missed'>>({})
+  const [markedClients, setMarkedClients] = useState<Record<string, 'attended' | 'absent'>>({})
 
   if (!lesson) return null
 
   const lessonClients = store.branchClients.filter(c => c.isAssignedTo(lesson.id))
   const unassignedClients = store.branchClients.filter(c => !c.isAssignedTo(lesson.id))
 
-  const handleMark = async (clientId: string, status: 'attended' | 'missed') => {
-    if (status === 'attended') await store.clientStore.markAttendance(String(clientId), String(lesson.id), 'attended')
-    setMarkedClients(prev => ({ ...prev, [clientId]: status }))
+  const handleMark = async (clientId: string, status: 'attended' | 'absent') => {
+    try {
+      await store.clientStore.markAttendance(String(clientId), String(lesson.id), status)
+      setMarkedClients(prev => ({ ...prev, [clientId]: status }))
+    } catch (err) {
+      console.error(err)
+    }
   }
 
   const getBadgeStyle = (rem: number) => {
@@ -60,7 +64,7 @@ export const AttendanceModal = observer(({
                 const rem = client.remainingLessons
                 const markState = markedClients[client.id]
                 const isAttended = markState === 'attended'
-                const isMissed = markState === 'missed'
+                const isAbsent = markState === 'absent'
                 const isDisabled = rem <= 0 && !isAttended
 
                 return (
@@ -83,11 +87,11 @@ export const AttendanceModal = observer(({
                         <Check className="size-4 mr-1" /> {isAttended ? "Был" : "Пришел"}
                       </Button>
                       <Button 
-                        onClick={() => handleMark(String(client.id), 'missed')}
-                        disabled={isMissed || store.clientStore.isLoading}
+                        onClick={() => handleMark(String(client.id), 'absent')}
+                        disabled={isAbsent || store.clientStore.isLoading}
                         size="sm"
-                        variant={isMissed ? "default" : "outline"}
-                        className={isMissed ? "bg-rose-500 hover:bg-rose-600 text-white" : "border-rose-200 text-rose-700"}
+                        variant={isAbsent ? "default" : "outline"}
+                        className={isAbsent ? "bg-rose-500 hover:bg-rose-600 text-white" : "border-rose-200 text-rose-700"}
                       >
                         <XCircle className="size-4 mr-1" /> Пропуск
                       </Button>
