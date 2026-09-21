@@ -47,13 +47,16 @@ function getOrCreateUsersSheet(ss) {
 // 2. ОСНОВНОЙ ОБРАБОТЧИК (doPost)
 // ==========================================
 function doPost(e) {
+  console.log('--- РЕАЛЬНЫЕ ДАННЫЕ ПРИШЛИ НА СЕРВЕР ---');
+  console.log('Content: ' + (e ? e.postData.contents : 'No data'));
+
   if (!e || !e.postData || !e.postData.contents) return options();
   
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var body = JSON.parse(e.postData.contents);
     
-    // --- НОРМАЛИЗАТОР (объединяем payload и body) ---
+    // --- НОРМАЛИЗАТОР ---
     if (body.payload) {
       for (var key in body.payload) {
         body[key] = body.payload[key];
@@ -130,29 +133,45 @@ function doPost(e) {
     
     // Логика посещаемости
     if (body.action === 'recordAttendance' || body.action === 'recordBulkAttendance') {
-      var list = (body.action === 'recordAttendance') ? [{ clientId: body.clientId, status: body.status }] : body.attendanceList;
+      var attendanceList = (body.action === 'recordAttendance') 
+        ? [{ clientId: body.clientId, status: body.status, isWalkin: body.isWalkin || false, date: body.date, lessonId: body.lessonId }] 
+        : body.attendance;
+        
       var sheet = ss.getSheetByName('Клиенты');
       var headers = getHeaders(sheet);
       var data = sheet.getDataRange().getValues();
-      var idIdx = headers.indexOf('id'), remIdx = headers.indexOf('remainingLessons'), statIdx = headers.indexOf('status'), histIdx = headers.indexOf('attendanceHistory');
+      var idIdx = headers.indexOf('id');
+      var remIdx = headers.indexOf('remainingLessons');
+      var statIdx = headers.indexOf('status');
+      var histIdx = headers.indexOf('attendanceHistory');
       
-      (list || []).forEach(function(item) {
+      var results = attendanceList.map(function(item) {
         for (var i = 1; i < data.length; i++) {
           if (String(data[i][idIdx]) === String(item.clientId)) {
+            // Записываем в историю
             var history = [];
             try { history = JSON.parse(data[i][histIdx] || '[]'); } catch(e) { history = []; }
-            history.push({ date: body.date, lessonId: body.lessonId, status: item.status });
+            history.push({ 
+                date: item.date, 
+                lessonId: item.lessonId, 
+                status: item.status 
+            });
             if (histIdx !== -1) sheet.getRange(i + 1, histIdx + 1).setValue(JSON.stringify(history));
-            if (item.status === 'attended' && remIdx !== -1) {
+            
+            // ЛОГИКА СПИСАНИЯ:
+            // Если attended и НЕ walkin — списываем занятие
+            if (item.status === 'attended' && !item.isWalkin && remIdx !== -1) {
               var newRemaining = Math.max(0, Number(data[i][remIdx] || 0) - 1);
               sheet.getRange(i + 1, remIdx + 1).setValue(newRemaining);
               if (newRemaining <= 0 && statIdx !== -1) sheet.getRange(i + 1, statIdx + 1).setValue('Пауза');
             }
-            break;
+            return { clientId: item.clientId, success: true };
           }
         }
+        return { clientId: item.clientId, success: false };
       });
-      return createResponse({ success: true });
+      
+      return createResponse({ success: true, results: results });
     }
     
     // Загрузка квитанций
@@ -210,21 +229,25 @@ function doPost(e) {
     }
     
     // CREATE
-    if (body.action === 'createClient') {
-      var sheet = ss.getSheetByName('Клиенты');
+    if (body.action === 'createClient' || body.action === 'createLesson') {
+      var sheetName = (body.action === 'createClient') ? 'Клиенты' : 'Расписание';
+      var sheet = ss.getSheetByName(sheetName);
       var headers = getHeaders(sheet);
       
       var newRow = headers.map(function(h) {
-        // Если поле находится внутри вложенного объекта subscription
         if (body.subscription && body.subscription[h] !== undefined) {
           return safeValue(body.subscription[h]);
         }
-        // Иначе берем из основного тела
         return safeValue(body[h] !== undefined ? body[h] : '');
       });
       
+      console.log('Saving data to ' + sheetName + ': ' + JSON.stringify(newRow));
       sheet.appendRow(newRow);
-      return createResponse({ success: true });
+      
+      // Возвращаем созданный объект
+      var newObj = {}; 
+      headers.forEach(function(h, i) { newObj[h] = newRow[i]; });
+      return createResponse(newObj);
     }
     
     // Универсальный CREATE для других сущностей

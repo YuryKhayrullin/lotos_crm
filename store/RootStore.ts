@@ -13,6 +13,7 @@ import {
   ILesson,
   CreateClientDto,
 } from '@/store/models'
+import { normalizeLesson } from '@/lib/normalizers'
 
 const SCREENS = ['Дашборд', 'Клиенты и дети', 'Тренеры', 'Расписание', 'Абонементы', 'Финансы'] as const
 
@@ -69,7 +70,9 @@ const RootStoreModel = types
   }))
   .views((self) => ({
     get sortedBranchLessons(): ILesson[] {
-      return [...self.branchLessons].sort((a: ILesson, b: ILesson) => a.time.localeCompare(b.time))
+      return [...self.branchLessons].sort((a: ILesson, b: ILesson) => 
+        String(a.time).localeCompare(String(b.time))
+      )
     },
   }))
   .actions((self) => {
@@ -353,7 +356,9 @@ const RootStoreModel = types
       }),
       createLesson: flow(function* (lessonData: any) {
         try {
-          const newLesson = yield apiClient.createLesson(lessonData)
+          const response = yield apiClient.createLesson(lessonData)
+          // Нормализуем ответ от сервера, так как Code.gs возвращает объект с ключами из таблицы
+          const newLesson = normalizeLesson(response)
           self.lessons.push(newLesson)
           return newLesson
         } catch (error: any) {

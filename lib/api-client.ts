@@ -1,4 +1,5 @@
 import { IBranch, ICoach, IClient, ILesson, CreateClientDto, RegisterCredentials } from '@/store/models'
+import { normalizeLesson, normalizeClient } from './normalizers'
 
 const API_ROUTE = '/api/crm'
 
@@ -41,11 +42,7 @@ class ApiClient {
 
   async fetchClients(): Promise<IClient[]> {
     return this.request('getSheet', { sheet: 'Клиенты' }).then(data => 
-      (Array.isArray(data) ? data : []).map((c: any) => ({ 
-        ...c, 
-        id: String(c.id),
-        branchId: c.branchId ? String(c.branchId) : ''
-      }))
+      (Array.isArray(data) ? data : []).map(normalizeClient)
     );
   }
 
@@ -79,11 +76,7 @@ class ApiClient {
 
   async fetchLessons(): Promise<ILesson[]> {
     return this.request('getSheet', { sheet: 'Расписание' }).then(data => 
-      (Array.isArray(data) ? data : []).map((l: any) => ({ 
-        ...l, 
-        id: String(l.id),
-        branchId: l.branchId ? String(l.branchId) : ''
-      }))
+      (Array.isArray(data) ? data : []).map(normalizeLesson)
     );
   }
 
@@ -126,8 +119,16 @@ class ApiClient {
     })
   }
 
-  async recordBulkAttendance(attendanceList: { clientId: string, status: 'attended' | 'absent' }[], lessonId: string, date: string) {
-    return this.request('recordBulkAttendance', { attendanceList, lessonId, date })
+  async recordBulkAttendance(attendanceList: { clientId: string; status: 'attended' | 'absent'; isWalkin?: boolean }[], lessonId: string, date: string) {
+    return this.request('recordBulkAttendance', { 
+      attendance: attendanceList.map(a => ({
+        clientId: a.clientId,
+        lessonId,
+        date,
+        status: a.status,
+        isWalkin: a.isWalkin || false
+      }))
+    })
   }
 
   async recordAttendance(clientId: string, lessonId: string, status: 'attended' | 'absent', date: string): Promise<any> {

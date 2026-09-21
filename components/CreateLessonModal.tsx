@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStore } from '@/store/StoreProvider'
+import { apiClient } from '@/lib/api-client'
 
 export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
   const store = useStore()
@@ -15,18 +16,33 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     time: '17:00',
     title: 'Плавание',
     coachName: store.branchCoaches[0]?.name || '',
-    clientId: ''
+    clientId: '',
+    category: 'плавание' as 'плавание' | 'синхронное плавание'
   })
 
   const handleSubmit = async () => {
     const newLessonId = String(Date.now());
+    
+    // Вычисляем день недели
+    const d = new Date(formData.date);
+    const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    const dayOfWeek = days[d.getDay()];
+
+    // Форматируем время в HH:mm
+    let timeStr = formData.time;
+    if (/^\d{1,2}:\d{2}$/.test(timeStr)) {
+      timeStr = timeStr.padStart(5, '0');
+    }
+
     const newLessonData = {
       id: newLessonId,
       branchId: store.selectedBranchId,
       date: formData.date,
-      time: formData.time,
+      dayOfWeek: dayOfWeek,
+      time: timeStr,
       title: formData.title,
       coachName: formData.coachName,
+      category: formData.category,
       pool: 'Основной бассейн',
       duration: '1 час',
       maxCapacity: 10
@@ -38,13 +54,20 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
       await store.clientStore.toggleClientLesson(formData.clientId, newLessonId);
     }
     
+    // Перезагружаем ВСЕ данные для синхронизации
+    await Promise.all([
+        store.initialize(),
+        store.clientStore.loadClients()
+    ]);
+    
     onClose();
     setFormData({
       date: new Date().toISOString().split('T')[0],
       time: '17:00',
       title: 'Плавание',
       coachName: store.branchCoaches[0]?.name || '',
-      clientId: ''
+      clientId: '',
+      category: 'плавание'
     });
   }
 
@@ -57,8 +80,37 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
         <div className="grid gap-4 py-4">
           <Input type="date" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="rounded-xl" />
           <Input value={formData.time} onChange={e => setFormData({...formData, time: e.target.value})} placeholder="Время (например, 17:00)" className="rounded-xl" />
-          <Input value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} placeholder="Название" className="rounded-xl" />
-          <Input value={formData.coachName} onChange={e => setFormData({...formData, coachName: e.target.value})} placeholder="Тренер" className="rounded-xl" />
+          
+          <Select value={formData.title} onValueChange={val => setFormData({...formData, title: val})}>
+            <SelectTrigger className="rounded-xl">
+              <SelectValue placeholder="Тип занятия" />
+            </SelectTrigger>
+            <SelectContent className="rounded-xl bg-white">
+              <SelectItem value="Плавание">Плавание</SelectItem>
+              <SelectItem value="Синхронное плавание">Синхронное плавание</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select value={formData.category} onValueChange={(val: 'плавание' | 'синхронное плавание') => setFormData({...formData, category: val})}>
+            <SelectTrigger className="rounded-xl">
+              <SelectValue placeholder="Категория" />
+            </SelectTrigger>
+            <SelectContent className="rounded-xl bg-white">
+              <SelectItem value="плавание">🏊 Плавание</SelectItem>
+              <SelectItem value="синхронное плавание">🎭 Синхронное плавание</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select value={formData.coachName} onValueChange={val => setFormData({...formData, coachName: val})}>
+            <SelectTrigger className="rounded-xl">
+              <SelectValue placeholder="Тренер" />
+            </SelectTrigger>
+            <SelectContent className="rounded-xl bg-white">
+              {store.branchCoaches.map(c => (
+                <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           
           <Select value={formData.clientId} onValueChange={val => setFormData({...formData, clientId: val})}>
             <SelectTrigger className="rounded-xl">

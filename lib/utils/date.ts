@@ -20,9 +20,10 @@ export const cleanTime = (timeStr?: string | null): string => {
 };
 
 export const cleanDate = (dateString: string | null | undefined): string => {
-  if (!dateString || dateString.includes('1899-12-30')) return 'Дата не задана';
+  const str = String(dateString || '');
+  if (!str || str === 'null' || str === 'undefined' || str.includes('1899-12-30')) return 'Дата не задана';
   try {
-    const date = new Date(dateString);
+    const date = new Date(str);
     if (isNaN(date.getTime())) return 'Дата не задана';
     return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
   } catch {

@@ -134,20 +134,28 @@ export const ClientStore = types
 
     toggleClientLesson: flow(function* (clientId: string, lessonId: string) {
       const client = self.clients.find(c => c.id === clientId);
-      if (!client) return;
+      if (!client) {
+        console.error('Client not found for ID:', clientId);
+        return;
+      }
 
       const oldLessons = [...client.assignedLessonIds];
       client.toggleAssignedLesson(lessonId);
       const newLessons = [...client.assignedLessonIds];
+      console.log('Toggling lesson. Client:', client.childName, 'Old IDs:', oldLessons, 'New IDs:', newLessons);
 
       try {
-        const result = yield apiClient.updateClientAPI(clientId, {
+        const payload = {
           assignedLessonIds: newLessons.join(','),
           assignedLessonId: newLessons[0] || ''
-        });
+        };
+        console.log('Sending payload to updateClientAPI:', payload);
+        const result = yield apiClient.updateClientAPI(clientId, payload);
+        
         if (!result.success) throw new Error("Server rejected schedule update");
         yield (self as any).loadClients(); // Перезагружаем данные для синхронизации
       } catch (err: any) {
+        console.error('Error updating lesson assignment:', err);
         client.setAssignedLessons(oldLessons);
         self.error = err.message || "Failed to update schedule";
         throw err;
@@ -169,13 +177,14 @@ export const ClientStore = types
         throw err;
       }
     }),
-markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 'attended' | 'absent' }[], lessonId: string, date: string) {
+markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 'attended' | 'absent', isWalkin?: boolean }[], lessonId: string, date: string) {
   const snapshots = new Map();
-  attendanceList.forEach(({ clientId, status }) => {
+  attendanceList.forEach(({ clientId, status, isWalkin }) => {
     const client = self.clients.find(c => c.id === clientId);
     if (client) {
       snapshots.set(clientId, { remaining: client.remainingLessons, status: client.status });
-      if (status === 'attended') {
+      // Списываем занятие только если attended и НЕ walkin
+      if (status === 'attended' && !isWalkin) {
         const newRem = Math.max(0, client.remainingLessons - 1);
         const newStat = newRem <= 0 ? 'Пауза' : 'Активен';
         client.consumeLesson(newRem, newStat);
@@ -184,7 +193,7 @@ markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 
   });
 
   try {
-    const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, new Date().toLocaleDateString());
+    const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, date);
     if (!result.success) throw new Error("Server rejected bulk attendance");
   } catch (err: any) {
     // Откат
@@ -193,6 +202,7 @@ markBulkAttendance: flow(function* (attendanceList: { clientId: string, status: 
         if (client) client.consumeLesson(snap.remaining, snap.status);
     });
     self.error = err.message || "Bulk attendance failed";
+    throw err;
   }
 }),
     

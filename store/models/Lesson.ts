@@ -5,13 +5,14 @@ export const LessonModel = types.model('Lesson', {
   branchId: types.string,
   dayOfWeek: types.optional(types.string, 'Пн'),
   date: types.maybe(types.string),
-  time: types.string,
+  time: types.union(types.string, types.number),
   title: types.string,
   coachName: types.optional(types.string, ''),
   pool: types.optional(types.string, ''),
   duration: types.optional(types.string, '1 час'),
   maxCapacity: types.optional(types.union(types.number, types.string), 10),
   count: types.optional(types.string, '0 / 10'),
+  category: types.optional(types.enumeration(['синхронное плавание', 'плавание']), 'плавание'),
 })
 
 export type ILesson = Instance<typeof LessonModel>

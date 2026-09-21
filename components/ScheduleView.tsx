@@ -7,8 +7,9 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { AttendanceModal } from './AttendanceModal'
+import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { cleanTime, cleanDate } from '@/lib/utils/date'
 
 const store = getStore()
@@ -32,6 +33,7 @@ const isToday = (date: Date) => {
 
 export const ScheduleView = observer(() => {
   const [weekOffset, setWeekOffset] = useState(0)
+  const [isCreateLessonOpen, setIsCreateLessonOpen] = useState(false)
   
   const startOfWeek = getStartOfWeek(weekOffset);
   const endOfWeek = new Date(startOfWeek);
@@ -72,23 +74,28 @@ export const ScheduleView = observer(() => {
             </Button>
           </div>
         </div>
-        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
-          <Button 
-            variant={viewMode === 'день' ? 'default' : 'ghost'} 
-            size="sm"
-            onClick={() => setViewMode('день')}
-            className={viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
-          >
-            День
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setIsCreateLessonOpen(true)} className="rounded-xl bg-cyan-500 hover:bg-cyan-600 text-white shadow-sm">
+            <Plus className="size-4 mr-2" /> Занятие
           </Button>
-          <Button 
-            variant={viewMode === 'неделя' ? 'default' : 'ghost'} 
-            size="sm"
-            onClick={() => setViewMode('неделя')}
-            className={viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
-          >
-            Неделя
-          </Button>
+          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
+            <Button 
+              variant={viewMode === 'день' ? 'default' : 'ghost'} 
+              size="sm"
+              onClick={() => setViewMode('день')}
+              className={viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+            >
+              День
+            </Button>
+            <Button 
+              variant={viewMode === 'неделя' ? 'default' : 'ghost'} 
+              size="sm"
+              onClick={() => setViewMode('неделя')}
+              className={viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+            >
+              Неделя
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -114,6 +121,11 @@ export const ScheduleView = observer(() => {
         isOpen={!!selectedLesson} 
         onClose={() => setSelectedLesson(null)} 
         lesson={selectedLesson} 
+      />
+
+      <CreateLessonModal 
+        isOpen={isCreateLessonOpen} 
+        onClose={() => setIsCreateLessonOpen(false)} 
       />
 
       <div className="grid gap-4">
