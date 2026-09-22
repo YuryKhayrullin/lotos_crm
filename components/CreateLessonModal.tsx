@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStore } from '@/store/StoreProvider'
 import { apiClient } from '@/lib/api-client'
+import { parseTimeToHHMM } from '@/lib/utils/date'
 
 export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolean, onClose: () => void }) => {
   const store = useStore()
@@ -28,11 +29,8 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
     const dayOfWeek = days[d.getDay()];
 
-    // Форматируем время в HH:mm
-    let timeStr = formData.time;
-    if (/^\d{1,2}:\d{2}$/.test(timeStr)) {
-      timeStr = timeStr.padStart(5, '0');
-    }
+    // Форматируем время в HH:mm через утилиту (поддерживает 18:00, 18.00, 18, 0.75)
+    const timeStr = parseTimeToHHMM(formData.time);
 
     const newLessonData = {
       id: newLessonId,
@@ -79,9 +77,9 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <Input type="date" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} className="rounded-xl" />
-          <Input value={formData.time} onChange={e => setFormData({...formData, time: e.target.value})} placeholder="Время (например, 17:00)" className="rounded-xl" />
+          <Input value={formData.time} onChange={e => setFormData({...formData, time: e.target.value})} placeholder="Время (18:00, 18.00, 18)" className="rounded-xl" />
           
-          <Select value={formData.title} onValueChange={val => setFormData({...formData, title: val})}>
+          <Select value={formData.title} onValueChange={(val) => val && setFormData({...formData, title: val})}>
             <SelectTrigger className="rounded-xl">
               <SelectValue placeholder="Тип занятия" />
             </SelectTrigger>
@@ -91,7 +89,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
             </SelectContent>
           </Select>
 
-          <Select value={formData.category} onValueChange={(val: 'плавание' | 'синхронное плавание') => setFormData({...formData, category: val})}>
+          <Select value={formData.category} onValueChange={(val: 'плавание' | 'синхронное плавание') => val && setFormData({...formData, category: val})}>
             <SelectTrigger className="rounded-xl">
               <SelectValue placeholder="Категория" />
             </SelectTrigger>
@@ -101,7 +99,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
             </SelectContent>
           </Select>
 
-          <Select value={formData.coachName} onValueChange={val => setFormData({...formData, coachName: val})}>
+          <Select value={formData.coachName} onValueChange={(val) => val && setFormData({...formData, coachName: val})}>
             <SelectTrigger className="rounded-xl">
               <SelectValue placeholder="Тренер" />
             </SelectTrigger>
@@ -112,7 +110,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
             </SelectContent>
           </Select>
           
-          <Select value={formData.clientId} onValueChange={val => setFormData({...formData, clientId: val})}>
+          <Select value={formData.clientId} onValueChange={(val) => setFormData({...formData, clientId: val})}>
             <SelectTrigger className="rounded-xl">
               <SelectValue placeholder="Клиент (необязательно)" />
             </SelectTrigger>

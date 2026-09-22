@@ -56,6 +56,18 @@ function doPost(e) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var body = JSON.parse(e.postData.contents);
     
+    // --- ЗАЩИТА: ПРОВЕРКА API KEY ---
+    // Получаем секретный ключ из Script Properties Google Таблицы
+    var scriptSecret = PropertiesService.getScriptProperties().getProperty('GAS_API_SECRET');
+    if (scriptSecret) {
+      if (!body.apiKey || body.apiKey !== scriptSecret) {
+        console.error('Ошибка безопасности: неверный или отсутствующий apiKey');
+        return createResponse({ status: 'error', message: 'Unauthorized' });
+      }
+    } else {
+      console.warn('Предупреждение: GAS_API_SECRET не задан в свойствах скрипта Google Apps Script! База беззащитна.');
+    }
+    
     // --- НОРМАЛИЗАТОР ---
     if (body.payload) {
       for (var key in body.payload) {

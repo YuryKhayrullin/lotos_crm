@@ -20,7 +20,7 @@ export const AttendanceModal = observer(({
   lesson: ILesson | null 
 }) => {
   const store = useStore()
-  const [attendance, setAttendance] = useState<Record<string, 'attended' | 'absent' | 'walkin'>>({})
+  const [attendance, setAttendance] = useState<Record<string, 'attended' | 'absent' | 'walkin' | null>>({})
   const [saving, setSaving] = useState(false)
 
   if (!lesson) return null

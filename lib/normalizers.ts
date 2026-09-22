@@ -1,12 +1,14 @@
-import { ILesson, IClient } from '@/store/models';
+import { ILessonSnapshot, IClientSnapshot } from '@/store/models';
+import { parseTimeToHHMM } from './utils/date';
 
-export const normalizeLesson = (l: any): ILesson => ({
+export const normalizeLesson = (l: any): ILessonSnapshot => ({
   id: String(l.id || ''),
   branchId: String(l.branchId || ''),
   dayOfWeek: String(l.dayOfWeek || 'Пн'),
   date: l.date ? String(l.date) : undefined,
-  time: String(l.time || '00:00'),
+  time: parseTimeToHHMM(l.time),
   title: String(l.title || 'Занятие'),
+  category: l.category === 'синхронное плавание' ? 'синхронное плавание' : 'плавание',
   coachName: String(l.coachName || ''),
   pool: String(l.pool || ''),
   duration: String(l.duration || '1 час'),
@@ -14,11 +16,30 @@ export const normalizeLesson = (l: any): ILesson => ({
   count: String(l.count || '0 / 10'),
 });
 
-export const normalizeClient = (c: any): IClient => ({
-  ...c,
+export const normalizeClient = (c: any): IClientSnapshot => ({
   id: String(c.id || ''),
+  childName: String(c.childName || ''),
+  parentName: String(c.parentName || ''),
+  phone: String(c.phone || ''),
+  email: String(c.email || ''),
+  birthDate: String(c.birthDate || ''),
+  age: String(c.age || '0 лет'),
   branchId: String(c.branchId || ''),
+  status: c.status === 'Пауза' || c.status === 'Архив' ? c.status : 'Активен',
+  category: c.category === 'синхронное плавание' ? 'синхронное плавание' : 'плавание',
+  lessonsPerWeek: Number(c.lessonsPerWeek || 1),
+  initials: String(c.initials || ''),
   paidAmount: Number(c.paidAmount || 0),
-  remainingLessons: Number(c.remainingLessons || 0),
-  totalLessons: Number(c.totalLessons || 0),
+  subscription: c.subscription ? {
+    id: String(c.subscription.id || Date.now().toString()),
+    clientId: String(c.id || ''),
+    totalLessons: Number(c.subscription.totalLessons || 0),
+    remainingLessons: Number(c.subscription.remainingLessons || 0),
+    paid: String(c.subscription.paid) === 'true' || c.subscription.paid === true,
+    purchasedAt: String(c.subscription.purchasedAt || new Date().toISOString()),
+    receiptUrl: String(c.subscription.receiptUrl || ''),
+    status: String(c.subscription.status || 'Активен')
+  } : null,
+  assignedLessonId: c.assignedLessonId ? String(c.assignedLessonId) : null,
+  assignedLessonIds: Array.isArray(c.assignedLessonIds) ? c.assignedLessonIds.map(String) : []
 });
