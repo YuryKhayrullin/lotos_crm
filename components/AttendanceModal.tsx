@@ -43,6 +43,12 @@ export const AttendanceModal = observer(({
   const handleSaveAll = async () => {
     if (Object.keys(attendance).length === 0) return
     
+    // Валидация: у урока должна быть дата
+    if (!lesson.date) {
+      alert('У занятия не задана дата. Нельзя отметить посещаемость.')
+      return
+    }
+    
     setSaving(true)
     try {
       const attendanceList = Object.entries(attendance).map(([clientId, status]) => ({
@@ -51,11 +57,18 @@ export const AttendanceModal = observer(({
         isWalkin: status === 'walkin'
       }))
 
-      // Используем bulk метод
+      // Используем bulk метод с датой урока
+      // Фильтруем: не walkin И status не null
+      const forBulk = attendanceList
+        .filter((a): a is { clientId: string; status: 'attended' | 'absent'; isWalkin: boolean } => 
+          !a.isWalkin && a.status !== null
+        )
+        .map(({clientId, status}) => ({clientId, status}))
+
       await store.clientStore.markBulkAttendance(
-        attendanceList.filter(a => !a.isWalkin).map(({clientId, status}) => ({clientId, status})),
+        forBulk,
         lesson.id,
-        lesson.date || new Date().toISOString().split('T')[0]
+        lesson.date
       )
 
       // Для walkin просто закрываем, списания нет

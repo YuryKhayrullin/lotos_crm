@@ -1,3 +1,42 @@
+import { ILesson } from '@/store/models';
+
+export const dayOfWeekToNumber = (day: string): number => {
+  const days: Record<string, number> = { 'Пн': 1, 'Вт': 2, 'Ср': 3, 'Чт': 4, 'Пт': 5, 'Сб': 6, 'Вс': 0 };
+  return days[day] ?? -1;
+};
+
+export const isLessonInWeek = (lesson: ILesson, weekStart: Date, weekEnd: Date): boolean => {
+  if (lesson.date) {
+    const lessonDate = new Date(lesson.date);
+    if (!isNaN(lessonDate.getTime())) {
+      lessonDate.setHours(0, 0, 0, 0);
+      return lessonDate >= weekStart && lessonDate <= weekEnd;
+    }
+  }
+  // If no date, it's NOT in any week by default (must have explicit date)
+  // Only show if it's explicitly marked as recurring
+  return lesson.isRecurring === true;
+};
+
+export const isLessonOnDay = (lesson: ILesson, targetDate: Date): boolean => {
+  if (lesson.date) {
+    const lessonDate = new Date(lesson.date);
+    if (!isNaN(lessonDate.getTime())) {
+      return (
+        lessonDate.getDate() === targetDate.getDate() &&
+        lessonDate.getMonth() === targetDate.getMonth() &&
+        lessonDate.getFullYear() === targetDate.getFullYear()
+      );
+    }
+  }
+  // If no date, only show if recurring and dayOfWeek matches
+  if (lesson.isRecurring === true) {
+    const dayNum = dayOfWeekToNumber(lesson.dayOfWeek);
+    return dayNum === targetDate.getDay();
+  }
+  return false;
+};
+
 export const formatLessonDate = (dateString: string | null | undefined): string => {
   if (!dateString) return 'Дата не задана';
   if (dateString.includes('1899-12-30')) return 'Дата не задана';

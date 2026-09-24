@@ -1,6 +1,3 @@
-// ==========================================
-// 1. ИНФРАСТРУКТУРА ОТВЕТОВ (CORS включен)
-// ==========================================
 function createResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
@@ -214,7 +211,7 @@ function doPost(e) {
       throw new Error('Клиент не найден');
     }
     
-    // UPDATE
+    // UPDATE - with assignedLessonIds array to comma-separated string conversion
     if (body.action.indexOf('update') === 0) {
       var sheet = ss.getSheetByName(actionToSheet[body.action]);
       var headers = getHeaders(sheet);
@@ -222,7 +219,16 @@ function doPost(e) {
       var idIdx = headers.indexOf('id');
       for (var i = 1; i < data.length; i++) {
         if (String(data[i][idIdx]) === String(body.id)) {
-          headers.forEach(function(h, idx) { if (body[h] !== undefined) sheet.getRange(i + 1, idx + 1).setValue(safeValue(body[h])); });
+          headers.forEach(function(h, idx) { 
+            if (body[h] !== undefined) {
+              var val = body[h];
+              // Convert assignedLessonIds array to comma-separated string for sheets
+              if (h === 'assignedLessonIds' && Array.isArray(val)) {
+                val = val.join(',');
+              }
+              sheet.getRange(i + 1, idx + 1).setValue(safeValue(val)); 
+            }
+          });
           return createResponse({ success: true });
         }
       }

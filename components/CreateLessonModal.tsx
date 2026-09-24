@@ -22,8 +22,6 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
   })
 
   const handleSubmit = async () => {
-    const newLessonId = String(Date.now());
-    
     // Вычисляем день недели
     const d = new Date(formData.date);
     const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
@@ -33,7 +31,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     const timeStr = parseTimeToHHMM(formData.time);
 
     const newLessonData = {
-      id: newLessonId,
+      // НЕ генерируем ID локально - сервер вернет свой ID
       branchId: store.selectedBranchId,
       date: formData.date,
       dayOfWeek: dayOfWeek,
@@ -46,10 +44,12 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
       maxCapacity: 10
     };
 
-    await store.createLesson(newLessonData as any);
+    // createLesson возвращает созданный урок с серверным ID
+    const createdLesson = await store.createLesson(newLessonData as any);
     
-    if (formData.clientId) {
-      await store.clientStore.toggleClientLesson(formData.clientId, newLessonId);
+    // Используем серверный ID для прикрепления клиента
+    if (formData.clientId && createdLesson?.id) {
+      await store.clientStore.toggleClientLesson(formData.clientId, createdLesson.id);
     }
     
     // Перезагружаем ВСЕ данные для синхронизации

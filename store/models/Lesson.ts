@@ -13,6 +13,7 @@ export const LessonModel = types.model('Lesson', {
   duration: types.optional(types.string, '1 час'),
   maxCapacity: types.optional(types.union(types.number, types.string), 10),
   count: types.optional(types.string, '0 / 10'),
+  isRecurring: types.optional(types.boolean, false),
 })
 
 export type ILesson = Instance<typeof LessonModel>

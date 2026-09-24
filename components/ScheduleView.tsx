@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { observer } from 'mobx-react-lite'
 import { getStore } from '@/store/RootStore'
 import { Card, CardContent } from '@/components/ui/card'
@@ -8,7 +8,7 @@ import { AttendanceModal } from './AttendanceModal'
 import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
-import { cleanTime, cleanDate } from '@/lib/utils/date'
+import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay } from '@/lib/utils/date'
 
 const store = getStore()
 
@@ -47,7 +47,22 @@ export const ScheduleView = observer(() => {
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
 
-  const lessons = store.sortedBranchLessons.filter(l => viewMode === 'неделя' || l.dayOfWeek === selectedDay)
+  // Получаем выбранную дату для режима "день"
+  const selectedDayData = DAYS.find(d => d.key === selectedDay);
+
+  // Фильтрация уроков с учетом РЕАЛЬНЫХ дат
+  const lessons = useMemo(() => {
+    const branchLessons = store.sortedBranchLessons;
+    
+    if (viewMode === 'неделя') {
+      // В режиме неделя: показываем уроки, дата которых попадает в текущую неделю
+      return branchLessons.filter(l => isLessonInWeek(l, startOfWeek, endOfWeek));
+    } else {
+      // В режиме день: показываем уроки на выбранную дату
+      if (!selectedDayData) return [];
+      return branchLessons.filter(l => isLessonOnDay(l, selectedDayData.fullDate));
+    }
+  }, [store.sortedBranchLessons, viewMode, startOfWeek, endOfWeek, selectedDay, selectedDayData]);
 
   const branch = store.currentBranch
 
@@ -148,10 +163,10 @@ export const ScheduleView = observer(() => {
                     <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
                     <div>
                       <p className="text-lg font-bold text-cyan-950">
-                        {cleanTime(lesson.time)}
+                        {parseTimeToHHMM(lesson.time)}
                       </p>
                       <p className="text-xs font-medium text-cyan-600 mb-1">
-                        {cleanDate(lesson.date || lesson.time)}
+                        {cleanDate(lesson.date)}
                       </p>
                       <p className="text-sm font-semibold text-slate-800">{lesson.title}</p>
                       <p className="text-xs text-slate-500 mt-1">{lesson.coachName} · {lesson.pool}</p>
