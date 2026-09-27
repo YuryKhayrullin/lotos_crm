@@ -8,8 +8,8 @@ export const ClientModel = types
     parentName: types.optional(types.string, ''),
     phone: types.optional(types.string, ''),
     email: types.optional(types.string, ''),
-    birthDate: types.optional(types.string, ''), 
-    age: types.optional(types.string, '0 лет'), 
+    birthDate: types.optional(types.string, ''),
+    age: types.optional(types.string, '0 лет'),
     branchId: types.optional(types.string, ''),
     status: types.optional(types.enumeration(['Активен', 'Пауза', 'Архив']), 'Активен'),
     category: types.optional(types.enumeration(['синхронное плавание', 'плавание']), 'плавание'),
@@ -19,6 +19,9 @@ export const ClientModel = types
     subscription: types.maybeNull(SubscriptionModel),
     assignedLessonId: types.maybeNull(types.string),
     assignedLessonIds: types.optional(types.array(types.string), []),
+    // История посещений нужна только для отображения текущей отметки и
+    // исправления absent <-> attended в модалке занятия.
+    attendanceHistory: types.optional(types.array(types.frozen()), []),
   })
   .views((self) => ({
     get isActive(): boolean {
@@ -38,7 +41,7 @@ export const ClientModel = types
     },
     isAssignedTo(lessonId: string): boolean {
       return self.assignedLessonIds.includes(lessonId) || self.assignedLessonId === lessonId
-    }
+    },
   }))
   .actions((self) => ({
     setAssignedLessons(lessonIds: string[]) {
@@ -63,31 +66,30 @@ export const ClientModel = types
     },
     updateSubscription(remaining: number, total: number, receiptUrl: string, status: 'Активен' | 'Пауза') {
       if (!self.subscription) {
-        self.subscription = { 
-          id: Date.now().toString(), 
-          clientId: self.id, 
-          totalLessons: total, 
-          remainingLessons: remaining, 
-          paid: true, 
-          purchasedAt: new Date().toISOString(), 
-          receiptUrl 
-        } as any;
+        self.subscription = {
+          id: Date.now().toString(),
+          clientId: self.id,
+          totalLessons: total,
+          remainingLessons: remaining,
+          paid: true,
+          purchasedAt: new Date().toISOString(),
+          receiptUrl,
+        } as any
       } else {
-        self.subscription.remainingLessons = remaining;
-        self.subscription.totalLessons = total;
-        self.subscription.paid = true;
-        (self.subscription as any).receiptUrl = receiptUrl;
+        self.subscription.remainingLessons = remaining
+        self.subscription.totalLessons = total
+        self.subscription.paid = true
+        ;(self.subscription as any).receiptUrl = receiptUrl
       }
-      self.status = status;
+      self.status = status
     },
     consumeLesson(newRemaining: number, newStatus: 'Активен' | 'Пауза') {
       if (self.subscription) {
-        self.subscription.remainingLessons = newRemaining;
+        self.subscription.remainingLessons = newRemaining
       }
-      self.status = newStatus;
-    }
+      self.status = newStatus
+    },
   }))
-
 
 export type IClient = Instance<typeof ClientModel>
 export type IClientSnapshot = typeof ClientModel.Type

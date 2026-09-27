@@ -1,8 +1,16 @@
-import { LayoutDashboard, CalendarDays, UsersRound, UserRound, CreditCard, CircleDollarSign, LucideIcon } from 'lucide-react'
+import {
+  LayoutDashboard,
+  CalendarDays,
+  UsersRound,
+  UserRound,
+  CreditCard,
+  CircleDollarSign,
+  LucideIcon,
+} from 'lucide-react'
 
 export interface NavItem {
-  label: string;
-  icon: LucideIcon;
+  label: string
+  icon: LucideIcon
 }
 
 export const NAV_ITEMS = [
@@ -18,4 +26,3 @@ export const nav: NavItem[] = NAV_ITEMS.map((item) => ({
   label: item.screen,
   icon: item.icon,
 }))
-

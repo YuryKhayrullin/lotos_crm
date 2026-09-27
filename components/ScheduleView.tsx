@@ -9,64 +9,73 @@ import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay } from '@/lib/utils/date'
+import { RoleGuard } from './RoleGuard'
 
 const store = getStore()
 
 // Обновленная функция с учетом смещения
 const getStartOfWeek = (offset: number) => {
-  const d = new Date();
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1) + (offset * 7);
-  const start = new Date(d.setDate(diff));
-  start.setHours(0, 0, 0, 0);
-  return start;
-};
+  const d = new Date()
+  const day = d.getDay()
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1) + offset * 7
+  const start = new Date(d.setDate(diff))
+  start.setHours(0, 0, 0, 0)
+  return start
+}
 
 const isToday = (date: Date) => {
-  const today = new Date();
-  return date.getDate() === today.getDate() && 
-         date.getMonth() === today.getMonth() && 
-         date.getFullYear() === today.getFullYear();
+  const today = new Date()
+  return (
+    date.getDate() === today.getDate() &&
+    date.getMonth() === today.getMonth() &&
+    date.getFullYear() === today.getFullYear()
+  )
 }
 
 export const ScheduleView = observer(() => {
   const [weekOffset, setWeekOffset] = useState(0)
   const [isCreateLessonOpen, setIsCreateLessonOpen] = useState(false)
-  
-  const startOfWeek = getStartOfWeek(weekOffset);
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
+
+  const startOfWeek = useMemo(() => getStartOfWeek(weekOffset), [weekOffset])
+  const endOfWeek = useMemo(() => {
+    const end = new Date(startOfWeek)
+    end.setDate(startOfWeek.getDate() + 6)
+    return end
+  }, [startOfWeek])
 
   const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
-    const d = new Date(startOfWeek);
-    d.setDate(startOfWeek.getDate() + i);
-    return { key: label, label: `${label} ${d.getDate()}`, fullDate: d };
-  });
+    const d = new Date(startOfWeek)
+    d.setDate(startOfWeek.getDate() + i)
+    return { key: label, label: `${label} ${d.getDate()}`, fullDate: d }
+  })
 
-  const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн')
+  const [selectedDay, setSelectedDay] = useState(
+    DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн',
+  )
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
 
   // Получаем выбранную дату для режима "день"
-  const selectedDayData = DAYS.find(d => d.key === selectedDay);
+  const selectedDayData = DAYS.find((d) => d.key === selectedDay)
+  const sortedBranchLessons = store.sortedBranchLessons
 
   // Фильтрация уроков с учетом РЕАЛЬНЫХ дат
   const lessons = useMemo(() => {
-    const branchLessons = store.sortedBranchLessons;
-    
+    const branchLessons = sortedBranchLessons
+
     if (viewMode === 'неделя') {
       // В режиме неделя: показываем уроки, дата которых попадает в текущую неделю
-      return branchLessons.filter(l => isLessonInWeek(l, startOfWeek, endOfWeek));
+      return branchLessons.filter((l) => isLessonInWeek(l, startOfWeek, endOfWeek))
     } else {
       // В режиме день: показываем уроки на выбранную дату
-      if (!selectedDayData) return [];
-      return branchLessons.filter(l => isLessonOnDay(l, selectedDayData.fullDate));
+      if (!selectedDayData) return []
+      return branchLessons.filter((l) => isLessonOnDay(l, selectedDayData.fullDate))
     }
-  }, [store.sortedBranchLessons, viewMode, startOfWeek, endOfWeek, selectedDay, selectedDayData]);
+  }, [sortedBranchLessons, viewMode, startOfWeek, endOfWeek, selectedDayData])
 
   const branch = store.currentBranch
 
-  const weekRange = `${startOfWeek.getDate()} ${startOfWeek.toLocaleString('ru-RU', { month: 'short' })} – ${endOfWeek.getDate()} ${endOfWeek.toLocaleString('ru-RU', { month: 'short' })} ${endOfWeek.getFullYear()}`;
+  const weekRange = `${startOfWeek.getDate()} ${startOfWeek.toLocaleString('ru-RU', { month: 'short' })} – ${endOfWeek.getDate()} ${endOfWeek.toLocaleString('ru-RU', { month: 'short' })} ${endOfWeek.getFullYear()}`
 
   return (
     <div className="flex flex-col gap-6">
@@ -76,35 +85,42 @@ export const ScheduleView = observer(() => {
             Расписание · {branch ? branch.name : 'Филиал'}
           </h2>
           <div className="flex items-center gap-2 mt-2">
-            <Button variant="ghost" size="sm" onClick={() => setWeekOffset(prev => prev - 1)}>
-                <ChevronLeft className="size-4" />
+            <Button variant="ghost" size="sm" onClick={() => setWeekOffset((prev) => prev - 1)}>
+              <ChevronLeft className="size-4" />
             </Button>
-            <p className="text-sm text-slate-500">
-                Неделя {weekRange}
-            </p>
-            <Button variant="ghost" size="sm" onClick={() => setWeekOffset(prev => prev + 1)}>
-                <ChevronRight className="size-4" />
+            <p className="text-sm text-slate-500">Неделя {weekRange}</p>
+            <Button variant="ghost" size="sm" onClick={() => setWeekOffset((prev) => prev + 1)}>
+              <ChevronRight className="size-4" />
             </Button>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={() => setIsCreateLessonOpen(true)} className="rounded-xl bg-cyan-500 hover:bg-cyan-600 text-white shadow-sm">
-            <Plus className="size-4 mr-2" /> Занятие
-          </Button>
+          <RoleGuard roles={['admin']}>
+            <Button
+              onClick={() => setIsCreateLessonOpen(true)}
+              className="rounded-xl bg-cyan-500 hover:bg-cyan-600 text-white shadow-sm"
+            >
+              <Plus className="size-4 mr-2" /> Занятие
+            </Button>
+          </RoleGuard>
           <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
-            <Button 
-              variant={viewMode === 'день' ? 'default' : 'ghost'} 
+            <Button
+              variant={viewMode === 'день' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setViewMode('день')}
-              className={viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+              className={
+                viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'
+              }
             >
               День
             </Button>
-            <Button 
-              variant={viewMode === 'неделя' ? 'default' : 'ghost'} 
+            <Button
+              variant={viewMode === 'неделя' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setViewMode('неделя')}
-              className={viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'}
+              className={
+                viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'
+              }
             >
               Неделя
             </Button>
@@ -113,10 +129,13 @@ export const ScheduleView = observer(() => {
       </div>
 
       <div className="flex items-center gap-2 overflow-x-auto pb-2">
-        {DAYS.map(d => (
+        {DAYS.map((d) => (
           <button
             key={d.key}
-            onClick={() => { setSelectedDay(d.key); setViewMode('день'); }}
+            onClick={() => {
+              setSelectedDay(d.key)
+              setViewMode('день')
+            }}
             className={`px-5 py-2.5 rounded-2xl font-semibold text-sm transition-all whitespace-nowrap shadow-sm border ${
               viewMode === 'день' && selectedDay === d.key
                 ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
@@ -130,16 +149,9 @@ export const ScheduleView = observer(() => {
         ))}
       </div>
 
-      <AttendanceModal 
-        isOpen={!!selectedLesson} 
-        onClose={() => setSelectedLesson(null)} 
-        lesson={selectedLesson} 
-      />
+      <AttendanceModal isOpen={!!selectedLesson} onClose={() => setSelectedLesson(null)} lesson={selectedLesson} />
 
-      <CreateLessonModal 
-        isOpen={isCreateLessonOpen} 
-        onClose={() => setIsCreateLessonOpen(false)} 
-      />
+      <CreateLessonModal isOpen={isCreateLessonOpen} onClose={() => setIsCreateLessonOpen(false)} />
 
       <div className="grid gap-4">
         {lessons.length === 0 ? (
@@ -148,13 +160,13 @@ export const ScheduleView = observer(() => {
           </Card>
         ) : (
           lessons.map((lesson) => {
-            const enrolledCount = store.branchClients.filter(c => c.isAssignedTo(lesson.id)).length
+            const enrolledCount = store.branchClients.filter((c) => c.isAssignedTo(lesson.id)).length
             const maxCap = lesson.maxCapacity || 10
             const countStr = `${enrolledCount} / ${maxCap}`
 
             return (
-              <Card 
-                key={lesson.id} 
+              <Card
+                key={lesson.id}
                 className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
                 onClick={() => setSelectedLesson(lesson as any)}
               >
@@ -162,17 +174,15 @@ export const ScheduleView = observer(() => {
                   <div className="flex items-center gap-4">
                     <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
                     <div>
-                      <p className="text-lg font-bold text-cyan-950">
-                        {parseTimeToHHMM(lesson.time)}
-                      </p>
-                      <p className="text-xs font-medium text-cyan-600 mb-1">
-                        {cleanDate(lesson.date)}
-                      </p>
+                      <p className="text-lg font-bold text-cyan-950">{parseTimeToHHMM(lesson.time)}</p>
+                      <p className="text-xs font-medium text-cyan-600 mb-1">{cleanDate(lesson.date)}</p>
                       <p className="text-sm font-semibold text-slate-800">{lesson.title}</p>
-                      <p className="text-xs text-slate-500 mt-1">{lesson.coachName} · {lesson.pool}</p>
+                      <p className="text-xs text-slate-500 mt-1">
+                        {lesson.coachName} · {lesson.pool}
+                      </p>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-4">
                     <Badge className="bg-cyan-50 text-cyan-700 font-bold px-3 py-1 text-sm rounded-xl">
                       {countStr}

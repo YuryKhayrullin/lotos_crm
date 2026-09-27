@@ -10,6 +10,7 @@ __v0_jsx-dev-runtime.ts
 .env*.local
 # Build cache and logs
 tsconfig.tsbuildinfo
+.test-dist/
 typescript_errors.log
 .env.local
 

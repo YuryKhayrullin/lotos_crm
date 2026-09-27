@@ -16,12 +16,7 @@ export const AdminAddLessons = observer(({ clientId }: { clientId: string }) => 
 
   return (
     <div className="flex items-center gap-2 mt-2">
-      <Input 
-        type="number" 
-        value={count} 
-        onChange={(e) => setCount(Number(e.target.value))} 
-        className="w-20"
-      />
+      <Input type="number" value={count} onChange={(e) => setCount(Number(e.target.value))} className="w-20" />
       <Button onClick={handleAdd} size="sm" disabled={store.clientStore.isLoading}>
         Начислить
       </Button>

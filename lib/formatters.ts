@@ -1,15 +1,15 @@
 export const cleanTime = (timeStr?: string | null): string => {
-  if (!timeStr) return '--:--';
-  if (/^\d{2}:\d{2}$/.test(timeStr)) return timeStr;
-  
+  if (!timeStr) return '--:--'
+  if (/^\d{2}:\d{2}$/.test(timeStr)) return timeStr
+
   try {
-    const date = new Date(timeStr);
-    if (isNaN(date.getTime())) return '--:--';
-    return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const date = new Date(timeStr)
+    if (isNaN(date.getTime())) return '--:--'
+    return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
   } catch {
-    return '--:--';
+    return '--:--'
   }
-};
+}
 
 export const formatPhone = (value: string) => {
   const phone = value.replace(/\D/g, '').slice(0, 11)

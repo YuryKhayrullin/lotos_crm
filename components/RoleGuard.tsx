@@ -1,28 +1,15 @@
 'use client'
 
 import { observer } from 'mobx-react-lite'
-import { getStore } from '@/store/RootStore'
 import React from 'react'
+import { getStore } from '@/store/RootStore'
 
 const store = getStore()
 
-interface RoleGuardProps {
-  roles: ('admin' | 'coach')[]
-  children: React.ReactNode
-}
-
-export const RoleGuard = observer(({ roles, children }: RoleGuardProps) => {
-  const userRole = store.authStore.user?.role
-  
-  // Если пользователь - админ, разрешаем всегда
-  if (userRole === 'admin') {
+export const RoleGuard = observer(
+  ({ roles, children }: { roles: ('admin' | 'coach')[]; children: React.ReactNode }) => {
+    const role = store.authStore.user?.role
+    if (!role || !roles.includes(role)) return null
     return <>{children}</>
-  }
-
-  // Если роль не админ, проверяем по списку разрешенных
-  if (!userRole || !roles.includes(userRole as 'admin' | 'coach')) {
-    return null
-  }
-  
-  return <>{children}</>
-})
+  },
+)

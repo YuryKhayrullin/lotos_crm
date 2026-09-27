@@ -16,10 +16,10 @@ export const SubscriptionUpload = observer(({ clientId }: { clientId: string }) 
     try {
       await store.clientStore.addSubscription(clientId, file, lessons)
       if (!store.clientStore.error) {
-        alert("Подписка успешно добавлена!")
+        alert('Подписка успешно добавлена!')
       }
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // ClientStore exposes a localized error in the form.
     }
   }
 
@@ -27,7 +27,12 @@ export const SubscriptionUpload = observer(({ clientId }: { clientId: string }) 
     <div className="flex flex-col gap-4 p-4 border rounded-xl">
       {store.clientStore.error && <p className="text-red-500 text-sm">{store.clientStore.error}</p>}
       <Input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
-      <Input type="number" value={lessons} onChange={(e) => setLessons(Number(e.target.value))} placeholder="Кол-во занятий" />
+      <Input
+        type="number"
+        value={lessons}
+        onChange={(e) => setLessons(Number(e.target.value))}
+        placeholder="Кол-во занятий"
+      />
       <Button onClick={handleUpload} disabled={store.clientStore.isLoading}>
         {store.clientStore.isLoading ? 'Загрузка...' : 'Добавить подписку'}
       </Button>

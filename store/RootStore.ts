@@ -43,7 +43,7 @@ const RootStoreModel = types
         email: '',
         birthDate: '',
       }),
-      {}
+      {},
     ),
     coachFormName: types.optional(types.string, ''),
     coachFormSpecialty: types.optional(types.string, ''),
@@ -70,12 +70,12 @@ const RootStoreModel = types
   }))
   .views((self) => ({
     get sortedBranchLessons(): ILesson[] {
-      return [...self.branchLessons].sort((a: ILesson, b: ILesson) => 
-        String(a.time).localeCompare(String(b.time))
-      )
+      return [...self.branchLessons].sort((a: ILesson, b: ILesson) => String(a.time).localeCompare(String(b.time)))
     },
   }))
   .actions((self) => {
+    let activeInitializeController: AbortController | null = null
+    let initializedForUser: string | null = null
     const closeClientForm = () => {
       self.clientFormOpen = false
       self.clientFormData = {}
@@ -97,6 +97,7 @@ const RootStoreModel = types
     }
     const setScreen = (screen: string) => {
       if (SCREENS.includes(screen as any)) {
+        if (self.authStore.isCoach && screen !== 'Дашборд' && screen !== 'Расписание') return
         self.currentScreen = screen as any
         self.sidebarOpen = false
       }
@@ -104,6 +105,7 @@ const RootStoreModel = types
     const setBranch = (branchId: string) => {
       self.selectedBranchId = branchId
       self.branchMenuOpen = false
+      initializedForUser = null
     }
     const toggleSidebar = () => {
       self.sidebarOpen = !self.sidebarOpen
@@ -178,9 +180,9 @@ const RootStoreModel = types
       self.error = message
     }
     const addLessonToStore = (lessonData: any) => {
-      self.lessons.push(lessonData);
+      self.lessons.push(lessonData)
     }
-    
+
     return {
       closeClientForm,
       closeBranchMenu,
@@ -209,42 +211,68 @@ const RootStoreModel = types
       setError,
       addLessonToStore,
       initialize: flow(function* () {
+        const userId = self.authStore.user?.id
+          ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
+          : null
+        if (initializedForUser === userId && self.branches.length > 0) return
+        activeInitializeController?.abort()
+        const controller = new AbortController()
+        activeInitializeController = controller
         self.isLoading = true
+        self.clientStore.setBranchScope(
+          self.authStore.isAdmin
+            ? self.selectedBranchId
+            : self.authStore.user?.branchId
+              ? String(self.authStore.user.branchId)
+              : null,
+        )
         try {
-          const [branches, coaches, lessons] = yield Promise.all([
-            apiClient.fetchBranches(),
-            apiClient.fetchCoaches(),
-            apiClient.fetchLessons(),
+          // Данные загружаются независимыми запросами: тяжёлый список клиентов
+          // больше не блокирует расписание и справочники одним bootstrap-запросом.
+          const [branches, coaches, lessons, clientsPage] = yield Promise.all([
+            apiClient.fetchBranches(controller.signal),
+            apiClient.fetchCoaches(
+              controller.signal,
+              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
+            ),
+            apiClient.fetchLessons(
+              controller.signal,
+              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
+            ),
+            apiClient.fetchClientsPage(
+              1,
+              100,
+              controller.signal,
+              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
+            ),
           ])
-          console.log('DEBUG INITIALIZE - Fetched:', { 
-            branchesCount: branches.length, 
-            coachesCount: coaches.length, 
-            lessonsCount: lessons.length 
-          });
+          if (controller.signal.aborted) return
 
-          yield self.clientStore.loadClients()
-          
+          yield self.clientStore.loadClients(clientsPage)
+          if (controller.signal.aborted) return
+
           self.branches.replace(branches)
           self.coaches.replace(coaches)
           self.lessons.replace(lessons)
-          
-          console.log('DEBUG INITIALIZE - Store state:', { 
-            branches: self.branches.length, 
-            coaches: self.coaches.length, 
-            lessons: self.lessons.length,
-            clients: self.clientStore.clients.length
-          });
-          
-          if (!self.selectedBranchId && branches.length > 0) {
-            setBranch(String(branches[0].id))
-            console.log('DEBUG INITIALIZE - Auto-selected branch:', branches[0].id);
+
+          if (!self.selectedBranchId && branches.length > 0 && self.authStore.isCoach) {
+            const userBranchId = self.authStore.user?.branchId
+            const requestedBranchId = userBranchId !== null && userBranchId !== undefined ? String(userBranchId) : null
+            const branchId =
+              requestedBranchId && branches.some((branch: IBranch) => String(branch.id) === requestedBranchId)
+                ? requestedBranchId
+                : String(branches[0].id)
+            setBranch(branchId)
           }
 
+          initializedForUser = userId
           self.isLoading = false
         } catch (error: any) {
-          console.error('DEBUG INITIALIZE - Error:', error);
+          if (error?.name === 'AbortError') return
           self.error = error instanceof ApiError ? error.message : 'Ошибка загрузки данных'
           self.isLoading = false
+        } finally {
+          if (activeInitializeController === controller) activeInitializeController = null
         }
       }),
       addBranch: flow(function* (name: string, address: string) {
@@ -289,7 +317,7 @@ const RootStoreModel = types
       }),
       createCoach: flow(function* () {
         if (!self.coachFormName.trim() || !self.coachFormSpecialty.trim()) return
-        const branch = self.currentBranch
+        const branch = self.currentBranch || (self.branches.length === 1 ? self.branches[0] : undefined)
         if (!branch) return
         try {
           const coach = yield apiClient.createCoach({
@@ -395,7 +423,6 @@ export function getStore(): IRootStore {
       isLoading: true,
       error: null,
     })
-    storeInstance.authStore.init()
   }
   return storeInstance
 }
