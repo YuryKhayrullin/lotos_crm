@@ -4,11 +4,27 @@ import { observer } from 'mobx-react-lite'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/store/StoreProvider'
 import { CreateClientDto, IClient } from '@/store/models'
+import { apiClient } from '@/lib/api-client'
+import { packagePrice, calculatePaymentLessons } from '@/lib/subscription-pricing'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Plus, Search, ChevronDown, ChevronUp, CalendarDays, Mail, Phone, UserRound, Waves } from 'lucide-react'
+import {
+  Plus,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  CalendarDays,
+  Mail,
+  Phone,
+  UserRound,
+  Waves,
+  CreditCard,
+  History,
+  ArrowUpRight,
+  Loader2,
+} from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
 const formatPhone = (value: string) => {
@@ -80,6 +96,14 @@ export const ClientsView = observer(() => {
     emptyForm(store.selectedBranchId || String(store.branches[0]?.id || '')),
   )
   const [formError, setFormError] = useState('')
+  const [isPaymentOpen, setIsPaymentOpen] = useState(false)
+  const [paymentAmount, setPaymentAmount] = useState('')
+  const [paymentComment, setPaymentComment] = useState('')
+  const [paymentError, setPaymentError] = useState('')
+  const [paymentLoading, setPaymentLoading] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [paymentHistory, setPaymentHistory] = useState<Array<Record<string, unknown>>>([])
+  const [lessonLedger, setLessonLedger] = useState<Array<Record<string, unknown>>>([])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -91,6 +115,72 @@ export const ClientsView = observer(() => {
   const selectedClient = selectedClientId
     ? store.clientStore.clients.find((client) => client.id === selectedClientId) || null
     : null
+
+  useEffect(() => {
+    if (!selectedClient || !store.authStore.isAdmin) {
+      setPaymentHistory([])
+      setLessonLedger([])
+      return
+    }
+    let cancelled = false
+    setHistoryLoading(true)
+    void apiClient
+      .getClientHistory(selectedClient.id)
+      .then((history) => {
+        if (cancelled) return
+        setPaymentHistory(history.payments)
+        setLessonLedger(history.ledger)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPaymentHistory([])
+          setLessonLedger([])
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedClient, store.authStore.isAdmin])
+
+  const openPayment = () => {
+    if (!selectedClient) return
+    setPaymentAmount(String(packagePrice(selectedClient.category, selectedClient.lessonsPerWeek) || ''))
+    setPaymentComment('')
+    setPaymentError('')
+    setIsPaymentOpen(true)
+  }
+
+  const submitPayment = async () => {
+    if (!selectedClient) return
+    const amount = Number(paymentAmount)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPaymentError('Введите сумму платежа больше нуля')
+      return
+    }
+    setPaymentLoading(true)
+    setPaymentError('')
+    try {
+      await apiClient.recordPayment(
+        selectedClient.id,
+        amount,
+        selectedClient.category,
+        selectedClient.lessonsPerWeek,
+        paymentComment.trim(),
+      )
+      await store.clientStore.loadClients()
+      setIsPaymentOpen(false)
+      const history = await apiClient.getClientHistory(selectedClient.id)
+      setPaymentHistory(history.payments)
+      setLessonLedger(history.ledger)
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Не удалось сохранить платёж')
+    } finally {
+      setPaymentLoading(false)
+    }
+  }
   const filteredClients = useMemo(
     () =>
       [...clients]
@@ -115,7 +205,14 @@ export const ClientsView = observer(() => {
     setSortConfig((previous) => ({ key, dir: previous.key === key && previous.dir === 'asc' ? 'desc' : 'asc' }))
 
   const updateForm = (field: keyof FormState, value: string) =>
-    setFormData((previous) => ({ ...previous, [field]: value }))
+    setFormData((previous) => {
+      const next = { ...previous, [field]: value }
+      if ((field === 'category' || field === 'lessonsPerWeek') && next.category && next.lessonsPerWeek) {
+        const price = packagePrice(next.category, next.lessonsPerWeek)
+        if (price > 0) next.paidAmount = String(price)
+      }
+      return next
+    })
 
   const openAdd = () => {
     setFormError('')
@@ -422,7 +519,7 @@ export const ClientsView = observer(() => {
                     className="h-11 rounded-xl"
                   />
                   <span className="text-xs font-normal text-slate-500">
-                    Сумма сохраняется как учётная информация и не меняет количество занятий.
+                    Цена пакета подставляется автоматически. Оплата начисляет занятия и сохраняется в истории.
                   </span>
                 </label>
                 <label className="grid gap-1.5 text-sm font-medium text-slate-700">
@@ -444,12 +541,12 @@ export const ClientsView = observer(() => {
               {formData.category && formData.lessonsPerWeek && (
                 <div className="mt-4 flex items-center justify-between gap-4 rounded-xl bg-cyan-50 px-4 py-3 text-sm">
                   <div>
-                    <p className="font-medium text-cyan-900">План занятий</p>
-                    <p className="mt-0.5 text-xs text-cyan-700">На 4 недели, без привязки к сумме оплаты</p>
+                    <p className="font-medium text-cyan-900">План первого пакета</p>
+                    <p className="mt-0.5 text-xs text-cyan-700">
+                      {packagePrice(formData.category, formData.lessonsPerWeek).toLocaleString('ru-RU')} ₽ за 4 недели
+                    </p>
                   </div>
-                  <strong className="shrink-0 text-cyan-950">
-                    {Number(formData.lessonsPerWeek) * 4} занятий
-                  </strong>
+                  <strong className="shrink-0 text-cyan-950">{Number(formData.lessonsPerWeek) * 4} занятий</strong>
                 </div>
               )}
             </section>
@@ -575,6 +672,87 @@ export const ClientsView = observer(() => {
                   </div>
                 </section>
 
+                <section className="rounded-2xl border border-cyan-100 bg-gradient-to-br from-cyan-50 via-white to-sky-50 p-5 shadow-sm">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-10 items-center justify-center rounded-xl bg-cyan-600 text-white shadow-lg shadow-cyan-200">
+                        <CreditCard className="size-5" />
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-slate-900">Оплаты и продление</h3>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Каждый платёж добавляет новый пакет без создания дубля клиента
+                        </p>
+                      </div>
+                    </div>
+                    {store.authStore.isAdmin && (
+                      <Button onClick={openPayment} className="rounded-xl bg-cyan-600 text-white hover:bg-cyan-700">
+                        <Plus className="mr-2 size-4" /> Продлить абонемент
+                      </Button>
+                    )}
+                  </div>
+                  <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
+                      <p className="text-xs text-slate-500">Оплачено всего</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">
+                        {selectedClient.paidAmount.toLocaleString('ru-RU')} ₽
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
+                      <p className="text-xs text-slate-500">Остаток денег</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">
+                        {selectedClient.paymentBalance.toLocaleString('ru-RU')} ₽
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
+                      <p className="text-xs text-slate-500">Начислено занятий</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{selectedClient.totalLessons}</p>
+                    </div>
+                  </div>
+                  <div className="mt-5 flex items-center gap-2 text-sm font-semibold text-slate-800">
+                    <History className="size-4 text-cyan-600" /> История платежей
+                  </div>
+                  {historyLoading ? (
+                    <div className="mt-3 flex items-center gap-2 text-sm text-slate-500">
+                      <Loader2 className="size-4 animate-spin" /> Загружаем историю…
+                    </div>
+                  ) : paymentHistory.length === 0 ? (
+                    <p className="mt-3 text-sm text-slate-500">Платежей пока нет</p>
+                  ) : (
+                    <div className="mt-3 grid gap-2">
+                      {paymentHistory.slice(0, 8).map((payment) => (
+                        <div
+                          key={String(payment.id)}
+                          className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-3 ring-1 ring-slate-100"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="flex size-8 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+                              <ArrowUpRight className="size-4" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold text-slate-800">
+                                {Number(payment.amount || 0).toLocaleString('ru-RU')} ₽
+                              </p>
+                              <p className="text-xs text-slate-500">
+                                {String(payment.category || '')} · {String(payment.lessonsPerWeek || '')} раза/нед.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-cyan-700">
+                              +{String(payment.lessonsAdded || 0)} занятий
+                            </p>
+                            <p className="text-xs text-slate-400">{String(payment.paidAt || '').slice(0, 10)}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {lessonLedger.length > 0 && (
+                    <p className="mt-3 text-xs text-slate-400">В журнале движений: {lessonLedger.length} операций</p>
+                  )}
+                </section>
+
                 <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                   <h3 className="mb-4 font-bold text-slate-900">Расписание клиента</h3>
                   {store.branchLessons.filter((lesson) => selectedClient.isAssignedTo(lesson.id)).length === 0 ? (
@@ -606,6 +784,92 @@ export const ClientsView = observer(() => {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isPaymentOpen} onOpenChange={setIsPaymentOpen}>
+        <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+          <div className="bg-gradient-to-br from-cyan-600 to-sky-700 px-6 py-7 text-white">
+            <DialogHeader>
+              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                <CreditCard className="size-6" />
+              </div>
+              <DialogTitle className="text-2xl font-bold text-white">Продление абонемента</DialogTitle>
+              <p className="mt-1 text-sm text-cyan-50">
+                {selectedClient?.childName} · новый платёж без создания клиента
+              </p>
+            </DialogHeader>
+          </div>
+          <div className="grid gap-4 p-6">
+            {paymentError && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {paymentError}
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                <p className="text-xs text-slate-500">Текущий тариф</p>
+                <p className="mt-1 font-bold text-slate-900">{selectedClient?.category}</p>
+              </div>
+              <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                <p className="text-xs text-slate-500">Цена пакета</p>
+                <p className="mt-1 font-bold text-slate-900">
+                  {selectedClient
+                    ? packagePrice(selectedClient.category, selectedClient.lessonsPerWeek).toLocaleString('ru-RU')
+                    : 0}{' '}
+                  ₽
+                </p>
+              </div>
+            </div>
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Сумма нового платежа
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={paymentAmount}
+                onChange={(event) => setPaymentAmount(event.target.value)}
+                className="h-12 rounded-xl bg-white text-lg"
+                placeholder="Например, 16000"
+              />
+              <span className="text-xs font-normal text-slate-500">
+                Можно оплатить сразу несколько месяцев — система начислит все полные пакеты.
+              </span>
+            </label>
+            {selectedClient && Number(paymentAmount) > 0 && (
+              <div className="rounded-xl bg-cyan-50 px-4 py-3 text-sm text-cyan-900">
+                {(() => {
+                  const info = calculatePaymentLessons(
+                    selectedClient.category,
+                    selectedClient.lessonsPerWeek,
+                    Number(paymentAmount) + selectedClient.paymentBalance,
+                  )
+                  return (
+                    <>
+                      <strong>{info.packages} пак.</strong> · будет начислено <strong>{info.lessons} занятий</strong>
+                      {info.remainder > 0 ? ` · остаток ${info.remainder.toLocaleString('ru-RU')} ₽` : ''}
+                    </>
+                  )
+                })()}
+              </div>
+            )}
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Комментарий{' '}
+              <Input
+                value={paymentComment}
+                onChange={(event) => setPaymentComment(event.target.value)}
+                className="h-11 rounded-xl bg-white"
+                placeholder="Например: оплата за октябрь и ноябрь"
+              />
+            </label>
+            <Button
+              onClick={() => void submitPayment()}
+              disabled={paymentLoading}
+              className="h-12 rounded-xl bg-cyan-600 text-base font-bold text-white hover:bg-cyan-700"
+            >
+              {paymentLoading ? 'Сохраняем…' : 'Сохранить платёж'}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

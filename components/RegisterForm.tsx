@@ -30,7 +30,12 @@ export const RegisterForm = observer(({ onSwitchToLogin }: { onSwitchToLogin: ()
     <div className="grid gap-4">
       {error && <p className="text-red-500 text-sm">{error}</p>}
       <Input placeholder="Логин" value={username} onChange={(e) => setUsername(e.target.value)} />
-      <Input type="password" placeholder="Пароль (не менее 8 символов)" value={password} onChange={(e) => setPassword(e.target.value)} />
+      <Input
+        type="password"
+        placeholder="Пароль (не менее 8 символов)"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
       <p className="rounded-xl bg-cyan-50 px-3 py-2 text-xs text-cyan-800">
         Регистрация доступна только для создания первого администратора. Тренеров администратор добавляет внутри CRM.
       </p>

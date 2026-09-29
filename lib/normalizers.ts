@@ -48,11 +48,20 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
   }
 
   const inferredTotalLessons = packageLessonsFromFrequency(c.lessonsPerWeek) || null
+  const paidValue = c.paid ?? c.subscription?.paid
+  const hasRecordedPayment =
+    Number(c.paidAmount || 0) > 0 ||
+    paidValue === true ||
+    paidValue === 1 ||
+    String(paidValue || '').toLowerCase() === 'true' ||
+    String(paidValue || '') === '1'
   const rawTotalLessons = Number(c.totalLessons ?? 0)
   const rawRemainingLessons = Number(c.remainingLessons ?? 0)
   const hasFlatSubscription = c.remainingLessons !== undefined || c.totalLessons !== undefined
-  const shouldInferEmptySubscription = hasFlatSubscription && rawTotalLessons <= 0 && rawRemainingLessons <= 0
-  const totalLessons = rawTotalLessons > 0 ? rawTotalLessons : (inferredTotalLessons ?? 0)
+  const shouldInferEmptySubscription =
+    hasRecordedPayment && hasFlatSubscription && rawTotalLessons <= 0 && rawRemainingLessons <= 0
+  const canInferSubscription = hasRecordedPayment && (!hasFlatSubscription || shouldInferEmptySubscription)
+  const totalLessons = rawTotalLessons > 0 ? rawTotalLessons : canInferSubscription ? (inferredTotalLessons ?? 0) : 0
   const remainingLessons =
     rawTotalLessons > 0 || rawRemainingLessons > 0
       ? rawRemainingLessons
@@ -66,8 +75,8 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
           totalLessons: shouldInferEmptySubscription || !hasFlatSubscription ? totalLessons : rawTotalLessons,
           remainingLessons:
             shouldInferEmptySubscription || !hasFlatSubscription ? remainingLessons : rawRemainingLessons,
-          paid: String(c.paid ?? true) === 'true' || c.paid === true || c.paid === 1,
-          purchasedAt: String(c.purchasedAt || new Date().toISOString()),
+          paid: hasRecordedPayment,
+          purchasedAt: String(c.purchasedAt || ''),
           receiptUrl: String(c.receiptUrl || ''),
           status: String(c.subscriptionStatus || c.status || 'Активен'),
         }
@@ -82,12 +91,8 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
           Number(c.subscription.totalLessons ?? 0) > 0 || Number(c.subscription.remainingLessons ?? 0) > 0
             ? Number(c.subscription.remainingLessons ?? 0)
             : remainingLessons,
-        paid:
-          String(c.subscription.paid).toLowerCase() === 'true' ||
-          c.subscription.paid === true ||
-          c.subscription.paid === 1 ||
-          String(c.subscription.paid) === '1',
-        purchasedAt: String(c.subscription.purchasedAt || new Date().toISOString()),
+        paid: hasRecordedPayment,
+        purchasedAt: String(c.subscription.purchasedAt || ''),
         receiptUrl: String(c.subscription.receiptUrl || ''),
         status: String(c.subscription.status || 'Активен'),
       }
@@ -107,6 +112,7 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
     lessonsPerWeek: Number(c.lessonsPerWeek || 1),
     initials: String(c.initials || ''),
     paidAmount: Number(c.paidAmount || 0),
+    paymentBalance: Number(c.paymentBalance || 0),
     subscription,
     assignedLessonId: assignedLessonIds[0] || null,
     assignedLessonIds: assignedLessonIds,

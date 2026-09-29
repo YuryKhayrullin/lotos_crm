@@ -8,57 +8,66 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStore } from '@/store/StoreProvider'
-import { parseTimeToHHMM } from '@/lib/utils/date'
+import { isValidDateOnly, parseTimeToHHMM } from '@/lib/utils/date'
 
 export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) => {
   const store = useStore()
+  const today = () => {
+    const date = new Date()
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  }
+  const defaultBranchId = store.selectedBranchId || (store.branches.length === 1 ? String(store.branches[0].id) : '')
   const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0],
+    date: today(),
     time: '17:00',
     coachName: store.branchCoaches[0]?.name || '',
     clientId: '',
+    branchId: defaultBranchId,
     category: 'плавание' as 'плавание' | 'синхронное плавание',
   })
+  const [formError, setFormError] = useState('')
 
   const handleSubmit = async () => {
-    // Вычисляем день недели
-    const d = new Date(formData.date)
-    const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
-    const dayOfWeek = days[d.getDay()]
+    setFormError('')
+    if (!formData.branchId) return setFormError('Выберите филиал')
+    if (!isValidDateOnly(formData.date)) return setFormError('Выберите корректную дату')
 
-    // Форматируем время в HH:mm через утилиту (поддерживает 18:00, 18.00, 18, 0.75)
     const timeStr = parseTimeToHHMM(formData.time)
+    if (timeStr === '--:--') return setFormError('Введите время в формате ЧЧ:ММ')
 
-    const newLessonData = {
-      // НЕ генерируем ID локально - сервер вернет свой ID
-      branchId: store.selectedBranchId,
-      date: formData.date,
-      dayOfWeek: dayOfWeek,
-      time: timeStr,
-      title: formData.category === 'синхронное плавание' ? 'Синхронное плавание' : 'Плавание',
-      coachName: formData.coachName,
-      category: formData.category,
-      pool: 'Основной бассейн',
-      duration: '1 час',
-      maxCapacity: 10,
+    const [year, month, day] = formData.date.split('-').map(Number)
+    const dayOfWeek = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'][new Date(year, month - 1, day).getDay()]
+
+    try {
+      const createdLesson = await store.createLesson({
+        branchId: formData.branchId,
+        date: formData.date,
+        dayOfWeek,
+        time: timeStr,
+        title: formData.category === 'синхронное плавание' ? 'Синхронное плавание' : 'Плавание',
+        coachName: formData.coachName,
+        category: formData.category,
+        pool: 'Основной бассейн',
+        duration: '1 час',
+        maxCapacity: 10,
+      } as any)
+
+      if (formData.clientId && createdLesson?.id) {
+        await store.clientStore.toggleClientLesson(formData.clientId, createdLesson.id)
+      }
+
+      onClose()
+      setFormData({
+        date: today(),
+        time: '17:00',
+        coachName: store.branchCoaches[0]?.name || '',
+        clientId: '',
+        branchId: defaultBranchId,
+        category: 'плавание',
+      })
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Не удалось создать занятие')
     }
-
-    // createLesson возвращает созданный урок с серверным ID
-    const createdLesson = await store.createLesson(newLessonData as any)
-
-    // Используем серверный ID для прикрепления клиента
-    if (formData.clientId && createdLesson?.id) {
-      await store.clientStore.toggleClientLesson(formData.clientId, createdLesson.id)
-    }
-
-    onClose()
-    setFormData({
-      date: new Date().toISOString().split('T')[0],
-      time: '17:00',
-      coachName: store.branchCoaches[0]?.name || '',
-      clientId: '',
-      category: 'плавание',
-    })
   }
 
   return (
@@ -100,6 +109,22 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
               />
             </label>
           </div>
+
+          <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+            <span>Филиал</span>
+            <select
+              value={formData.branchId}
+              onChange={(event) => setFormData({ ...formData, branchId: event.target.value })}
+              className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+            >
+              <option value="">Выберите филиал</option>
+              {store.branches.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
+          </label>
 
           <Select
             value={formData.category}
@@ -162,6 +187,8 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
               </SelectContent>
             </Select>
           </label>
+
+          {formError && <p className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{formError}</p>}
 
           <Button
             onClick={handleSubmit}

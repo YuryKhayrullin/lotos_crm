@@ -26,7 +26,7 @@ CRM для филиалов бассейна: клиенты, абонемент
 
 1. Создайте Google Spreadsheet.
 2. Откройте Extensions → Apps Script и вставьте содержимое `backend/Code.gs`.
-3. В Script Properties добавьте GAS_API_SECRET и SCHEMA_VERSION=2.
+3. В Script Properties добавьте GAS_API_SECRET и SCHEMA_VERSION=3.
 4. Запустите функцию setupSchema() один раз.
 5. Разверните Web App и после каждого изменения Code.gs создавайте новую версию deployment.
 6. GAS принимает только запросы с правильным секретом и серверным auth-контекстом BFF.

@@ -16,6 +16,7 @@ export const ClientModel = types
     lessonsPerWeek: types.optional(types.number, 1),
     initials: types.optional(types.string, ''),
     paidAmount: types.optional(types.number, 0),
+    paymentBalance: types.optional(types.number, 0),
     subscription: types.maybeNull(SubscriptionModel),
     assignedLessonId: types.maybeNull(types.string),
     assignedLessonIds: types.optional(types.array(types.string), []),

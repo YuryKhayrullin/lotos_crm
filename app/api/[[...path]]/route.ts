@@ -25,6 +25,10 @@ const MAX_RECEIPT_BASE64_BYTES = 7 * 1024 * 1024
 const MAX_RECEIPT_BYTES = 5 * 1024 * 1024
 const SAFE_RECEIPT_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf'])
 
+function routeLog(event: string, details: Record<string, unknown> = {}): void {
+  console.log('[lotos-route] ' + event, details)
+}
+
 class RouteError extends Error {
   constructor(
     message: string,
@@ -83,6 +87,7 @@ function authPayload(user: NonNullable<Awaited<ReturnType<typeof getSession>>>):
 }
 
 async function handleLogin(request: NextRequest): Promise<Response> {
+  routeLog('auth.login.start')
   const body = await readJson(request, MAX_AUTH_BYTES)
   const username = requiredText(body.username, 100)
   const password = requiredText(body.password, 200, false)
@@ -93,6 +98,7 @@ async function handleLogin(request: NextRequest): Promise<Response> {
     return jsonError('Аккаунт ожидает назначения филиала администратором', 403)
   }
   const user = await createSession(response.user)
+  routeLog('auth.login.session.created', { userId: user.id, role: user.role })
   return jsonResponse({ status: 'success', user })
 }
 
@@ -112,11 +118,14 @@ async function handleLogout(): Promise<Response> {
 }
 
 async function handleSession(): Promise<Response> {
+  routeLog('auth.session.start')
   const user = await getSession({ revalidate: true })
   if (!user) {
+    routeLog('auth.session.invalid', { authenticated: false })
     await clearSession()
     return jsonResponse({ authenticated: false, user: null })
   }
+  routeLog('auth.session.ok', { userId: user.id, role: user.role })
   return jsonResponse({ authenticated: Boolean(user), user })
 }
 
@@ -128,19 +137,25 @@ async function handleCrm(request: NextRequest): Promise<Response> {
   }
 
   const payload = safePayload(body.payload)
+  routeLog('crm.start', { action })
   if (!UPLOAD_ACTIONS.has(action) && bodySize(payload) > MAX_STANDARD_BYTES) {
     throw new RouteError('Запрос слишком большой', 413)
   }
-  const user = await getSession({ revalidate: true })
-  if (!user) throw new RouteError('Требуется авторизация', 401)
-  return jsonResponse(await dispatchCrmAction({ action, payload, user }))
+  const user = await getSession()
+  if (!user) {
+    routeLog('crm.denied', { action, reason: 'session.invalid' })
+    throw new RouteError('Требуется авторизация', 401)
+  }
+  const result = await dispatchCrmAction({ action, payload, user })
+  routeLog('crm.success', { action })
+  return jsonResponse(result)
 }
 
 async function handleReceipt(_request: NextRequest, values: RouteValues): Promise<Response> {
   const clientId = values.clientId ?? ''
   if (!clientId || clientId.length > 100) throw new RouteError('Некорректный clientId', 400)
 
-  const user = await getSession({ revalidate: true })
+  const user = await getSession()
   if (!user) throw new RouteError('Требуется авторизация', 401)
   if (user.role !== 'admin') throw new RouteError('Недостаточно прав', 403)
 
@@ -189,8 +204,10 @@ const ROUTES: RouteDefinition[] = [
 
 function errorResponse(error: unknown): NextResponse {
   if (error instanceof RouteError || error instanceof PolicyError || error instanceof GasError) {
+    console.warn('[lotos-route] request.error', { name: error.name, status: error.status, message: error.message })
     return jsonError(error.message, error.status)
   }
+  console.error('[lotos-route] request.unhandled', error)
   return jsonError('Внутренняя ошибка сервера', 500)
 }
 

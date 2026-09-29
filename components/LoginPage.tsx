@@ -66,7 +66,7 @@ export const LoginPage = observer(() => {
               <Button variant="link" onClick={() => setIsRegistering(true)}>
                 Зарегистрироваться
               </Button>
-          </>
+            </>
           )}
         </CardContent>
       </Card>

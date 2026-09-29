@@ -2,6 +2,7 @@ import 'server-only'
 
 import { cookies } from 'next/headers'
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose'
+import { callGas } from './gas'
 
 export type SessionRole = 'admin' | 'coach'
 
@@ -16,6 +17,9 @@ type SessionPayload = JWTPayload & SessionUser
 
 export const SESSION_COOKIE = 'lotos_crm_session'
 const SESSION_TTL_SECONDS = 60 * 60 * 8
+function sessionLog(event: string, details: Record<string, unknown> = {}): void {
+  console.log('[lotos-session] ' + event, details)
+}
 
 function getSessionSecret(): Uint8Array {
   const secret = process.env.SESSION_SECRET
@@ -69,15 +73,39 @@ export async function createSession(user: unknown): Promise<SessionUser> {
   return normalized
 }
 
-export async function getSession(): Promise<SessionUser | null> {
+export async function getSession(options: { revalidate?: boolean } = {}): Promise<SessionUser | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value
+  sessionLog('read', { hasCookie: Boolean(token), revalidate: Boolean(options.revalidate) })
   if (!token) return null
 
   try {
     const { payload } = await jwtVerify<SessionPayload>(token, getSessionSecret(), {
       algorithms: ['HS256'],
     })
-    return normalizeUser(payload)
+    const normalized = normalizeUser(payload)
+    if (!normalized || !options.revalidate) {
+      sessionLog('jwt.valid', { revalidate: false, userId: normalized?.id ?? null, role: normalized?.role ?? null })
+      return normalized
+    }
+
+    try {
+      sessionLog('revalidate.start', { userId: normalized.id, role: normalized.role })
+      const response = (await callGas({ action: 'getCurrentUser', auth: normalized })) as Record<string, unknown>
+      const currentUser = normalizeUser(response.user)
+      if (!currentUser || currentUser.id !== normalized.id) {
+        sessionLog('revalidate.mismatch', { userId: normalized.id, hasCurrentUser: Boolean(currentUser) })
+        return null
+      }
+      sessionLog('revalidate.ok', { userId: currentUser.id, role: currentUser.role })
+      return currentUser
+    } catch (error) {
+      sessionLog('revalidate.failed', {
+        userId: normalized.id,
+        reason: error instanceof Error ? error.message : String(error),
+      })
+      // Fail closed for protected requests if the authoritative user store is unavailable.
+      return null
+    }
   } catch {
     return null
   }

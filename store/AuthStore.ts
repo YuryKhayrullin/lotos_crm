@@ -2,6 +2,9 @@ import { types, flow, Instance } from 'mobx-state-tree'
 import { AuthModel } from './models/Auth'
 import { apiClient, ApiError } from '@/lib/api-client'
 
+const authLog = (event: string, details: Record<string, unknown> = {}): void => {
+  console.log('[lotos-auth] ' + event, details)
+}
 export const AuthStore = types
   .model('AuthStore', {
     user: types.maybeNull(AuthModel),
@@ -51,6 +54,7 @@ export const AuthStore = types
         if (response.status !== 'success') throw new Error('Ошибка регистрации')
         self.registrationSuccess = true
       } catch (error) {
+        authLog('register.failed', { message: error instanceof Error ? error.message : 'unknown' })
         throw error instanceof ApiError ? new Error(error.message) : new Error('Ошибка регистрации')
       } finally {
         self.isLoading = false
@@ -60,6 +64,13 @@ export const AuthStore = types
       self.isLoading = true
       try {
         const response: Awaited<ReturnType<typeof apiClient.login>> = yield apiClient.login(username, password)
+        authLog('login.password.accepted')
+        const verifiedSession: Awaited<ReturnType<typeof apiClient.session>> = yield apiClient.session()
+        if (!verifiedSession.authenticated || !verifiedSession.user) {
+          authLog('login.session.rejected', { authenticated: verifiedSession.authenticated })
+          throw new Error('Сессия не подтверждена сервером. Проверьте GAS deployment и пользователя.')
+        }
+        authLog('login.session.verified', { role: verifiedSession.user.role })
         self.user = {
           id: response.user.id,
           username: response.user.username,
@@ -70,7 +81,8 @@ export const AuthStore = types
         self.isInitialized = true
         self.sessionVersion += 1
       } catch (error) {
-        throw error instanceof ApiError ? new Error(error.message) : new Error('Ошибка входа')
+        authLog('login.failed', { message: error instanceof Error ? error.message : 'unknown' })
+        throw error instanceof Error ? new Error(error.message) : new Error('Ошибка входа')
       } finally {
         self.isLoading = false
       }

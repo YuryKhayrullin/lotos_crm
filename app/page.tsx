@@ -124,6 +124,10 @@ const Page = observer(() => {
   const isAuthenticated = store.authStore.isAuthenticated
 
   useEffect(() => {
+    if (!isInitialized || !isAuthenticated) {
+      store.cancelInitialize()
+      return
+    }
     if (isInitialized && isAuthenticated) {
       if (store.authStore.isCoach && store.currentScreen !== 'Дашборд' && store.currentScreen !== 'Расписание') {
         store.setScreen('Дашборд')
@@ -336,6 +340,26 @@ const Page = observer(() => {
         </Sheet>
 
         <main className="p-4 sm:p-6">
+          {store.error && (
+            <div
+              role="alert"
+              className="mb-4 flex items-center justify-between gap-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800"
+            >
+              <span>{store.error}</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 rounded-full border-rose-300 text-rose-700 hover:bg-rose-100"
+                onClick={() => {
+                  store.setError(null)
+                  void store.initialize()
+                }}
+              >
+                Повторить
+              </Button>
+            </div>
+          )}
           {store.currentScreen === 'Дашборд' && <Dashboard setScreen={store.setScreen} />}
           {store.currentScreen === 'Клиенты и дети' && <ClientsView />}
           {store.currentScreen === 'Расписание' && <ScheduleView />}

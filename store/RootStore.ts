@@ -16,6 +16,9 @@ import {
 import { normalizeLesson } from '@/lib/normalizers'
 
 const SCREENS = ['Дашборд', 'Клиенты и дети', 'Тренеры', 'Расписание', 'Абонементы', 'Финансы'] as const
+const bootstrapLog = (event: string, details: Record<string, unknown> = {}): void => {
+  console.log('[lotos-bootstrap] ' + event, details)
+}
 
 const RootStoreModel = types
   .model('RootStore', {
@@ -179,6 +182,12 @@ const RootStoreModel = types
     const setError = (message: string | null) => {
       self.error = message
     }
+    const cancelInitialize = () => {
+      activeInitializeController?.abort()
+      activeInitializeController = null
+      initializedForUser = null
+      self.isLoading = false
+    }
     const addLessonToStore = (lessonData: any) => {
       self.lessons.push(lessonData)
     }
@@ -204,6 +213,7 @@ const RootStoreModel = types
       closeLogin,
       selectCoach,
       closeCoachModal,
+      cancelInitialize,
       startEditCoach,
       setCoachFormName,
       setCoachFormSpecialty,
@@ -215,6 +225,7 @@ const RootStoreModel = types
           ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
           : null
         if (initializedForUser === userId && self.branches.length > 0) return
+        bootstrapLog('start', { hasUser: Boolean(userId), role: self.authStore.user?.role ?? null })
         activeInitializeController?.abort()
         const controller = new AbortController()
         activeInitializeController = controller
@@ -229,24 +240,24 @@ const RootStoreModel = types
         try {
           // Данные загружаются независимыми запросами: тяжёлый список клиентов
           // больше не блокирует расписание и справочники одним bootstrap-запросом.
-          const [branches, coaches, lessons, clientsPage] = yield Promise.all([
+          const branchId = self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined
+          const [branches, coaches] = yield Promise.all([
             apiClient.fetchBranches(controller.signal),
-            apiClient.fetchCoaches(
-              controller.signal,
-              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
-            ),
-            apiClient.fetchLessons(
-              controller.signal,
-              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
-            ),
-            apiClient.fetchClientsPage(
-              1,
-              100,
-              controller.signal,
-              self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined,
-            ),
+            apiClient.fetchCoaches(controller.signal, branchId),
           ])
           if (controller.signal.aborted) return
+
+          const [lessons, clientsPage] = yield Promise.all([
+            apiClient.fetchLessons(controller.signal, branchId),
+            apiClient.fetchClientsPage(1, 100, controller.signal, branchId),
+          ])
+          if (controller.signal.aborted) return
+          bootstrapLog('requests.received', {
+            branches: branches.length,
+            coaches: coaches.length,
+            lessons: lessons.length,
+            clients: clientsPage.items.length,
+          })
 
           yield self.clientStore.loadClients(clientsPage)
           if (controller.signal.aborted) return
@@ -265,10 +276,29 @@ const RootStoreModel = types
             setBranch(branchId)
           }
 
+          bootstrapLog('success', {
+            branches: branches.length,
+            coaches: coaches.length,
+            lessons: lessons.length,
+            clients: clientsPage.items.length,
+          })
           initializedForUser = userId
           self.isLoading = false
         } catch (error: any) {
-          if (error?.name === 'AbortError') return
+          if (error?.name === 'AbortError') {
+            bootstrapLog('aborted')
+            return
+          }
+          if (error instanceof ApiError && (error.status === 401 || error.message.includes('Unauthorized'))) {
+            bootstrapLog('unauthorized', { status: error.status, message: error.message })
+            yield self.authStore.logout()
+            self.error = null
+            return
+          }
+          bootstrapLog('failed', {
+            name: error?.name ?? 'unknown',
+            message: error instanceof Error ? error.message : String(error),
+          })
           self.error = error instanceof ApiError ? error.message : 'Ошибка загрузки данных'
           self.isLoading = false
         } finally {

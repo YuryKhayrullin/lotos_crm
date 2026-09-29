@@ -54,7 +54,6 @@ export const ClientStore = types
         } catch (error) {
           if (controller.signal.aborted) return
           self.error = error instanceof Error ? error.message : 'Не удалось загрузить клиентов'
-          throw error
         } finally {
           if (requestVersion === self.requestVersion) self.isLoading = false
           if (activeController === controller) activeController = null
@@ -90,8 +89,7 @@ export const ClientStore = types
           self.hasMore = next.hasMore
         } catch (error: any) {
           if (controller.signal.aborted) return
-          self.error = error.message || 'Failed to load more clients'
-          throw error
+          self.error = error.message || 'Не удалось загрузить клиентов'
         } finally {
           if (requestVersion === self.requestVersion) self.isLoading = false
           if (activeController === controller) activeController = null

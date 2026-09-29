@@ -35,9 +35,18 @@ export const CoachesView = observer(() => {
   const coaches = store.branchCoaches
   const sessionVersion = store.authStore.sessionVersion
   const [isAddCoachOpen, setIsAddCoachOpen] = useState(false)
-  const [formData, setFormData] = useState({ name: '', surname: '', phone: '', birthDate: '', username: '', password: '' })
+  const [formData, setFormData] = useState({
+    name: '',
+    surname: '',
+    phone: '',
+    birthDate: '',
+    username: '',
+    password: '',
+  })
   const [formError, setFormError] = useState<string | null>(null)
-  const [accounts, setAccounts] = useState<Array<{ id: string; username: string; role: 'admin' | 'coach'; branchId: string | null }>>([])
+  const [accounts, setAccounts] = useState<
+    Array<{ id: string; username: string; role: 'admin' | 'coach'; branchId: string | null }>
+  >([])
   const [assigningBranches, setAssigningBranches] = useState<Record<string, string>>({})
   const [accountsError, setAccountsError] = useState<string | null>(null)
 
@@ -177,33 +186,49 @@ export const CoachesView = observer(() => {
           <CardContent className="grid gap-4 p-5">
             <div>
               <h3 className="font-semibold text-slate-900">Ожидают назначения филиала</h3>
-              <p className="mt-1 text-sm text-slate-600">Зарегистрированные тренеры не смогут войти в CRM, пока вы не назначите филиал.</p>
+              <p className="mt-1 text-sm text-slate-600">
+                Зарегистрированные тренеры не смогут войти в CRM, пока вы не назначите филиал.
+              </p>
             </div>
             {accountsError && <p className="text-sm text-rose-600">{accountsError}</p>}
             {accounts.filter((account) => !account.branchId).length === 0 ? (
               <p className="text-sm text-slate-500">Новых аккаунтов без филиала нет.</p>
             ) : (
-              accounts.filter((account) => !account.branchId).map((account) => (
-                <div key={account.id} className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-white p-4 sm:flex-row sm:items-center">
-                  <span className="min-w-0 flex-1 font-medium text-slate-800">{account.username}</span>
-                  {store.branches.length > 1 && (
-                    <Select
-                      value={assigningBranches[account.id] || ''}
-                      onValueChange={(value) => value && setAssigningBranches((current) => ({ ...current, [account.id]: value }))}
-                    >
-                      <SelectTrigger className="w-full rounded-xl sm:w-56" aria-label={`Филиал для ${account.username}`}>
-                        <SelectValue placeholder="Выберите филиал" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {store.branches.map((branch) => <SelectItem key={branch.id} value={String(branch.id)}>{branch.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  )}
-                  <Button onClick={() => void assignBranch(account.id)} disabled={store.branches.length === 0}>
-                    {store.branches.length === 1 ? `Назначить ${store.branches[0].name}` : 'Назначить филиал'}
-                  </Button>
-                </div>
-              ))
+              accounts
+                .filter((account) => !account.branchId)
+                .map((account) => (
+                  <div
+                    key={account.id}
+                    className="flex flex-col gap-3 rounded-xl border border-amber-200 bg-white p-4 sm:flex-row sm:items-center"
+                  >
+                    <span className="min-w-0 flex-1 font-medium text-slate-800">{account.username}</span>
+                    {store.branches.length > 1 && (
+                      <Select
+                        value={assigningBranches[account.id] || ''}
+                        onValueChange={(value) =>
+                          value && setAssigningBranches((current) => ({ ...current, [account.id]: value }))
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-full rounded-xl sm:w-56"
+                          aria-label={`Филиал для ${account.username}`}
+                        >
+                          <SelectValue placeholder="Выберите филиал" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {store.branches.map((branch) => (
+                            <SelectItem key={branch.id} value={String(branch.id)}>
+                              {branch.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <Button onClick={() => void assignBranch(account.id)} disabled={store.branches.length === 0}>
+                      {store.branches.length === 1 ? `Назначить ${store.branches[0].name}` : 'Назначить филиал'}
+                    </Button>
+                  </div>
+                ))
             )}
           </CardContent>
         </Card>

@@ -3,6 +3,34 @@ import { normalizeLesson, normalizeClient } from './normalizers'
 
 const API_ROUTE = '/api/crm'
 const AUTH_ROUTE = '/api/auth'
+const clientLog = (event: string, details: Record<string, unknown> = {}): void => {
+  console.log('[lotos-api] ' + event, details)
+}
+
+const MUTATING_ACTIONS = new Set([
+  'createUser',
+  'assignUserBranch',
+  'createClient',
+  'createLesson',
+  'createBranch',
+  'createCoach',
+  'updateClient',
+  'updateCoach',
+  'updateLesson',
+  'deleteClient',
+  'deleteCoach',
+  'deleteLesson',
+  'recordAttendance',
+  'recordBulkAttendance',
+  'recordPayment',
+  'uploadReceipt',
+  'addLessons',
+])
+
+function createRequestId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
 
 export type ApiUser = {
   id: string | number
@@ -47,14 +75,20 @@ export type ClientsPage = {
 
 class ApiClient {
   private async request<T = unknown>(action: string, payload: JsonObject = {}, signal?: AbortSignal): Promise<T> {
+    const requestPayload =
+      MUTATING_ACTIONS.has(action) && payload.requestId === undefined
+        ? { ...payload, requestId: createRequestId() }
+        : payload
+    clientLog('request.start', { action, hasSignal: Boolean(signal) })
     const response = await fetch(API_ROUTE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ action, payload }),
+      body: JSON.stringify({ action, payload: requestPayload }),
       signal,
     })
 
+    clientLog('response.received', { action, status: response.status, ok: response.ok })
     const contentType = response.headers.get('content-type') ?? ''
     let data: unknown
     try {
@@ -66,18 +100,24 @@ class ApiClient {
     }
 
     const object = data && typeof data === 'object' ? (data as JsonObject) : null
-    if (!response.ok) throw new ApiError(response.status, object?.message ?? `API request failed (${response.status})`)
-    if (object?.status === 'error') throw new ApiError(500, object.message ?? 'API request failed')
+    if (!response.ok) {
+      const message = object?.message ? String(object.message) : 'API request failed (' + response.status + ')'
+      throw new ApiError(response.status, `${action}: ${message}`)
+    }
+    if (object?.status === 'error')
+      throw new ApiError(500, `${action}: ${String(object.message ?? 'API request failed')}`)
     return data as T
   }
 
   private async authRequest<T>(path: string, payload?: JsonObject): Promise<T> {
+    clientLog('auth.start', { path })
     const response = await fetch(`${AUTH_ROUTE}/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify(payload ?? {}),
     })
+    clientLog('auth.response', { path, status: response.status, ok: response.ok })
     const data = (await response
       .json()
       .catch(() => ({ status: 'error', message: 'Некорректный ответ API' }))) as unknown
@@ -100,7 +140,9 @@ class ApiClient {
   }
 
   async session(): Promise<{ authenticated: boolean; user: ApiUser | null }> {
+    clientLog('session.start')
     const response = await fetch(`${AUTH_ROUTE}/session`, { credentials: 'same-origin', cache: 'no-store' })
+    clientLog('session.response', { status: response.status, ok: response.ok })
     return response.json() as Promise<{ authenticated: boolean; user: ApiUser | null }>
   }
 
@@ -199,7 +241,12 @@ class ApiClient {
   async createCoach(coachData: JsonObject): Promise<ICoach> {
     return this.request<ICoach>('createCoach', coachData)
   }
-  async createUser(userData: { username: string; password: string; role: 'admin' | 'coach'; branchId?: string }): Promise<{
+  async createUser(userData: {
+    username: string
+    password: string
+    role: 'admin' | 'coach'
+    branchId?: string
+  }): Promise<{
     status: string
     user?: { username: string; role: 'admin' | 'coach'; branchId: string | null }
   }> {
@@ -240,6 +287,24 @@ class ApiClient {
 
   async addLessons(clientId: string, count: number): Promise<{ success: boolean }> {
     return this.request<{ success: boolean }>('addLessons', { clientId, lessonsCount: count })
+  }
+
+  async recordPayment(
+    clientId: string,
+    amount: number,
+    category?: string,
+    lessonsPerWeek?: number,
+    comment?: string,
+  ): Promise<{ success: boolean; payment: Record<string, unknown>; client: Record<string, unknown> }> {
+    return this.request('recordPayment', { clientId, amount, category, lessonsPerWeek, comment })
+  }
+
+  async getClientHistory(clientId: string): Promise<{
+    success: boolean
+    payments: Array<Record<string, unknown>>
+    ledger: Array<Record<string, unknown>>
+  }> {
+    return this.request('getClientHistory', { clientId })
   }
 
   async recordBulkAttendance(
