@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { isLessonInWeek, isLessonOnDay, parseTimeToHHMM } = require('../.test-dist/date-core.js')
+const { isLessonInWeek, isLessonOnDay, parseTimeToHHMM } = require('../.test-dist/utils/date-core.js')
 
 const lesson = (date, dayOfWeek, isRecurring = false) => ({ date, dayOfWeek, isRecurring })
 const weekStart = new Date('2026-09-21T00:00:00')
