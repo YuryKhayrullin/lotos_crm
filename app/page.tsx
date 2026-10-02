@@ -18,11 +18,13 @@ import { nav } from '@/lib/constants/nav'
 import { FinanceView } from '@/components/FinanceView'
 import { AttendanceModal } from '@/components/AttendanceModal'
 import { ILesson } from '@/store/models'
+import { isLessonOnDay, toLocalDateOnly } from '@/lib/utils/date'
 
 const store = getStore()
 
 const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) => {
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
+  const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
   const formatTime = (timeValue: string | number) => {
     const normalizedTime = String(timeValue ?? '')
     if (!normalizedTime) return '--:--'
@@ -82,21 +84,17 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
         <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
           {(() => {
             const now = new Date()
-            const todayLessons = store.sortedBranchLessons.filter((lesson) => {
-              const d = lesson.date ? new Date(lesson.date) : new Date(lesson.time)
-              return (
-                d.getDate() === now.getDate() &&
-                d.getMonth() === now.getMonth() &&
-                d.getFullYear() === now.getFullYear()
-              )
-            })
+            const todayLessons = store.sortedBranchLessons.filter((lesson) => isLessonOnDay(lesson, now))
 
             if (todayLessons.length === 0) return <p className="p-5 text-sm text-slate-500">На сегодня занятий нет</p>
 
             return todayLessons.map((lesson) => (
               <div
                 key={lesson.id}
-                onClick={() => setSelectedLesson(lesson)}
+                onClick={() => {
+                  setSelectedOccurrenceDate(toLocalDateOnly(now))
+                  setSelectedLesson(lesson)
+                }}
                 className="flex items-center justify-between p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors cursor-pointer bg-cyan-50/50"
               >
                 <div className="flex items-center gap-4">
@@ -114,7 +112,12 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
           })()}
         </div>
       </div>
-      <AttendanceModal isOpen={!!selectedLesson} onClose={() => setSelectedLesson(null)} lesson={selectedLesson} />
+      <AttendanceModal
+        isOpen={!!selectedLesson}
+        onClose={() => setSelectedLesson(null)}
+        lesson={selectedLesson}
+        occurrenceDate={selectedOccurrenceDate}
+      />
     </div>
   )
 })

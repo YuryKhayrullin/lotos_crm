@@ -1,9 +1,12 @@
 import type { SessionUser } from './session'
 
 const ADMIN_ONLY = new Set([
-  'createUser',
   'getUsers',
   'assignUserBranch',
+  'deactivateUser',
+  'activateUser',
+  'resetCoachPassword',
+  'linkCoachUser',
   'createBranch',
   'createCoach',
   'updateCoach',
@@ -21,6 +24,7 @@ const ADMIN_ONLY = new Set([
 const COACH_ALLOWED = new Set([
   'getSheet',
   'getClients',
+  'getLessonRoster',
   'createLesson',
   'updateLesson',
   'deleteLesson',
@@ -29,11 +33,15 @@ const COACH_ALLOWED = new Set([
 ])
 
 const KNOWN_ACTIONS = new Set([
-  'createUser',
   'getUsers',
   'assignUserBranch',
+  'deactivateUser',
+  'activateUser',
+  'resetCoachPassword',
+  'linkCoachUser',
   'getSheet',
   'getClients',
+  'getLessonRoster',
   'createBranch',
   'createCoach',
   'updateCoach',

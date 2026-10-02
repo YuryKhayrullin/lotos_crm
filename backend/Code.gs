@@ -1,6 +1,8 @@
 var ACTIVE_IDEMPOTENCY_KEY = '';
 var ACTIVE_IDEMPOTENCY_FINGERPRINT = '';
-var LOTOS_BACKEND_BUILD = 'auth-fix-2026-09-29';
+var ACTIVE_MUTATION_LOCK = false;
+var LOTOS_BACKEND_BUILD = 'auth-cache-2026-09-29';
+var AUTH_USER_CACHE_TTL_SECONDS = 60;
 function diagnosticLog(event, details) {
   try {
     Logger.log("[lotos-gas] " + event + " " + JSON.stringify(details || {}));
@@ -18,14 +20,14 @@ function rejectUnauthorized(stage, details) {
 
 
 function createResponse(data) {
-  if (ACTIVE_IDEMPOTENCY_KEY) {
-    try {
-      CacheService.getScriptCache().put(
-        ACTIVE_IDEMPOTENCY_KEY,
-        JSON.stringify({ fingerprint: ACTIVE_IDEMPOTENCY_FINGERPRINT, response: data }),
-        300
-      );
-    } catch (error) {}
+  if (ACTIVE_MUTATION_LOCK) {
+    SpreadsheetApp.flush();
+    invalidateReadCache();
+    if (ACTIVE_IDEMPOTENCY_KEY && data && data.status !== 'error' && data.success !== false) {
+      try {
+        CacheService.getScriptCache().put(ACTIVE_IDEMPOTENCY_KEY, JSON.stringify({ fingerprint: ACTIVE_IDEMPOTENCY_FINGERPRINT, response: data }), 300);
+      } catch (cacheError) {}
+    }
   }
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
@@ -143,8 +145,60 @@ function getOrCreateUsersSheet(ss) {
   var sheet = ss.getSheetByName('Users');
   if (!sheet) {
     sheet = ss.insertSheet('Users');
-    sheet.appendRow(['id', 'username', 'password', 'role', 'branchId']);
+    sheet.appendRow(['id', 'username', 'password', 'role', 'branchId', 'status', 'disabledAt', 'disabledBy']);
   }
+  return sheet;
+}
+
+function ensureUsersAccessColumns(sheet) {
+  var headers = getHeaders(sheet);
+  ['status', 'disabledAt', 'disabledBy'].forEach(function(header) {
+    if (headers.indexOf(header) === -1) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header);
+      headers = getHeaders(sheet);
+    }
+  });
+  var data = sheet.getDataRange().getValues();
+  var idIdx = headers.indexOf('id');
+  var statusIdx = headers.indexOf('status');
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][idIdx] || '').trim() && !String(data[i][statusIdx] || '').trim()) {
+      sheet.getRange(i + 1, statusIdx + 1).setValue('Активен');
+    }
+  }
+  return headers;
+}
+
+function requireUsersAccessColumns(sheet) {
+  var headers = getHeaders(sheet);
+  ['id', 'username', 'password', 'role', 'branchId', 'status', 'disabledAt', 'disabledBy'].forEach(function(header) {
+    if (headers.indexOf(header) === -1) throw new Error('Схема Users не обновлена. Запустите setupSchema(): ' + header);
+  });
+  return headers;
+}
+
+function ensureCoachUserIdColumn(sheet) {
+  var headers = getHeaders(sheet);
+  if (headers.indexOf('userId') === -1) {
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue('userId');
+    headers = getHeaders(sheet);
+  }
+  return headers;
+}
+
+function requireCoachUserIdColumn(sheet) {
+  var headers = getHeaders(sheet);
+  if (headers.indexOf('userId') === -1) throw new Error('Схема тренеров не обновлена. Запустите setupSchema()');
+  return headers;
+}
+
+function isUserActive(status) {
+  return String(status || '').trim() === 'Активен';
+}
+
+function requireExistingSheet(ss, name) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) throw new Error('Schema is not initialized. Run setupSchema(): ' + name);
   return sheet;
 }
 
@@ -163,9 +217,45 @@ function requireId(body) {
 }
 
 function isMutatingAction(action) {
-  return ['createUser', 'assignUserBranch', 'createClient', 'createLesson', 'createBranch', 'createCoach',
+  return ['assignUserBranch', 'deactivateUser', 'activateUser', 'resetCoachPassword', 'linkCoachUser', 'createClient', 'createLesson', 'createBranch', 'createCoach',
     'updateClient', 'updateCoach', 'updateLesson', 'deleteClient', 'deleteCoach', 'deleteLesson',
     'recordAttendance', 'recordBulkAttendance', 'recordPayment', 'uploadReceipt', 'addLessons'].indexOf(action) !== -1;
+}
+
+function getScriptCacheSafe() {
+  try {
+    return CacheService.getScriptCache();
+  } catch (error) {
+    return null;
+  }
+}
+
+function authUserCacheKey(userId) {
+  return 'lotos-auth-user:' + sha256(String(userId)).substring(0, 48);
+}
+
+function invalidateAuthUserCache(userId) {
+  if (!userId) return;
+  var cache = getScriptCacheSafe();
+  if (!cache) return;
+  try { cache.remove(authUserCacheKey(userId)); } catch (error) {}
+}
+
+function parseCachedAuthUser(value) {
+  if (!value) return null;
+  try {
+    var user = JSON.parse(value);
+    if (!user || typeof user !== 'object' || !user.id || !user.username || !user.role) return null;
+    if (user.role !== 'admin' && user.role !== 'coach') return null;
+    return {
+      id: String(user.id),
+      username: String(user.username),
+      role: String(user.role),
+      branchId: user.branchId === null || user.branchId === undefined || String(user.branchId).trim() === '' ? null : String(user.branchId)
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 function requireRequestId(body) {
@@ -200,19 +290,20 @@ function validateRequest(body) {
   if (body.action === 'login') {
     requireText(body, 'username', 100);
     requireText(body, 'password', 200);
-  } else if (body.action === 'register') {
-    requireText(body, 'username', 100);
-    requireText(body, 'password', 200);
-  } else if (body.action === 'createUser') {
-    requireText(body, 'username', 100);
-    requireText(body, 'password', 200);
-    requireText(body, 'role', 20);
-    if (['admin', 'coach'].indexOf(String(body.role).toLowerCase()) === -1) throw new Error('Недопустимая роль');
   } else if (body.action === 'getUsers' || body.action === 'getCurrentUser') {
     // No payload fields.
   } else if (body.action === 'assignUserBranch') {
     requireText(body, 'userId', 100);
     requireText(body, 'branchId', 100);
+  } else if (body.action === 'deactivateUser' || body.action === 'activateUser') {
+    requireText(body, 'userId', 100);
+  } else if (body.action === 'resetCoachPassword') {
+    requireText(body, 'userId', 100);
+    requireText(body, 'newPassword', 200);
+    if (String(body.newPassword).length < 8) throw new Error('Пароль должен содержать не менее 8 символов');
+  } else if (body.action === 'linkCoachUser') {
+    requireText(body, 'coachId', 100);
+    requireText(body, 'userId', 100);
   } else if (body.action === 'getSheet') {
     if (['Клиенты', 'Филиалы', 'Тренеры', 'Расписание'].indexOf(body.sheet) === -1) {
       throw new Error('Недопустимый лист');
@@ -242,6 +333,12 @@ function validateRequest(body) {
   } else if (body.action === 'createCoach') {
     requireText(body, 'name', 150);
     requireText(body, 'branchId', 100);
+    if (Boolean(body.username) !== Boolean(body.password)) throw new Error('Для создания доступа укажите и логин, и пароль');
+    if (body.username) {
+      requireText(body, 'username', 100);
+      requireText(body, 'password', 200);
+      if (String(body.password).length < 8) throw new Error('Пароль должен содержать не менее 8 символов');
+    }
   } else if (body.action === 'updateClient') {
     requireId(body);
     requireNonNegativeNumber(body, 'paidAmount');
@@ -273,6 +370,9 @@ function validateRequest(body) {
     if (Number(body.amount) <= 0) throw new Error('Сумма платежа должна быть больше нуля');
     if (body.category !== undefined && ['плавание', 'синхронное плавание'].indexOf(body.category) === -1) throw new Error('Недопустимая категория клиента');
     if (body.lessonsPerWeek !== undefined && [1, 2, 3].indexOf(Number(body.lessonsPerWeek)) === -1) throw new Error('Некорректная нагрузка');
+  } else if (body.action === 'getLessonRoster') {
+    requireText(body, 'lessonId', 100);
+    requireText(body, 'date', 40);
   } else if (body.action === 'getClientHistory') {
     requireText(body, 'clientId', 100);
   } else if (body.action === 'uploadReceipt') {
@@ -292,14 +392,14 @@ function validateRequest(body) {
 }
 
 function isKnownAction(action) {
-  return ['login', 'register', 'createUser', 'getUsers', 'getCurrentUser', 'assignUserBranch', 'getSheet', 'getClients', 'createClient', 'createLesson', 'createBranch', 'createCoach', 'updateClient', 'updateCoach', 'updateLesson', 'deleteClient', 'deleteCoach', 'deleteLesson', 'recordAttendance', 'recordBulkAttendance', 'recordPayment', 'uploadReceipt', 'getReceipt', 'getClientHistory', 'addLessons'].indexOf(action) !== -1;
+  return ['login', 'getUsers', 'getCurrentUser', 'assignUserBranch', 'deactivateUser', 'activateUser', 'resetCoachPassword', 'linkCoachUser', 'getSheet', 'getClients', 'createClient', 'createLesson', 'createBranch', 'createCoach', 'updateClient', 'updateCoach', 'updateLesson', 'deleteClient', 'deleteCoach', 'deleteLesson', 'recordAttendance', 'recordBulkAttendance', 'recordPayment', 'uploadReceipt', 'getReceipt', 'getClientHistory', 'getLessonRoster', 'addLessons'].indexOf(action) !== -1;
 }
 
 function nextId() {
   return String(new Date().getTime()) + '-' + String(Math.floor(Math.random() * 100000));
 }
 
-var SCHEMA_VERSION = '3';
+var SCHEMA_VERSION = '6';
 
 function setupSchema() {
   // Run once from the Apps Script editor after deploying a new schema.
@@ -307,17 +407,26 @@ function setupSchema() {
   if (!lock.tryLock(20000)) throw new Error('Система занята, повторите настройку схемы');
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    getOrCreateUsersSheet(ss);
+    ensureUsersAccessColumns(getOrCreateUsersSheet(ss));
+    var coaches = ss.getSheetByName('Тренеры');
+    if (coaches) ensureCoachUserIdColumn(coaches);
     var clients = ss.getSheetByName('Клиенты');
     if (clients) ensureClientSubscriptionColumns(clients);
+    var lessons = ss.getSheetByName('Расписание');
+    if (lessons) ensureLessonScheduleColumns(lessons);
     getOrCreateAttendanceSheet(ss);
-    getOrCreatePaymentsSheet(ss);
+    ensurePaymentsFingerprintColumn(getOrCreatePaymentsSheet(ss));
     getOrCreateLessonLedgerSheet(ss);
     // Mark the schema ready only after every migration step succeeds.
+    SpreadsheetApp.flush();
     PropertiesService.getScriptProperties().setProperty('SCHEMA_VERSION', SCHEMA_VERSION);
     return 'Schema ' + SCHEMA_VERSION + ' is ready';
   } finally {
-    lock.releaseLock();
+    try {
+      SpreadsheetApp.flush();
+    } finally {
+      lock.releaseLock();
+    }
   }
 }
 
@@ -325,32 +434,49 @@ function setupSchema() {
 // Before running, set BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD
 // in Script Properties. They are deleted immediately after a successful run.
 function setupInitialAdmin() {
-  var properties = PropertiesService.getScriptProperties();
-  var username = String(properties.getProperty('BOOTSTRAP_ADMIN_USERNAME') || '').trim();
-  var password = String(properties.getProperty('BOOTSTRAP_ADMIN_PASSWORD') || '');
-  if (!username || username.length > 100) throw new Error('Некорректный логин');
-  if (password.length < 8 || password.length > 200) throw new Error('Пароль должен содержать от 8 до 200 символов');
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('Система занята, повторите создание администратора');
+  try {
+    var properties = PropertiesService.getScriptProperties();
+    var username = String(properties.getProperty('BOOTSTRAP_ADMIN_USERNAME') || '').trim();
+    var password = String(properties.getProperty('BOOTSTRAP_ADMIN_PASSWORD') || '');
+    if (!username || username.length > 100) throw new Error('Некорректный логин');
+    if (password.length < 8 || password.length > 200) throw new Error('Пароль должен содержать от 8 до 200 символов');
 
-  var sheet = getOrCreateUsersSheet(SpreadsheetApp.getActiveSpreadsheet());
-  var headers = getHeaders(sheet);
-  var data = sheet.getDataRange().getValues();
-  var usernameIdx = headers.indexOf('username');
-  if (data.slice(1).some(function(row) { return String(row[usernameIdx] || '').trim().toLowerCase() === username.toLowerCase(); })) {
-    throw new Error('Пользователь с таким логином уже существует');
+    var sheet = getOrCreateUsersSheet(SpreadsheetApp.getActiveSpreadsheet());
+    var headers = ensureUsersAccessColumns(sheet);
+    var data = sheet.getDataRange().getValues();
+    var usernameIdx = headers.indexOf('username');
+    var roleIdx = headers.indexOf('role');
+    if (data.slice(1).some(function(row) { return normalizeRole(row[roleIdx]) === 'admin'; })) {
+      throw new Error('Первый администратор уже создан. Создавать дополнительные аккаунты можно только через раздел «Тренеры».');
+    }
+    if (data.slice(1).some(function(row) { return String(row[usernameIdx] || '').trim().toLowerCase() === username.toLowerCase(); })) {
+      throw new Error('Пользователь с таким логином уже существует');
+    }
+    var row = headers.map(function(header) {
+      if (header === 'id') return nextId();
+      if (header === 'username') return safeValue(username);
+      if (header === 'password') return securePasswordHash(password);
+      if (header === 'role') return '1';
+      if (header === 'branchId') return '';
+      if (header === 'status') return 'Активен';
+      if (header === 'disabledAt' || header === 'disabledBy') return '';
+      return '';
+    });
+    sheet.appendRow(row);
+    SpreadsheetApp.flush();
+    properties.setProperty('BOOTSTRAP_ADMIN_CREATED', 'true');
+    properties.deleteProperty('BOOTSTRAP_ADMIN_USERNAME');
+    properties.deleteProperty('BOOTSTRAP_ADMIN_PASSWORD');
+    return 'Администратор создан: ' + username;
+  } finally {
+    try {
+      SpreadsheetApp.flush();
+    } finally {
+      lock.releaseLock();
+    }
   }
-  var row = headers.map(function(header) {
-    if (header === 'id') return nextId();
-    if (header === 'username') return safeValue(username);
-    if (header === 'password') return securePasswordHash(password);
-    if (header === 'role') return '1';
-    if (header === 'branchId') return '';
-    return '';
-  });
-  sheet.appendRow(row);
-  properties.setProperty('BOOTSTRAP_ADMIN_CREATED', 'true');
-  properties.deleteProperty('BOOTSTRAP_ADMIN_USERNAME');
-  properties.deleteProperty('BOOTSTRAP_ADMIN_PASSWORD');
-  return 'Администратор создан: ' + username;
 }
 
 function getOrCreateAttendanceSheet(ss) {
@@ -366,9 +492,37 @@ function getOrCreatePaymentsSheet(ss) {
   var sheet = ss.getSheetByName('Платежи');
   if (!sheet) {
     sheet = ss.insertSheet('Платежи');
-    sheet.appendRow(['id', 'requestId', 'clientId', 'branchId', 'amount', 'category', 'lessonsPerWeek', 'packagePrice', 'packageLessons', 'packagesCount', 'lessonsAdded', 'paidAt', 'recordedBy', 'comment']);
+    sheet.appendRow(['id', 'requestId', 'clientId', 'branchId', 'amount', 'category', 'lessonsPerWeek', 'packagePrice', 'packageLessons', 'packagesCount', 'lessonsAdded', 'paidAt', 'recordedBy', 'comment', 'requestFingerprint']);
   }
   return sheet;
+}
+
+function ensureLessonScheduleColumns(sheet) {
+  var headers = getHeaders(sheet);
+  ['date', 'dayOfWeek', 'time', 'category', 'isRecurring'].forEach(function(header) {
+    if (headers.indexOf(header) === -1) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header);
+      headers = getHeaders(sheet);
+    }
+  });
+  // Sheets must not convert 2026-10-02 or 17:00 into Date objects.
+  ['date', 'time'].forEach(function(header) {
+    sheet.getRange(1, headers.indexOf(header) + 1, sheet.getMaxRows(), 1).setNumberFormat('@');
+  });
+}
+
+function requireLessonScheduleColumns(sheet) {
+  var headers = getHeaders(sheet);
+  ['date', 'dayOfWeek', 'time', 'category', 'isRecurring'].forEach(function(header) {
+    if (headers.indexOf(header) === -1) throw new Error('Схема расписания не обновлена. Запустите setupSchema(): ' + header);
+  });
+  return headers;
+}
+
+function ensurePaymentsFingerprintColumn(sheet) {
+  if (getHeaders(sheet).indexOf('requestFingerprint') === -1) {
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue('requestFingerprint');
+  }
 }
 
 function getOrCreateLessonLedgerSheet(ss) {
@@ -394,18 +548,39 @@ function requireServerAuth(body) {
   var claimedId = String(auth.id || '').trim();
   if (!claimedId) rejectUnauthorized('session.invalid_claims', { hasId: false });
 
-  var usersSheet = getOrCreateUsersSheet(SpreadsheetApp.getActiveSpreadsheet());
+  // Reads may use a short-lived canonical snapshot. Mutations and the
+  // session probe always bypass it and read the authoritative Users row.
+  var forceFresh = isMutatingAction(body.action) || body.action === 'getCurrentUser';
+  var authCache = getScriptCacheSafe();
+  var authCacheKey = authUserCacheKey(claimedId);
+  if (forceFresh) {
+    invalidateAuthUserCache(claimedId);
+  } else if (authCache) {
+    var cachedUser = null;
+    try { cachedUser = parseCachedAuthUser(authCache.get(authCacheKey)); } catch (error) {}
+    if (cachedUser) {
+      var cachedClaimedUsername = String(auth.username || '').trim();
+      var cachedClaimedRole = normalizeRole(auth.role);
+      var cachedClaimedBranchId = auth.branchId === undefined || auth.branchId === null ? null : (String(auth.branchId).trim() || null);
+      if (cachedClaimedUsername !== cachedUser.username || cachedClaimedRole !== cachedUser.role || String(cachedClaimedBranchId || '') !== String(cachedUser.branchId || '')) {
+        diagnosticLog('auth.claims_refreshed', { roleChanged: cachedClaimedRole !== cachedUser.role, usernameChanged: cachedClaimedUsername !== cachedUser.username, branchChanged: String(cachedClaimedBranchId || '') !== String(cachedUser.branchId || ''), source: 'cache' });
+      }
+      diagnosticLog('auth.cache_hit', { userId: cachedUser.id, role: cachedUser.role });
+      return cachedUser;
+    }
+    diagnosticLog('auth.cache_miss', { userId: claimedId });
+  }
+
+  var usersSheet = requireExistingSheet(SpreadsheetApp.getActiveSpreadsheet(), 'Users');
   var usersData = usersSheet.getDataRange().getValues();
   if (!usersData.length) throw new Error('Users schema is invalid');
 
-  var usersHeaders = usersData[0].map(function(header) { return String(header || '').trim(); });
+  var usersHeaders = requireUsersAccessColumns(usersSheet).map(function(header) { return String(header || '').trim(); });
   var idIdx = usersHeaders.indexOf('id');
   var usernameIdx = usersHeaders.indexOf('username');
   var roleIdx = usersHeaders.indexOf('role');
   var branchIdx = usersHeaders.indexOf('branchId');
-  if (idIdx === -1 || usernameIdx === -1 || roleIdx === -1) {
-    throw new Error('Users schema is invalid: id, username and role are required');
-  }
+  var statusIdx = usersHeaders.indexOf('status');
 
   var rowIndex = findRowById(usersData, idIdx, claimedId);
   if (rowIndex === -1) rejectUnauthorized('session.user_not_found');
@@ -414,6 +589,7 @@ function requireServerAuth(body) {
   var storedUsername = String(usersData[rowIndex][usernameIdx] || '').trim();
   var storedRole = normalizeRole(usersData[rowIndex][roleIdx]);
   var storedBranchId = branchIdx === -1 ? null : (String(usersData[rowIndex][branchIdx] || '').trim() || null);
+  if (!isUserActive(usersData[rowIndex][statusIdx])) rejectUnauthorized('session.user_disabled');
   if (!storedId || !storedUsername || !storedRole) {
     rejectUnauthorized('session.user_record_invalid', { hasId: Boolean(storedId), hasUsername: Boolean(storedUsername), hasRole: Boolean(storedRole) });
   }
@@ -423,27 +599,31 @@ function requireServerAuth(body) {
   var claimedBranchId = auth.branchId === undefined || auth.branchId === null ? null : (String(auth.branchId).trim() || null);
   var claimsChanged = claimedUsername !== storedUsername || claimedRole !== storedRole || String(claimedBranchId || '') !== String(storedBranchId || '');
   if (claimsChanged) {
-    diagnosticLog('auth.claims_refreshed', { roleChanged: claimedRole !== storedRole, usernameChanged: claimedUsername !== storedUsername, branchChanged: String(claimedBranchId || '') !== String(storedBranchId || '') });
+    diagnosticLog('auth.claims_refreshed', { roleChanged: claimedRole !== storedRole, usernameChanged: claimedUsername !== storedUsername, branchChanged: String(claimedBranchId || '') !== String(storedBranchId || ''), source: 'users' });
   }
 
-  diagnosticLog('auth.accepted', { role: storedRole, branchAssigned: Boolean(storedBranchId) });
-  return {
+  var canonicalUser = {
     id: storedId,
     username: storedUsername,
     role: storedRole,
     branchId: storedBranchId
   };
+  if (authCache && !forceFresh) {
+    try { authCache.put(authCacheKey, JSON.stringify(canonicalUser), AUTH_USER_CACHE_TTL_SECONDS); } catch (error) {}
+  }
+  diagnosticLog('auth.accepted', { role: storedRole, branchAssigned: Boolean(storedBranchId), source: forceFresh ? 'users.fresh' : 'users' });
+  return canonicalUser;
 }
 
 function isAdminAction(action) {
-  return ['createUser', 'getUsers', 'assignUserBranch', 'createBranch', 'createCoach', 'updateCoach', 'deleteCoach', 'uploadReceipt', 'getReceipt', 'getClientHistory', 'recordPayment', 'addLessons', 'createClient', 'updateClient', 'deleteClient'].indexOf(action) !== -1;
+  return ['getUsers', 'assignUserBranch', 'deactivateUser', 'activateUser', 'resetCoachPassword', 'linkCoachUser', 'createBranch', 'createCoach', 'updateCoach', 'deleteCoach', 'uploadReceipt', 'getReceipt', 'getClientHistory', 'recordPayment', 'addLessons', 'createClient', 'updateClient', 'deleteClient'].indexOf(action) !== -1;
 }
 
 function assertGasPermission(body, auth) {
   var action = body.action;
   if (isAdminAction(action) && auth.role !== 'admin') throw new Error('Недостаточно прав');
   if (action === 'getCurrentUser') return;
-  if (auth.role === 'coach' && ['getSheet', 'getClients', 'createLesson', 'updateLesson', 'deleteLesson', 'recordAttendance', 'recordBulkAttendance'].indexOf(action) === -1) {
+  if (auth.role === 'coach' && ['getSheet', 'getClients', 'createLesson', 'updateLesson', 'deleteLesson', 'recordAttendance', 'recordBulkAttendance', 'getLessonRoster'].indexOf(action) === -1) {
     throw new Error('Недостаточно прав');
   }
   if (auth.role === 'coach' && !auth.branchId) throw new Error('У пользователя не назначен филиал');
@@ -470,7 +650,7 @@ function readCacheVersion() {
 }
 
 function invalidateReadCache() {
-  PropertiesService.getScriptProperties().setProperty('READ_CACHE_VERSION', String(new Date().getTime()));
+  PropertiesService.getScriptProperties().setProperty('READ_CACHE_VERSION', String(new Date().getTime()) + ':' + nextId());
 }
 
 function objectsForAuth(sheet, auth, requestedBranchId) {
@@ -625,45 +805,121 @@ function findRowById(data, idIdx, id) {
   return -1;
 }
 
-function validateAttendanceItem(item, ss, auth, sharedClients) {
+function requireLessonOccurrence(lesson, lessonId, occurrenceDate, auth, ss) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(occurrenceDate)) || !isValidIsoDate(occurrenceDate)) {
+    throw new Error('Дата занятия должна быть в ISO-формате');
+  }
+  var idIdx = lesson.headers.indexOf('id');
+  var branchIdx = lesson.headers.indexOf('branchId');
+  var dateIdx = lesson.headers.indexOf('date');
+  var weekdayIdx = lesson.headers.indexOf('dayOfWeek');
+  var recurringIdx = lesson.headers.indexOf('isRecurring');
+  if ([idIdx, branchIdx, dateIdx, weekdayIdx, recurringIdx].indexOf(-1) !== -1) {
+    throw new Error('Схема расписания не обновлена. Запустите setupSchema()');
+  }
+  var rowIndex = lesson.rows.findIndex(function(row) { return String(row[idIdx]) === String(lessonId); });
+  if (rowIndex === -1) throw new Error('Занятие не найдено');
+  var row = lesson.rows[rowIndex];
+  var branchId = String(row[branchIdx] || '');
+  if (!branchMatches(auth, branchId)) throw new Error('Доступ к филиалу запрещен');
+  var scheduledDate = row[dateIdx];
+  if (Object.prototype.toString.call(scheduledDate) === '[object Date]') {
+    scheduledDate = Utilities.formatDate(scheduledDate, ss.getSpreadsheetTimeZone(), 'yyyy-MM-dd');
+  }
+  scheduledDate = String(scheduledDate || '').trim();
+  var recurring = row[recurringIdx] === true || String(row[recurringIdx]).toLowerCase() === 'true';
+  if (scheduledDate && (!recurring || scheduledDate === String(occurrenceDate))) {
+    if (scheduledDate !== String(occurrenceDate)) throw new Error('Дата не совпадает с датой занятия');
+  } else if (recurring) {
+    var weekdays = { 'Вс': 0, 'Пн': 1, 'Вт': 2, 'Ср': 3, 'Чт': 4, 'Пт': 5, 'Сб': 6 };
+    var expectedDay = weekdays[String(row[weekdayIdx] || '')];
+    var actualDay = new Date(String(occurrenceDate) + 'T00:00:00Z').getUTCDay();
+    if (expectedDay === undefined || expectedDay !== actualDay || (scheduledDate && String(occurrenceDate) < scheduledDate)) {
+      throw new Error('Дата не совпадает с днём повторяющегося занятия');
+    }
+  } else {
+    throw new Error('У занятия не задана дата');
+  }
+  return { branchId: branchId, row: row };
+}
+
+function getLessonRoster(ss, body, auth) {
+  var lessonSheet = requireExistingSheet(ss, 'Расписание');
+  var lesson = sheetObjects(lessonSheet);
+  var occurrence = requireLessonOccurrence(lesson, body.lessonId, body.date, auth, ss);
+  var lessonCategoryIdx = lesson.headers.indexOf('category');
+  var lessonCategory = lessonCategoryIdx === -1 ? '' : String(occurrence.row[lessonCategoryIdx] || '');
+
+  var clientsSheet = requireExistingSheet(ss, 'Клиенты');
+  var headers = requireClientSubscriptionColumns(clientsSheet);
+  var data = clientsSheet.getDataRange().getValues();
+  var idIdx = headers.indexOf('id'), branchIdx = headers.indexOf('branchId');
+  var nameIdx = headers.indexOf('childName'), categoryIdx = headers.indexOf('category');
+  var statusIdx = headers.indexOf('status'), remainingIdx = headers.indexOf('remainingLessons');
+  var historyIdx = headers.indexOf('attendanceHistory');
+  var assignedIdx = headers.indexOf('assignedLessonIds'), legacyIdx = headers.indexOf('assignedLessonId');
+  if ([idIdx, branchIdx, nameIdx, remainingIdx, historyIdx].indexOf(-1) !== -1 || (assignedIdx === -1 && legacyIdx === -1)) {
+    throw new Error('Схема клиентов не обновлена. Запустите setupSchema()');
+  }
+  var clients = data.slice(1).filter(function(row) {
+    if (String(row[branchIdx] || '') !== occurrence.branchId) return false;
+    if (categoryIdx !== -1 && lessonCategory && row[categoryIdx] && String(row[categoryIdx]) !== lessonCategory) return false;
+    var assigned = assignedIdx === -1 ? '' : row[assignedIdx];
+    if (!assigned && legacyIdx !== -1) assigned = row[legacyIdx];
+    if (statusIdx !== -1 && String(row[statusIdx] || '') === 'Архив') return false;
+    return String(assigned || '').split(',').map(function(value) { return value.trim(); }).indexOf(String(body.lessonId)) !== -1;
+  }).map(function(row) {
+    var mark = parseHistory(row[historyIdx]).find(function(entry) {
+      return entry && String(entry.lessonId) === String(body.lessonId) && String(entry.date) === String(body.date);
+    });
+    return {
+      id: String(row[idIdx]), childName: String(row[nameIdx] || ''),
+      category: categoryIdx === -1 ? '' : String(row[categoryIdx] || ''),
+      status: statusIdx === -1 ? '' : String(row[statusIdx] || ''),
+      remainingLessons: Number(row[remainingIdx] || 0),
+      mark: mark && (mark.status === 'attended' || mark.status === 'absent') ? mark.status : null
+    };
+  });
+  clients.sort(function(left, right) { return left.childName.localeCompare(right.childName, 'ru'); });
+  return { lessonId: String(body.lessonId), date: String(body.date), clients: clients };
+}
+
+function validateAttendanceItem(item, ss, auth, sharedClients, sharedLessons) {
   if (!item || !item.lessonId || !item.date || !item.status) throw new Error('Некорректная отметка посещения');
   if (!isValidIsoDate(item.date)) throw new Error('Дата должна быть в ISO-формате');
   if (['attended', 'absent'].indexOf(item.status) === -1) throw new Error('Недопустимый статус посещения');
   if (!item.requestId) throw new Error('Не указан idempotency key');
-  var lessonSheet = ss.getSheetByName('Расписание');
-  if (!lessonSheet) throw new Error('Лист расписания не найден');
-  var lesson = sheetObjects(lessonSheet);
-  var lessonIdIdx = lesson.headers.indexOf('id');
-  var branchIdx = lesson.headers.indexOf('branchId');
-  var lessonRow = lesson.rows.findIndex(function(row) { return String(row[lessonIdIdx]) === String(item.lessonId); });
-  if (lessonRow === -1) throw new Error('Занятие не найдено');
-  var lessonBranch = branchIdx === -1 ? '' : lesson.rows[lessonRow][branchIdx];
-  if (!branchMatches(auth, lessonBranch)) throw new Error('Доступ к филиалу запрещен');
+  var lesson = sharedLessons || sheetObjects(requireExistingSheet(ss, 'Расписание'));
+  var occurrence = requireLessonOccurrence(lesson, item.lessonId, item.date, auth, ss);
+  var lessonBranch = occurrence.branchId;
   if (!item.clientId) {
     if (item.isWalkin !== true || !item.visitorName) throw new Error('Для walk-in укажите имя посетителя');
     return { lessonBranch: String(lessonBranch), clientRowIndex: -1, clientSheet: null };
   }
+  if (item.isWalkin === true) throw new Error('Проходное посещение доступно только посетителю без карточки клиента');
   var clientSheet = sharedClients ? sharedClients.sheet : ss.getSheetByName('Клиенты');
   if (!clientSheet) throw new Error('Лист клиентов не найден');
-  var headers = sharedClients ? sharedClients.headers : ensureClientSubscriptionColumns(clientSheet);
+  var headers = sharedClients ? sharedClients.headers : requireClientSubscriptionColumns(clientSheet);
   var data = sharedClients ? sharedClients.data : clientSheet.getDataRange().getValues();
   var idIdx = headers.indexOf('id');
   var clientBranchIdx = headers.indexOf('branchId');
   var clientRow = findRowById(data, idIdx, item.clientId);
+  var lessonCategoryIdx = lesson.headers.indexOf('category');
+  var clientCategoryIdx = headers.indexOf('category');
   if (clientRow === -1) throw new Error('Клиент не найден');
+  if (lessonCategoryIdx !== -1 && clientCategoryIdx !== -1 && occurrence.row[lessonCategoryIdx] && data[clientRow][clientCategoryIdx] && String(occurrence.row[lessonCategoryIdx]) !== String(data[clientRow][clientCategoryIdx])) throw new Error('Категория клиента не совпадает с занятием');
   var clientBranch = clientBranchIdx === -1 ? '' : data[clientRow][clientBranchIdx];
   if (!branchMatches(auth, clientBranch) || String(clientBranch) !== String(lessonBranch)) throw new Error('Клиент и занятие находятся в разных филиалах');
   var assignedIdx = headers.indexOf('assignedLessonIds');
+  var clientStatusIdx = headers.indexOf('status');
+  if (clientStatusIdx !== -1 && String(data[clientRow][clientStatusIdx] || '') === 'Архив') throw new Error('Клиент в архиве');
   var legacyAssignedIdx = headers.indexOf('assignedLessonId');
   var assignedValue = assignedIdx !== -1 ? data[clientRow][assignedIdx] : '';
   if (!assignedValue && legacyAssignedIdx !== -1) assignedValue = data[clientRow][legacyAssignedIdx];
   if (!assignedValue || String(assignedValue).split(',').map(function(value) { return value.trim(); }).indexOf(String(item.lessonId)) === -1) {
     throw new Error('Клиент не записан на это занятие');
   }
-  var remainingIdx = headers.indexOf('remainingLessons');
-  if (item.status === 'attended' && item.isWalkin !== true && remainingIdx !== -1 && Number(data[clientRow][remainingIdx] || 0) <= 0) {
-    throw new Error('У клиента закончились занятия');
-  }
+  // Balance checks run after duplicate detection in processClientAttendance.
   return { lessonBranch: String(lessonBranch), clientRowIndex: clientRow, clientSheet: clientSheet, clientHeaders: headers, clientData: data };
 }
 
@@ -678,6 +934,8 @@ function processWalkinAttendance(item, ss, auth, lessonBranch) {
   if (existing !== -1) {
     if (String(parsed.rows[existing][statusIdx]) === String(item.status)) return { success: true, duplicate: true, walkin: true };
     parsed.rows[existing][statusIdx] = item.status;
+    var recorderIdx = headers.indexOf('recordedBy');
+    if (recorderIdx !== -1) parsed.rows[existing][recorderIdx] = safeValue(auth.username);
     sheet.getRange(existing + 2, 1, 1, headers.length).setValues([parsed.rows[existing]]);
     return { success: true, corrected: true, walkin: true };
   }
@@ -698,7 +956,7 @@ function processWalkinAttendance(item, ss, auth, lessonBranch) {
   return { success: true, walkin: true };
 }
 
-function processClientAttendance(item, context) {
+function processClientAttendance(item, context, auth) {
   var row = context.clientData[context.clientRowIndex], headers = context.clientHeaders;
   var historyIdx = headers.indexOf('attendanceHistory'), remainingIdx = headers.indexOf('remainingLessons');
   var totalIdx = headers.indexOf('totalLessons'), statusIdx = headers.indexOf('status'), history = parseHistory(row[historyIdx]);
@@ -709,14 +967,16 @@ function processClientAttendance(item, context) {
     if (String(existing.status) === String(item.status) && Boolean(existing.isWalkin) === Boolean(item.isWalkin)) return { success: true, duplicate: true };
     var previousCharged = existing.status === 'attended' && existing.isWalkin !== true;
     var delta = (nextCharged ? 1 : 0) - (previousCharged ? 1 : 0);
+    if (delta > 0 && Number(row[remainingIdx] || 0) < delta) throw new Error('У клиента закончились занятия');
     row[remainingIdx] = Math.max(0, Math.min(Number(row[totalIdx] || Number.MAX_SAFE_INTEGER), Number(row[remainingIdx] || 0) - delta));
-    existing.status = item.status; existing.isWalkin = item.isWalkin === true; existing.requestId = item.requestId; history[existingIdx] = existing;
+    existing.status = item.status; existing.isWalkin = false; existing.requestId = item.requestId; existing.recordedBy = auth.username; history[existingIdx] = existing;
   } else {
-    history.push({ date: item.date, lessonId: item.lessonId, status: item.status, isWalkin: item.isWalkin === true, requestId: item.requestId });
+    if (nextCharged && Number(row[remainingIdx] || 0) <= 0) throw new Error('У клиента закончились занятия');
+    history.push({ date: item.date, lessonId: item.lessonId, status: item.status, isWalkin: false, requestId: item.requestId, recordedBy: auth.username });
     if (nextCharged) row[remainingIdx] = Math.max(0, Number(row[remainingIdx] || 0) - 1);
   }
   row[historyIdx] = JSON.stringify(history);
-  if (statusIdx !== -1) row[statusIdx] = Number(row[remainingIdx] || 0) <= 0 && nextCharged ? 'Пауза' : 'Активен';
+  if (statusIdx !== -1) row[statusIdx] = Number(row[remainingIdx] || 0) <= 0 ? 'Пауза' : 'Активен';
   return { success: true, corrected: existingIdx !== -1 };
 }
 
@@ -769,6 +1029,32 @@ function ensureClientSubscriptionColumns(sheet) {
   return headers;
 }
 
+function requireClientSubscriptionColumns(sheet) {
+  var headers = getHeaders(sheet);
+  var required = ['totalLessons', 'remainingLessons', 'paid', 'purchasedAt', 'receiptUrl', 'attendanceHistory', 'paymentBalance'];
+  required.forEach(function(header) {
+    if (headers.indexOf(header) === -1) throw new Error('Схема клиентов не обновлена. Запустите setupSchema(): ' + header);
+  });
+  return headers;
+}
+
+function writeAttendanceChanges(batch, dirtyRows) {
+  var indices = Object.keys(dirtyRows).map(Number).sort(function(left, right) { return left - right; });
+  if (!indices.length) return;
+
+  ['remainingLessons', 'attendanceHistory', 'status'].forEach(function(header) {
+    var column = batch.headers.indexOf(header);
+    if (column === -1) throw new Error('Схема клиентов не обновлена. Запустите setupSchema(): ' + header);
+    for (var start = 0; start < indices.length;) {
+      var end = start + 1;
+      while (end < indices.length && indices[end] === indices[end - 1] + 1) end++;
+      var values = indices.slice(start, end).map(function(index) { return [batch.data[index][column]]; });
+      batch.sheet.getRange(indices[start] + 1, column + 1, values.length, 1).setValues(values);
+      start = end;
+    }
+  });
+}
+
 function sheetContext(ss, name) {
   var sheet = ss.getSheetByName(name);
   if (!sheet) throw new Error('Лист не найден: ' + name);
@@ -777,21 +1063,15 @@ function sheetContext(ss, name) {
 }
 
 function appendObject(context, body) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) throw new Error('Система занята, повторите операцию');
-  try {
-    var row = context.headers.map(function(header) {
-      if (header === 'id') return nextId();
-      var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
-      return safeValue(value === undefined ? '' : value);
-    });
-    context.sheet.appendRow(row);
-    var result = {};
-    context.headers.forEach(function(header, index) { result[header] = row[index]; });
-    return result;
-  } finally {
-    lock.releaseLock();
-  }
+  var row = context.headers.map(function(header) {
+    if (header === 'id') return nextId();
+    var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
+    return safeValue(value === undefined ? '' : value);
+  });
+  context.sheet.appendRow(row);
+  var result = {};
+  context.headers.forEach(function(header, index) { result[header] = row[index]; });
+  return result;
 }
 
 function appendClientObject(context, body) {
@@ -801,84 +1081,72 @@ function appendClientObject(context, body) {
   if (!isFinite(paidAmount) || paidAmount < 0) throw new Error('Некорректная сумма оплаты');
   var category = body.category || 'плавание';
   var totalLessons = 0;
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) throw new Error('Система занята, повторите операцию');
-  try {
-    var row = context.headers.map(function(header) {
-      if (header === 'id') return nextId();
-      if (header === 'lessonsPerWeek') return frequency;
-      if (header === 'paidAmount') return paidAmount;
-      if (header === 'totalLessons') return totalLessons;
-      if (header === 'remainingLessons') return totalLessons;
-      if (header === 'paid') return paidAmount > 0;
-      if (header === 'paymentBalance') return 0;
-      if (header === 'purchasedAt') return new Date().toISOString();
-      if (header === 'receiptUrl') return '';
-      if (header === 'attendanceHistory') return '[]';
-      if (header === 'status') return 'Активен';
-      var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
-      return safeValue(value === undefined ? '' : value);
-    });
-    context.sheet.appendRow(row);
-    var result = {};
-    context.headers.forEach(function(header, index) { result[header] = row[index]; });
-    return result;
-  } finally {
-    lock.releaseLock();
-  }
+  var row = context.headers.map(function(header) {
+    if (header === 'id') return nextId();
+    if (header === 'lessonsPerWeek') return frequency;
+    if (header === 'paidAmount') return paidAmount;
+    if (header === 'totalLessons') return totalLessons;
+    if (header === 'remainingLessons') return totalLessons;
+    if (header === 'paid') return paidAmount > 0;
+    if (header === 'paymentBalance') return 0;
+    if (header === 'purchasedAt') return new Date().toISOString();
+    if (header === 'receiptUrl') return '';
+    if (header === 'attendanceHistory') return '[]';
+    if (header === 'status') return 'Активен';
+    var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
+    return safeValue(value === undefined ? '' : value);
+  });
+  context.sheet.appendRow(row);
+  var result = {};
+  context.headers.forEach(function(header, index) { result[header] = row[index]; });
+  return result;
 }
 
 function updateEntity(ss, actionToSheet, body, auth) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) throw new Error('Система занята, повторите операцию');
-  try {
-    var context = sheetContext(ss, actionToSheet[body.action]);
-    var branchIdx = context.headers.indexOf('branchId');
-    var rowIndex = findRowById(context.data, context.idIdx, body.id);
-    if (rowIndex === -1) throw new Error('Не найдено');
-    if (auth.role === 'coach' && branchIdx !== -1 && !branchMatches(auth, context.data[rowIndex][branchIdx])) {
-      throw new Error('Доступ к филиалу запрещен');
-    }
-    var row = context.data[rowIndex].slice();
-    // Subscription counters and payment balance are maintained by payment and attendance operations.
-    // A regular client edit must not overwrite ledger-derived values.
-    // All subscription/accounting fields are ledger-owned.
-    // Generic client edits must not desynchronise the client row from the
-    // Платежи and Журнал занятий sheets.
-    var clientSubscriptionFields = ['id', 'paidAmount', 'totalLessons', 'remainingLessons', 'paid', 'purchasedAt', 'receiptUrl', 'attendanceHistory', 'paymentBalance'];
-    context.headers.forEach(function(header, index) {
-      if (body[header] === undefined || (body.action === 'updateClient' && clientSubscriptionFields.indexOf(header) !== -1)) return;
-      if (body.action === 'updateClient' && header === 'branchId') return;
-      var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
-      if (body.action === 'updateClient' && header === 'paidAmount') value = Number(value);
-      row[index] = safeValue(value);
-    });
-
-    if (body.action === 'updateClient') {
-      var paidAmountIdx = context.headers.indexOf('paidAmount');
-      var paidIdx = context.headers.indexOf('paid');
-      if (paidIdx !== -1 && paidAmountIdx !== -1) row[paidIdx] = Number(row[paidAmountIdx] || 0) > 0;
-      var frequencyIdx = context.headers.indexOf('lessonsPerWeek');
-      var oldFrequency = Number(context.data[rowIndex][frequencyIdx] || 1);
-      var nextFrequency = Number(row[frequencyIdx] || oldFrequency);
-      if (frequencyIdx !== -1 && oldFrequency !== nextFrequency) {
-        var totalIdx = context.headers.indexOf('totalLessons');
-        var remainingIdx = context.headers.indexOf('remainingLessons');
-        var historyIdx = context.headers.indexOf('attendanceHistory');
-        var plannedTotal = packageLessonsFromFrequency(nextFrequency);
-        var attended = countAttendedFromHistory(row[historyIdx]);
-        if (totalIdx !== -1) row[totalIdx] = plannedTotal;
-        if (remainingIdx !== -1) row[remainingIdx] = Math.max(0, plannedTotal - attended);
-      }
-      var statusIdx = context.headers.indexOf('status');
-      var remainingValue = context.headers.indexOf('remainingLessons') === -1 ? 1 : Number(row[context.headers.indexOf('remainingLessons')] || 0);
-      if (statusIdx !== -1 && String(context.data[rowIndex][statusIdx] || '') !== 'Архив') row[statusIdx] = remainingValue > 0 ? 'Активен' : 'Пауза';
-    }
-    context.sheet.getRange(rowIndex + 1, 1, 1, context.headers.length).setValues([row]);
-    return { success: true };
-  } finally {
-    lock.releaseLock();
+  var context = sheetContext(ss, actionToSheet[body.action]);
+  var branchIdx = context.headers.indexOf('branchId');
+  var rowIndex = findRowById(context.data, context.idIdx, body.id);
+  if (rowIndex === -1) throw new Error('Не найдено');
+  if (auth.role === 'coach' && branchIdx !== -1 && !branchMatches(auth, context.data[rowIndex][branchIdx])) {
+    throw new Error('Доступ к филиалу запрещен');
   }
+  var row = context.data[rowIndex].slice();
+  // Subscription counters and payment balance are maintained by payment and attendance operations.
+  // A regular client edit must not overwrite ledger-derived values.
+  // All subscription/accounting fields are ledger-owned.
+  // Generic client edits must not desynchronise the client row from the
+  // Платежи and Журнал занятий sheets.
+  var clientSubscriptionFields = ['id', 'paidAmount', 'totalLessons', 'remainingLessons', 'paid', 'purchasedAt', 'receiptUrl', 'attendanceHistory', 'paymentBalance'];
+  context.headers.forEach(function(header, index) {
+    if (body[header] === undefined || (body.action === 'updateClient' && clientSubscriptionFields.indexOf(header) !== -1)) return;
+    if (body.action === 'updateClient' && header === 'branchId') return;
+    var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header];
+    if (body.action === 'updateClient' && header === 'paidAmount') value = Number(value);
+    row[index] = safeValue(value);
+  });
+
+  if (body.action === 'updateClient') {
+    var paidAmountIdx = context.headers.indexOf('paidAmount');
+    var paidIdx = context.headers.indexOf('paid');
+    if (paidIdx !== -1 && paidAmountIdx !== -1) row[paidIdx] = Number(row[paidAmountIdx] || 0) > 0;
+    var frequencyIdx = context.headers.indexOf('lessonsPerWeek');
+    var oldFrequency = Number(context.data[rowIndex][frequencyIdx] || 1);
+    var nextFrequency = Number(row[frequencyIdx] || oldFrequency);
+    if (frequencyIdx !== -1 && oldFrequency !== nextFrequency) {
+      var totalIdx = context.headers.indexOf('totalLessons');
+      var remainingIdx = context.headers.indexOf('remainingLessons');
+      var historyIdx = context.headers.indexOf('attendanceHistory');
+      var plannedTotal = packageLessonsFromFrequency(nextFrequency);
+      var attended = countAttendedFromHistory(row[historyIdx]);
+      if (totalIdx !== -1) row[totalIdx] = plannedTotal;
+      if (remainingIdx !== -1) row[remainingIdx] = Math.max(0, plannedTotal - attended);
+    }
+    var statusIdx = context.headers.indexOf('status');
+    var remainingValue = context.headers.indexOf('remainingLessons') === -1 ? 1 : Number(row[context.headers.indexOf('remainingLessons')] || 0);
+    if (statusIdx !== -1 && String(context.data[rowIndex][statusIdx] || '') !== 'Архив') row[statusIdx] = remainingValue > 0 ? 'Активен' : 'Пауза';
+  }
+  context.sheet.getRange(rowIndex + 1, 1, 1, context.headers.length).setValues([row]);
+  return { success: true };
 }
 
 function deleteEntity(ss, actionToSheet, body, auth) {
@@ -889,8 +1157,134 @@ function deleteEntity(ss, actionToSheet, body, auth) {
   if (auth.role === 'coach' && branchIdx !== -1 && !branchMatches(auth, context.data[rowIndex][branchIdx])) {
     throw new Error('Доступ к филиалу запрещен');
   }
+  if (body.action === 'deleteCoach') {
+    var userIdIdx = context.headers.indexOf('userId');
+    var linkedUserId = userIdIdx === -1 ? '' : String(context.data[rowIndex][userIdIdx] || '').trim();
+    if (linkedUserId) deactivateCoachUser(ss, linkedUserId, auth);
+  }
   context.sheet.deleteRow(rowIndex + 1);
   return { success: true };
+}
+
+function getCoachUserContext(ss, userId) {
+  var sheet = getOrCreateUsersSheet(ss);
+  var headers = requireUsersAccessColumns(sheet);
+  var data = sheet.getDataRange().getValues();
+  var idIdx = headers.indexOf('id');
+  var rowIndex = findRowById(data, idIdx, userId);
+  if (rowIndex === -1) throw new Error('Аккаунт не найден');
+  var roleIdx = headers.indexOf('role');
+  if (normalizeRole(data[rowIndex][roleIdx]) !== 'coach') throw new Error('Можно управлять только аккаунтом тренера');
+  return { sheet: sheet, headers: headers, data: data, rowIndex: rowIndex };
+}
+
+function deactivateCoachUser(ss, userId, auth) {
+  var context = getCoachUserContext(ss, userId);
+  var statusIdx = context.headers.indexOf('status');
+  var disabledAtIdx = context.headers.indexOf('disabledAt');
+  var disabledByIdx = context.headers.indexOf('disabledBy');
+  var row = context.data[context.rowIndex].slice();
+  row[statusIdx] = 'Отключен';
+  row[disabledAtIdx] = new Date().toISOString();
+  row[disabledByIdx] = safeValue(auth.username);
+  context.sheet.getRange(context.rowIndex + 1, 1, 1, context.headers.length).setValues([row]);
+  invalidateAuthUserCache(String(userId));
+  return { success: true };
+}
+
+function activateCoachUser(ss, userId) {
+  var context = getCoachUserContext(ss, userId);
+  var statusIdx = context.headers.indexOf('status');
+  var disabledAtIdx = context.headers.indexOf('disabledAt');
+  var disabledByIdx = context.headers.indexOf('disabledBy');
+  var row = context.data[context.rowIndex].slice();
+  row[statusIdx] = 'Активен';
+  row[disabledAtIdx] = '';
+  row[disabledByIdx] = '';
+  context.sheet.getRange(context.rowIndex + 1, 1, 1, context.headers.length).setValues([row]);
+  invalidateAuthUserCache(String(userId));
+  return { success: true };
+}
+
+function resetCoachPassword(ss, userId, newPassword) {
+  var context = getCoachUserContext(ss, userId);
+  var passwordIdx = context.headers.indexOf('password');
+  context.sheet.getRange(context.rowIndex + 1, passwordIdx + 1).setValue(securePasswordHash(String(newPassword)));
+  invalidateAuthUserCache(String(userId));
+  return { success: true };
+}
+
+function linkCoachUser(ss, coachId, userId) {
+  var coachSheet = requireExistingSheet(ss, 'Тренеры');
+  var coachHeaders = requireCoachUserIdColumn(coachSheet);
+  var coachData = coachSheet.getDataRange().getValues();
+  var coachIdIdx = coachHeaders.indexOf('id');
+  var coachRowIndex = findRowById(coachData, coachIdIdx, coachId);
+  if (coachRowIndex === -1) throw new Error('Карточка тренера не найдена');
+
+  var userContext = getCoachUserContext(ss, userId);
+  var coachBranchIdx = coachHeaders.indexOf('branchId');
+  var userBranchIdx = userContext.headers.indexOf('branchId');
+  var coachBranchId = String(coachData[coachRowIndex][coachBranchIdx] || '').trim();
+  var userBranchId = String(userContext.data[userContext.rowIndex][userBranchIdx] || '').trim();
+  if (!coachBranchId || !userBranchId || coachBranchId !== userBranchId) {
+    throw new Error('Аккаунт и карточка тренера должны относиться к одному филиалу');
+  }
+
+  var userIdIdx = coachHeaders.indexOf('userId');
+  for (var i = 1; i < coachData.length; i++) {
+    if (i !== coachRowIndex && String(coachData[i][userIdIdx] || '').trim() === String(userId)) {
+      throw new Error('Этот аккаунт уже связан с другой карточкой тренера');
+    }
+  }
+  coachSheet.getRange(coachRowIndex + 1, userIdIdx + 1).setValue(String(userId));
+  return { success: true };
+}
+
+function createCoachWithOptionalAccount(ss, body) {
+  var coachSheet = requireExistingSheet(ss, 'Тренеры');
+  var coachHeaders = requireCoachUserIdColumn(coachSheet);
+  var userId = '';
+  var userSheet = null;
+  var userRowIndex = -1;
+  try {
+    if (body.username) {
+      userSheet = getOrCreateUsersSheet(ss);
+      var userHeaders = requireUsersAccessColumns(userSheet);
+      var userData = userSheet.getDataRange().getValues();
+      var usernameIdx = userHeaders.indexOf('username');
+      if (userData.slice(1).some(function(row) {
+        return String(row[usernameIdx] || '').trim().toLowerCase() === String(body.username).trim().toLowerCase();
+      })) throw new Error('Пользователь с таким логином уже существует');
+      userId = nextId();
+      var userRow = userHeaders.map(function(header) {
+        if (header === 'id') return userId;
+        if (header === 'username') return safeValue(body.username);
+        if (header === 'password') return securePasswordHash(String(body.password));
+        if (header === 'role') return '2';
+        if (header === 'branchId') return safeValue(body.branchId);
+        if (header === 'status') return 'Активен';
+        return '';
+      });
+      userSheet.appendRow(userRow);
+      userRowIndex = userSheet.getLastRow();
+    }
+    var coachRow = coachHeaders.map(function(header) {
+      if (header === 'id') return nextId();
+      if (header === 'userId') return userId;
+      var value = body[header];
+      return safeValue(value === undefined ? '' : value);
+    });
+    coachSheet.appendRow(coachRow);
+    var coach = {};
+    coachHeaders.forEach(function(header, index) { coach[header] = coachRow[index]; });
+    return coach;
+  } catch (error) {
+    if (userSheet && userRowIndex > 0 && userSheet.getLastRow() >= userRowIndex) {
+      try { userSheet.deleteRow(userRowIndex); } catch (rollbackError) {}
+    }
+    throw error;
+  }
 }
 
 function addLessonsToClient(ss, body) {
@@ -938,8 +1332,6 @@ function uploadReceipt(ss, body) {
 }
 
 function recordPayment(ss, body, auth) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) throw new Error('Система занята, повторите платёж');
   var clientContext;
   var clientRowIndex = -1;
   var previousRow;
@@ -950,7 +1342,7 @@ function recordPayment(ss, body, auth) {
   try {
     var clientSheet = ss.getSheetByName('Клиенты');
     if (!clientSheet) throw new Error('Лист клиентов не найден');
-    ensureClientSubscriptionColumns(clientSheet);
+    requireClientSubscriptionColumns(clientSheet);
     clientContext = sheetContext(ss, 'Клиенты');
     clientRowIndex = findRowById(clientContext.data, clientContext.idIdx, body.clientId);
     if (clientRowIndex === -1) throw new Error('Клиент не найден');
@@ -972,8 +1364,36 @@ function recordPayment(ss, body, auth) {
     var frequency = body.lessonsPerWeek === undefined ? Number(row[frequencyIdx] || 1) : Number(body.lessonsPerWeek);
     var amount = Number(body.amount);
     var calculation = paymentCalculation(category, frequency, amount, row[balanceIdx] || 0);
-    if (calculation.packages <= 0) throw new Error('Суммы недостаточно для полного абонемента');
 
+    paymentSheet = requireExistingSheet(ss, 'Платежи');
+    ledgerSheet = requireExistingSheet(ss, 'Журнал занятий');
+    var paymentHeaders = getHeaders(paymentSheet);
+    var fingerprintIdx = paymentHeaders.indexOf('requestFingerprint');
+    if (fingerprintIdx === -1) throw new Error('Схема платежей не обновлена. Запустите setupSchema()');
+    var paymentFingerprint = sha256(JSON.stringify({ actorId: String(auth.id), clientId: String(body.clientId), amount: amount, category: category, lessonsPerWeek: frequency, comment: String(body.comment || '') }));
+    var paymentRows = paymentSheet.getDataRange().getValues();
+    var paymentRequestIdx = paymentHeaders.indexOf('requestId');
+    var existingPaymentIndex = paymentRows.findIndex(function(paymentRow, index) { return index > 0 && String(paymentRow[paymentRequestIdx]) === safeValue(body.requestId); });
+    if (existingPaymentIndex !== -1) {
+      var existingPayment = paymentRows[existingPaymentIndex];
+      if (String(existingPayment[fingerprintIdx]) !== paymentFingerprint) throw new Error('Этот requestId уже использован с другими данными');
+      var existingId = String(existingPayment[paymentHeaders.indexOf('id')]);
+      var ledgerParsed = sheetObjects(ledgerSheet);
+      var ledgerPaymentIdx = ledgerParsed.headers.indexOf('paymentId');
+      if (!ledgerParsed.rows.some(function(ledgerRow) { return String(ledgerRow[ledgerPaymentIdx]) === existingId; })) {
+        throw new Error('Платёж требует сверки с журналом занятий');
+      }
+      return { success: true, duplicate: true, payment: {
+        id: existingId, clientId: String(body.clientId), amount: amount, category: category,
+        lessonsPerWeek: frequency, lessonsAdded: Number(existingPayment[paymentHeaders.indexOf('lessonsAdded')] || 0),
+        paidAt: existingPayment[paymentHeaders.indexOf('paidAt')]
+      }, client: {
+        totalLessons: Number(row[totalIdx] || 0), remainingLessons: Number(row[remainingIdx] || 0),
+        paidAmount: Number(row[amountIdx] || 0), paymentBalance: Number(row[balanceIdx] || 0),
+        category: category, lessonsPerWeek: frequency, status: String(row[statusIdx] || '')
+      } };
+    }
+    if (calculation.packages <= 0) throw new Error('Суммы недостаточно для полного абонемента');
     var paymentId = nextId();
     var now = new Date().toISOString();
     if (categoryIdx !== -1) row[categoryIdx] = category;
@@ -985,15 +1405,13 @@ function recordPayment(ss, body, auth) {
     if (balanceIdx !== -1) row[balanceIdx] = calculation.balance;
     if (statusIdx !== -1) row[statusIdx] = 'Активен';
 
-    paymentSheet = getOrCreatePaymentsSheet(ss);
-    ledgerSheet = getOrCreateLessonLedgerSheet(ss);
     paymentRowIndex = paymentSheet.getLastRow() + 1;
     ledgerRowIndex = ledgerSheet.getLastRow() + 1;
     clientContext.sheet.getRange(clientRowIndex + 1, 1, 1, clientContext.headers.length).setValues([row]);
     paymentSheet.appendRow([
       paymentId, safeValue(body.requestId), safeValue(body.clientId), safeValue(clientBranch), amount,
       safeValue(category), frequency, calculation.price, calculation.packageLessons, calculation.packages,
-      calculation.lessonsAdded, now, safeValue(auth.username), safeValue(body.comment || '')
+      calculation.lessonsAdded, now, safeValue(auth.username), safeValue(body.comment || ''), paymentFingerprint
     ]);
     ledgerSheet.appendRow([
       nextId(), safeValue(body.requestId), safeValue(body.clientId), safeValue(clientBranch), paymentId,
@@ -1020,8 +1438,6 @@ function recordPayment(ss, body, auth) {
       if (ledgerSheet && ledgerRowIndex >= ledgerSheet.getLastRow()) ledgerSheet.deleteRow(ledgerRowIndex);
     } catch (rollbackError) {}
     throw error;
-  } finally {
-    lock.releaseLock();
   }
 }
 
@@ -1031,8 +1447,8 @@ function getClientHistory(ss, body, auth) {
   if (rowIndex === -1) throw new Error('Клиент не найден');
   var branchIdx = context.headers.indexOf('branchId');
   if (branchIdx !== -1 && !branchMatches(auth, context.data[rowIndex][branchIdx])) throw new Error('Доступ к филиалу запрещен');
-  var payments = sheetObjects(getOrCreatePaymentsSheet(ss));
-  var ledger = sheetObjects(getOrCreateLessonLedgerSheet(ss));
+  var payments = sheetObjects(requireExistingSheet(ss, 'Платежи'));
+  var ledger = sheetObjects(requireExistingSheet(ss, 'Журнал занятий'));
   function toObjects(parsed) {
     var idIdx = parsed.headers.indexOf('clientId');
     return parsed.rows.filter(function(row) { return String(row[idIdx] || '') === String(body.clientId); }).map(function(row) {
@@ -1065,6 +1481,8 @@ function getReceipt(ss, body, auth) {
 function doPost(e) {
   ACTIVE_IDEMPOTENCY_KEY = '';
   ACTIVE_IDEMPOTENCY_FINGERPRINT = '';
+  ACTIVE_MUTATION_LOCK = false;
+  var mutationLock = null;
   if (!e || !e.postData || !e.postData.contents) return options();
   
   try {
@@ -1098,8 +1516,19 @@ function doPost(e) {
     if (!isKnownAction(body.action)) throw new Error('Действие не найдено');
     validateRequest(body);
 
+    // All CRM mutation actions use the same lock. Read their sheet snapshots only
+    // after acquiring it, including authorization and idempotency checks.
+    if (isMutatingAction(body.action)) {
+      var requestedLock = LockService.getScriptLock();
+      if (!requestedLock.tryLock(20000)) throw new Error('Система занята, повторите операцию');
+      mutationLock = requestedLock;
+      ACTIVE_MUTATION_LOCK = true;
+    }
+
     // Every mutating operation carries a request id. Keep a short-lived
     // response cache so retries cannot create a second row or spend lessons twice.
+    // The cached response is returned only after fresh authorization succeeds.
+    var cachedMutationResponse = null;
     if (isMutatingAction(body.action)) {
       var requestId = String(body.requestId || '');
       var actorId = body.auth && body.auth.id ? String(body.auth.id) : 'anonymous';
@@ -1110,7 +1539,7 @@ function doPost(e) {
         try {
           var cachedRecord = JSON.parse(cachedIdempotency);
           if (cachedRecord.fingerprint !== idempotencyFingerprint) throw new Error('Этот requestId уже использован с другими данными');
-          if (cachedRecord.response) return createResponse(cachedRecord.response);
+          if (cachedRecord.response) cachedMutationResponse = cachedRecord.response;
         } catch (cacheError) {
           if (cacheError.message === 'Этот requestId уже использован с другими данными') throw cacheError;
         }
@@ -1120,32 +1549,37 @@ function doPost(e) {
     }
 
     var auth = null;
-    if (body.action !== 'login' && body.action !== 'register') {
+    if (body.action !== 'login') {
       auth = requireServerAuth(body);
       diagnosticLog('authorization.checked', { action: String(body.action || ''), role: auth.role });
       assertGasPermission(body, auth);
-      if (['create', 'update', 'delete'].some(function(prefix) { return body.action.indexOf(prefix) === 0; }) ||
-          ['recordAttendance', 'recordBulkAttendance', 'uploadReceipt', 'addLessons'].indexOf(body.action) !== -1) {
-        invalidateReadCache();
-      }
     }
     
-    // --- 1. АВТОРИЗАЦИЯ И РЕГИСТРАЦИЯ ---
+    if (cachedMutationResponse) {
+      ACTIVE_MUTATION_LOCK = false;
+      return createResponse(cachedMutationResponse);
+    }
+
+    // --- 1. АВТОРИЗАЦИЯ ---
     if (body.action === 'login') {
-      var sheet = getOrCreateUsersSheet(ss);
+      var sheet = requireExistingSheet(ss, 'Users');
       var data = sheet.getDataRange().getValues();
-      var headers = data[0].map(String);
+      var headers = requireUsersAccessColumns(sheet);
+      var loginUsernameIdx = headers.indexOf('username');
+      var loginPasswordIdx = headers.indexOf('password');
+      var loginStatusIdx = headers.indexOf('status');
       var loginKey = 'login-attempts:' + sha256(String(body.username).toLowerCase()).substring(0, 32);
       var loginCache = CacheService.getScriptCache();
       var loginAttempts = Number(loginCache.get(loginKey) || 0);
       if (loginAttempts >= 8) throw new Error('Слишком много попыток. Повторите позже');
 
       for (var i = 1; i < data.length; i++) {
-        if (String(data[i][headers.indexOf('username')]) === String(body.username) && 
-            passwordsMatch(body.password, data[i][headers.indexOf('password')])) {
+        if (String(data[i][loginUsernameIdx]) === String(body.username)) {
+          if (!isUserActive(data[i][loginStatusIdx])) throw new Error('Аккаунт отключен администратором');
+          if (!passwordsMatch(body.password, data[i][loginPasswordIdx])) continue;
           loginCache.remove(loginKey);
-          if (String(data[i][headers.indexOf('password')]).indexOf('v2$') !== 0) {
-            sheet.getRange(i + 1, headers.indexOf('password') + 1).setValue(securePasswordHash(body.password));
+          if (String(data[i][loginPasswordIdx]).indexOf('v2$') !== 0) {
+            sheet.getRange(i + 1, loginPasswordIdx + 1).setValue(securePasswordHash(body.password));
           }
           return createResponse({ 
             status: 'success', 
@@ -1162,80 +1596,19 @@ function doPost(e) {
       throw new Error('Неверные данные');
     }
     
-    if (body.action === 'register') {
-      // Bootstrap is a one-time operation. The script lock prevents two
-      // simultaneous first-registration requests from creating two admins.
-      var bootstrapLock = LockService.getScriptLock();
-      if (!bootstrapLock.tryLock(20000)) throw new Error('Система занята, повторите регистрацию');
-      try {
-        var properties = PropertiesService.getScriptProperties();
-        var sheet = getOrCreateUsersSheet(ss);
-        var headers = getHeaders(sheet);
-        var usernameIdx = headers.indexOf('username');
-        var existingUsers = sheet.getDataRange().getValues();
-        var bootstrapCompleted = properties.getProperty('BOOTSTRAP_ADMIN_CREATED') === 'true';
-        var hasUsers = existingUsers.slice(1).some(function(row) {
-          return String(row[usernameIdx] || '').trim() !== '';
-        });
-        if (bootstrapCompleted || hasUsers) {
-          // Persist the marker when an older deployment already has users.
-          if (!bootstrapCompleted && hasUsers) properties.setProperty('BOOTSTRAP_ADMIN_CREATED', 'true');
-          throw new Error('Первый администратор уже создан. Аккаунты тренеров добавляет администратор.');
-        }
-        if (existingUsers.slice(1).some(function(row) {
-          return String(row[usernameIdx] || '').trim().toLowerCase() === String(body.username).trim().toLowerCase();
-        })) {
-          throw new Error('Пользователь с таким логином уже существует');
-        }
-        var newRow = headers.map(function(h) {
-          if (h === 'id') return nextId();
-          if (h === 'password') return securePasswordHash(String(body.password || ''));
-          if (h === 'role') return '1';
-          if (h === 'branchId') return '';
-          return safeValue(body[h] !== undefined ? body[h] : '');
-        });
-
-        sheet.appendRow(newRow);
-        properties.setProperty('BOOTSTRAP_ADMIN_CREATED', 'true');
-        return createResponse({ status: 'success' });
-      } finally {
-        bootstrapLock.releaseLock();
-      }
-    }
-
-    if (body.action === 'createUser') {
-      var userSheet = getOrCreateUsersSheet(ss);
-      var userHeaders = getHeaders(userSheet);
-      var userRole = normalizeRole(body.role);
-      if (!userRole) throw new Error('Недопустимая роль');
-      var assignedBranchId = userRole === 'coach' ? resolveBranchId(ss, body.branchId) : String(body.branchId || '').trim();
-      var userData = userSheet.getDataRange().getValues();
-      var userNameIdx = userHeaders.indexOf('username');
-      if (userData.slice(1).some(function(row) {
-        return String(row[userNameIdx] || '').trim().toLowerCase() === String(body.username).trim().toLowerCase();
-      })) throw new Error('Пользователь с таким логином уже существует');
-      var userRow = userHeaders.map(function(header) {
-        if (header === 'id') return nextId();
-        if (header === 'username') return safeValue(body.username);
-        if (header === 'password') return securePasswordHash(String(body.password));
-        if (header === 'role') return userRole === 'admin' ? '1' : '2';
-        if (header === 'branchId') return safeValue(assignedBranchId);
-        return safeValue(body[header] === undefined ? '' : body[header]);
-      });
-      userSheet.appendRow(userRow);
-      return createResponse({ status: 'success', user: { username: body.username, role: userRole, branchId: assignedBranchId || null } });
-    }
-
     if (body.action === 'getUsers') {
-      var usersSheet = getOrCreateUsersSheet(ss);
+      var usersSheet = requireExistingSheet(ss, 'Users');
       var usersData = usersSheet.getDataRange().getValues();
-      var usersHeaders = usersData[0].map(String);
+      var usersHeaders = requireUsersAccessColumns(usersSheet);
       var usersResult = usersData.slice(1).map(function(row) {
         return {
           id: String(row[usersHeaders.indexOf('id')] || ''),
           username: String(row[usersHeaders.indexOf('username')] || ''),
           role: normalizeRole(row[usersHeaders.indexOf('role')]),
-          branchId: String(row[usersHeaders.indexOf('branchId')] || '') || null
+          branchId: String(row[usersHeaders.indexOf('branchId')] || '') || null,
+          status: String(row[usersHeaders.indexOf('status')] || ''),
+          disabledAt: String(row[usersHeaders.indexOf('disabledAt')] || '') || null,
+          disabledBy: String(row[usersHeaders.indexOf('disabledBy')] || '') || null
         };
       }).filter(function(user) { return user.id && user.role === 'coach'; });
       return createResponse(usersResult);
@@ -1243,7 +1616,7 @@ function doPost(e) {
 
     if (body.action === 'assignUserBranch') {
       var assignmentSheet = getOrCreateUsersSheet(ss);
-      var assignmentHeaders = getHeaders(assignmentSheet);
+      var assignmentHeaders = requireUsersAccessColumns(assignmentSheet);
       var assignmentData = assignmentSheet.getDataRange().getValues();
       var assignmentIdIdx = assignmentHeaders.indexOf('id');
       var assignmentRoleIdx = assignmentHeaders.indexOf('role');
@@ -1253,7 +1626,24 @@ function doPost(e) {
       if (assignmentRow === -1) throw new Error('Аккаунт не найден');
       if (normalizeRole(assignmentData[assignmentRow][assignmentRoleIdx]) !== 'coach') throw new Error('Можно назначать филиал только тренеру');
       assignmentSheet.getRange(assignmentRow + 1, assignmentBranchIdx + 1).setValue(safeValue(body.branchId));
+      invalidateAuthUserCache(String(body.userId || '').trim());
       return createResponse({ success: true });
+    }
+
+    if (body.action === 'deactivateUser') {
+      return createResponse(deactivateCoachUser(ss, body.userId, auth));
+    }
+
+    if (body.action === 'activateUser') {
+      return createResponse(activateCoachUser(ss, body.userId));
+    }
+
+    if (body.action === 'resetCoachPassword') {
+      return createResponse(resetCoachPassword(ss, body.userId, body.newPassword));
+    }
+
+    if (body.action === 'linkCoachUser') {
+      return createResponse(linkCoachUser(ss, body.coachId, body.userId));
     }
     
     // requireServerAuth already resolved the authoritative row from Users.
@@ -1273,6 +1663,10 @@ function doPost(e) {
     // --- 2. GET (getSheet) ---
     if (body.action === 'getClients') {
       return createResponse(getClientsPage(ss, auth, body));
+    }
+
+    if (body.action === 'getLessonRoster') {
+      return createResponse(getLessonRoster(ss, body, auth));
     }
 
     if (body.action === 'getSheet') {
@@ -1304,34 +1698,29 @@ function doPost(e) {
       var attendanceList = body.action === 'recordAttendance'
         ? [{ clientId: body.clientId, status: body.status, isWalkin: body.isWalkin === true, visitorName: body.visitorName || '', date: body.date, lessonId: body.lessonId, requestId: body.requestId }]
         : body.attendance;
-      var lock = LockService.getScriptLock();
-      if (!lock.tryLock(20000)) throw new Error('Система занята, повторите отметку');
-      try {
-        var clientBatchSheet = ss.getSheetByName('Клиенты');
-        var clientBatchHeaders = clientBatchSheet ? ensureClientSubscriptionColumns(clientBatchSheet) : [];
-        var clientBatchData = clientBatchSheet ? clientBatchSheet.getDataRange().getValues() : [];
-        var clientBatch = { sheet: clientBatchSheet, headers: clientBatchHeaders, data: clientBatchData };
-        var results = attendanceList.map(function(item) {
-          try {
-            var requestId = item.requestId || body.requestId;
-            if (!requestId) throw new Error('Не указан idempotency key');
-            item.requestId = String(requestId) + ':' + String(item.clientId || item.visitorName || 'walkin');
-            var context = validateAttendanceItem(item, ss, auth, clientBatch);
-            if (!context.clientSheet) return processWalkinAttendance(item, ss, auth, context.lessonBranch);
-            var result = processClientAttendance(item, context);
-            result.clientId = String(item.clientId);
-            return result;
-          } catch (error) {
-            return { clientId: item.clientId || null, success: false, message: String(error.message || error) };
-          }
-        });
-        if (clientBatch.data.length > 1) {
-          clientBatch.sheet.getRange(2, 1, clientBatch.data.length - 1, clientBatch.headers.length).setValues(clientBatch.data.slice(1));
+      var lessonBatch = sheetObjects(requireExistingSheet(ss, 'Расписание'));
+      var clientBatchSheet = ss.getSheetByName('Клиенты');
+      var clientBatchHeaders = clientBatchSheet ? requireClientSubscriptionColumns(clientBatchSheet) : [];
+      var clientBatchData = clientBatchSheet ? clientBatchSheet.getDataRange().getValues() : [];
+      var clientBatch = { sheet: clientBatchSheet, headers: clientBatchHeaders, data: clientBatchData };
+      var dirtyClientRows = {};
+      var results = attendanceList.map(function(item) {
+        try {
+          var requestId = item.requestId || body.requestId;
+          if (!requestId) throw new Error('Не указан idempotency key');
+          item.requestId = String(requestId) + ':' + String(item.clientId || item.visitorName || 'walkin');
+          var context = validateAttendanceItem(item, ss, auth, clientBatch, lessonBatch);
+          if (!context.clientSheet) return processWalkinAttendance(item, ss, auth, context.lessonBranch);
+          var result = processClientAttendance(item, context, auth);
+          if (!result.duplicate) dirtyClientRows[context.clientRowIndex] = true;
+          result.clientId = String(item.clientId);
+          return result;
+        } catch (error) {
+          return { clientId: item.clientId || null, success: false, message: String(error.message || error) };
         }
-        return createResponse({ success: results.every(function(result) { return result.success; }), results: results });
-      } finally {
-        lock.releaseLock();
-      }
+      });
+      writeAttendanceChanges(clientBatch, dirtyClientRows);
+      return createResponse({ success: results.every(function(result) { return result.success; }), results: results });
     }
     
     if (body.action === 'recordPayment') {
@@ -1352,6 +1741,10 @@ function doPost(e) {
 
     if (body.action === 'addLessons') {
       return createResponse(addLessonsToClient(ss, body));
+    }
+
+    if (body.action === 'createCoach') {
+      return createResponse(createCoachWithOptionalAccount(ss, body));
     }
 
     if (body.action.indexOf('update') === 0) {
@@ -1391,6 +1784,8 @@ function doPost(e) {
     }
 
     if (body.action === 'createLesson') {
+      var lessonSheet = requireExistingSheet(ss, 'Расписание');
+      requireLessonScheduleColumns(lessonSheet);
       return createResponse(appendObject(sheetContext(ss, 'Расписание'), body));
     }
 
@@ -1404,5 +1799,14 @@ function doPost(e) {
     var errorResponse = { status: 'error', build: LOTOS_BACKEND_BUILD, message: err && err.message ? String(err.message) : String(err) };
     if (err && err.authStage) errorResponse.code = String(err.authStage);
     return createResponse(errorResponse);
+  } finally {
+    if (mutationLock) {
+      try {
+        SpreadsheetApp.flush();
+      } finally {
+        mutationLock.releaseLock();
+        ACTIVE_MUTATION_LOCK = false;
+      }
+    }
   }
 }

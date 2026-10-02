@@ -50,6 +50,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
         pool: 'Основной бассейн',
         duration: '1 час',
         maxCapacity: 10,
+        isRecurring: false,
       } as any)
 
       if (formData.clientId && createdLesson?.id) {

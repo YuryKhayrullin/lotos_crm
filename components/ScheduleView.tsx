@@ -8,7 +8,7 @@ import { AttendanceModal } from './AttendanceModal'
 import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
 import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
-import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay } from '@/lib/utils/date'
+import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay, lessonOccurrenceDate } from '@/lib/utils/date'
 import { RoleGuard } from './RoleGuard'
 
 const store = getStore()
@@ -53,6 +53,7 @@ export const ScheduleView = observer(() => {
     DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн',
   )
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
+  const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
 
   // Получаем выбранную дату для режима "день"
@@ -149,7 +150,12 @@ export const ScheduleView = observer(() => {
         ))}
       </div>
 
-      <AttendanceModal isOpen={!!selectedLesson} onClose={() => setSelectedLesson(null)} lesson={selectedLesson} />
+      <AttendanceModal
+        isOpen={!!selectedLesson}
+        onClose={() => setSelectedLesson(null)}
+        lesson={selectedLesson}
+        occurrenceDate={selectedOccurrenceDate}
+      />
 
       <CreateLessonModal isOpen={isCreateLessonOpen} onClose={() => setIsCreateLessonOpen(false)} />
 
@@ -160,22 +166,24 @@ export const ScheduleView = observer(() => {
           </Card>
         ) : (
           lessons.map((lesson) => {
-            const enrolledCount = store.branchClients.filter((c) => c.isAssignedTo(lesson.id)).length
+            const occurrenceDate = lessonOccurrenceDate(lesson, startOfWeek)
             const maxCap = lesson.maxCapacity || 10
-            const countStr = `${enrolledCount} / ${maxCap}`
 
             return (
               <Card
                 key={lesson.id}
                 className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
-                onClick={() => setSelectedLesson(lesson as any)}
+                onClick={() => {
+                  setSelectedOccurrenceDate(occurrenceDate)
+                  setSelectedLesson(lesson)
+                }}
               >
                 <CardContent className="p-5 flex items-center justify-between">
                   <div className="flex items-center gap-4">
                     <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
                     <div>
                       <p className="text-lg font-bold text-cyan-950">{parseTimeToHHMM(lesson.time)}</p>
-                      <p className="text-xs font-medium text-cyan-600 mb-1">{cleanDate(lesson.date)}</p>
+                      <p className="text-xs font-medium text-cyan-600 mb-1">{cleanDate(occurrenceDate)}</p>
                       <p className="text-sm font-semibold text-slate-800">{lesson.title}</p>
                       <p className="text-xs text-slate-500 mt-1">
                         {lesson.coachName} · {lesson.pool}
@@ -185,7 +193,7 @@ export const ScheduleView = observer(() => {
 
                   <div className="flex items-center gap-4">
                     <Badge className="bg-cyan-50 text-cyan-700 font-bold px-3 py-1 text-sm rounded-xl">
-                      {countStr}
+                      До {maxCap}
                     </Badge>
                     <div className="text-slate-400 group-hover:text-cyan-600 transition-colors font-bold text-xl px-2">
                       ›

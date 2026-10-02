@@ -209,13 +209,25 @@ export const ClientStore = types
         }[],
         lessonId: string,
         date: string,
+        requestId: string,
       ) {
         try {
-          const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, date)
-          const failed =
-            Array.isArray(result.results) && result.results.some((item: { success: boolean }) => !item.success)
-          if (!result.success || failed) throw new Error('Некоторые отметки посещаемости не сохранены')
-          yield (self as any).loadClients()
+          let result
+          try {
+            result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, date, requestId)
+          } finally {
+            // A later chunk may fail after earlier chunks were saved.
+            yield (self as any).loadClients()
+          }
+          const failures = Array.isArray(result.results)
+            ? result.results.filter((item: { success: boolean }) => !item.success)
+            : []
+          if (!result.success || failures.length > 0) {
+            const details = failures
+              .map((item: { message?: string }) => item.message || 'неизвестная ошибка')
+              .join('; ')
+            throw new Error(details ? `Не все отметки сохранены: ${details}` : 'Не все отметки сохранены')
+          }
         } catch (err: any) {
           self.error = err.message || 'Bulk attendance failed'
           throw err

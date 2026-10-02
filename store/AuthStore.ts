@@ -1,6 +1,6 @@
 import { types, flow, Instance } from 'mobx-state-tree'
 import { AuthModel } from './models/Auth'
-import { apiClient, ApiError } from '@/lib/api-client'
+import { apiClient } from '@/lib/api-client'
 
 const authLog = (event: string, details: Record<string, unknown> = {}): void => {
   console.log('[lotos-auth] ' + event, details)
@@ -12,7 +12,6 @@ export const AuthStore = types
     isLoading: types.optional(types.boolean, false),
     isInitialized: types.optional(types.boolean, false),
     sessionVersion: types.optional(types.number, 0),
-    registrationSuccess: types.optional(types.boolean, false),
   })
   .actions((self) => ({
     init: flow(function* () {
@@ -37,26 +36,6 @@ export const AuthStore = types
         self.isAuthenticated = false
       } finally {
         self.isInitialized = true
-        self.isLoading = false
-      }
-    }),
-    setRegistrationSuccess(value: boolean) {
-      self.registrationSuccess = value
-    },
-    register: flow(function* (username: string, password: string) {
-      self.isLoading = true
-      self.registrationSuccess = false
-      try {
-        const response: Awaited<ReturnType<typeof apiClient.register>> = yield apiClient.register({
-          username,
-          password,
-        })
-        if (response.status !== 'success') throw new Error('Ошибка регистрации')
-        self.registrationSuccess = true
-      } catch (error) {
-        authLog('register.failed', { message: error instanceof Error ? error.message : 'unknown' })
-        throw error instanceof ApiError ? new Error(error.message) : new Error('Ошибка регистрации')
-      } finally {
         self.isLoading = false
       }
     }),

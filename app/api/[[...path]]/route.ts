@@ -102,16 +102,6 @@ async function handleLogin(request: NextRequest): Promise<Response> {
   return jsonResponse({ status: 'success', user })
 }
 
-async function handleRegister(request: NextRequest): Promise<Response> {
-  const body = await readJson(request, MAX_AUTH_BYTES)
-  const username = typeof body.username === 'string' ? body.username.trim() : ''
-  const password = typeof body.password === 'string' ? body.password : ''
-  if (!username || username.length > 100 || !password || password.length < 8 || password.length > 200) {
-    return jsonError('Укажите логин и пароль от 8 до 200 символов', 400)
-  }
-  return jsonResponse(await callGas({ action: 'register', payload: { username, password } }))
-}
-
 async function handleLogout(): Promise<Response> {
   await clearSession()
   return jsonResponse({ status: 'success' })
@@ -132,7 +122,7 @@ async function handleSession(): Promise<Response> {
 async function handleCrm(request: NextRequest): Promise<Response> {
   const body = await readJson(request, MAX_REQUEST_BYTES)
   const action = typeof body.action === 'string' ? body.action : ''
-  if (!action || action === 'login' || action === 'register') {
+  if (!action || action === 'login') {
     throw new RouteError('Используйте endpoint авторизации', 400)
   }
 
@@ -197,7 +187,6 @@ const ROUTES: RouteDefinition[] = [
     handle: handleReceipt,
   },
   { method: 'POST', match: exactRoute('auth', 'login'), handle: handleLogin },
-  { method: 'POST', match: exactRoute('auth', 'register'), handle: handleRegister },
   { method: 'POST', match: exactRoute('auth', 'logout'), handle: handleLogout },
   { method: 'POST', match: exactRoute('crm'), handle: handleCrm },
 ]

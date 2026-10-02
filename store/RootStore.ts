@@ -220,11 +220,11 @@ const RootStoreModel = types
       setAttachCoachId,
       setError,
       addLessonToStore,
-      initialize: flow(function* () {
+      initialize: flow(function* (force = false) {
         const userId = self.authStore.user?.id
           ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
           : null
-        if (initializedForUser === userId && self.branches.length > 0) return
+        if (!force && initializedForUser === userId && self.branches.length > 0) return
         bootstrapLog('start', { hasUser: Boolean(userId), role: self.authStore.user?.role ?? null })
         activeInitializeController?.abort()
         const controller = new AbortController()
@@ -345,21 +345,28 @@ const RootStoreModel = types
           self.error = error instanceof ApiError ? error.message : 'Ошибка удаления клиента'
         }
       }),
-      createCoach: flow(function* () {
-        if (!self.coachFormName.trim() || !self.coachFormSpecialty.trim()) return
-        const branch = self.currentBranch || (self.branches.length === 1 ? self.branches[0] : undefined)
-        if (!branch) return
+      createCoach: flow(function* (coachData: {
+        name: string
+        specialty: string
+        branchId: string
+        username?: string
+        password?: string
+      }) {
+        if (!coachData.name.trim() || !coachData.specialty.trim() || !coachData.branchId) {
+          throw new Error('Укажите имя, специализацию и филиал тренера')
+        }
         try {
           const coach = yield apiClient.createCoach({
-            name: self.coachFormName.trim(),
-            specialty: self.coachFormSpecialty.trim(),
-            branchId: branch.id,
+            name: coachData.name.trim(),
+            specialty: coachData.specialty.trim(),
+            branchId: coachData.branchId,
+            ...(coachData.username ? { username: coachData.username.trim(), password: coachData.password } : {}),
           })
           self.coaches.push(coach)
-          self.coachFormName = ''
-          self.coachFormSpecialty = ''
+          return coach
         } catch (error) {
           self.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
+          throw error
         }
       }),
       updateCoach: flow(function* () {
@@ -382,6 +389,7 @@ const RootStoreModel = types
           if (coach) self.coaches.remove(coach)
         } catch (error) {
           self.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
+          throw error
         }
       }),
       deleteLesson: flow(function* (lessonId: string) {
@@ -404,7 +412,7 @@ const RootStoreModel = types
             name: coach.name,
             specialty: coach.specialty,
             initials: coach.initials,
-            branchId: branch.id,
+            branchId: String(branch.id),
           })
           self.coaches.push(attached)
           self.attachCoachId = ''

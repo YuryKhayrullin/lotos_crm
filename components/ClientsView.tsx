@@ -4,7 +4,7 @@ import { observer } from 'mobx-react-lite'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '@/store/StoreProvider'
 import { CreateClientDto, IClient } from '@/store/models'
-import { apiClient } from '@/lib/api-client'
+import { apiClient, createRequestId } from '@/lib/api-client'
 import { packagePrice, calculatePaymentLessons } from '@/lib/subscription-pricing'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -101,6 +101,14 @@ export const ClientsView = observer(() => {
   const [paymentComment, setPaymentComment] = useState('')
   const [paymentError, setPaymentError] = useState('')
   const [paymentLoading, setPaymentLoading] = useState(false)
+  const [paymentAttempt, setPaymentAttempt] = useState<{
+    clientId: string
+    amount: number
+    category: string
+    lessonsPerWeek: number
+    comment: string
+    requestId: string
+  } | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [paymentHistory, setPaymentHistory] = useState<Array<Record<string, unknown>>>([])
   const [lessonLedger, setLessonLedger] = useState<Array<Record<string, unknown>>>([])
@@ -147,36 +155,63 @@ export const ClientsView = observer(() => {
 
   const openPayment = () => {
     if (!selectedClient) return
-    setPaymentAmount(String(packagePrice(selectedClient.category, selectedClient.lessonsPerWeek) || ''))
-    setPaymentComment('')
+    if (!paymentAttempt || paymentAttempt.clientId !== selectedClient.id) {
+      setPaymentAttempt(null)
+      setPaymentAmount(String(packagePrice(selectedClient.category, selectedClient.lessonsPerWeek) || ''))
+      setPaymentComment('')
+    }
     setPaymentError('')
     setIsPaymentOpen(true)
   }
 
   const submitPayment = async () => {
-    if (!selectedClient) return
+    if (!selectedClient || paymentLoading) return
     const amount = Number(paymentAmount)
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!paymentAttempt && (!Number.isFinite(amount) || amount <= 0)) {
       setPaymentError('Введите сумму платежа больше нуля')
       return
     }
+    const attempt =
+      paymentAttempt?.clientId === selectedClient.id
+        ? paymentAttempt
+        : {
+            clientId: selectedClient.id,
+            amount,
+            category: selectedClient.category,
+            lessonsPerWeek: selectedClient.lessonsPerWeek,
+            comment: paymentComment.trim(),
+            requestId: createRequestId(),
+          }
+    setPaymentAttempt(attempt)
     setPaymentLoading(true)
     setPaymentError('')
     try {
       await apiClient.recordPayment(
-        selectedClient.id,
-        amount,
-        selectedClient.category,
-        selectedClient.lessonsPerWeek,
-        paymentComment.trim(),
+        attempt.clientId,
+        attempt.amount,
+        attempt.category,
+        attempt.lessonsPerWeek,
+        attempt.comment,
+        attempt.requestId,
       )
-      await store.clientStore.loadClients()
+      setPaymentAttempt(null)
       setIsPaymentOpen(false)
-      const history = await apiClient.getClientHistory(selectedClient.id)
+      await store.clientStore.loadClients()
+      const history = await apiClient.getClientHistory(attempt.clientId)
       setPaymentHistory(history.payments)
       setLessonLedger(history.ledger)
     } catch (error) {
-      setPaymentError(error instanceof Error ? error.message : 'Не удалось сохранить платёж')
+      // A lost HTTP response is not proof that Sheets rejected the payment.
+      const history = await apiClient.getClientHistory(attempt.clientId).catch(() => null)
+      if (history?.payments.some((payment) => String(payment.requestId) === attempt.requestId)) {
+        setPaymentAttempt(null)
+        setIsPaymentOpen(false)
+        setPaymentHistory(history.payments)
+        setLessonLedger(history.ledger)
+        await store.clientStore.loadClients()
+      } else {
+        setPaymentError(error instanceof Error ? error.message : 'Не удалось сохранить платёж')
+      }
     } finally {
       setPaymentLoading(false)
     }
@@ -828,6 +863,7 @@ export const ClientsView = observer(() => {
                 min="1"
                 step="1"
                 value={paymentAmount}
+                disabled={paymentLoading || Boolean(paymentAttempt)}
                 onChange={(event) => setPaymentAmount(event.target.value)}
                 className="h-12 rounded-xl bg-white text-lg"
                 placeholder="Например, 16000"
@@ -857,6 +893,7 @@ export const ClientsView = observer(() => {
               Комментарий{' '}
               <Input
                 value={paymentComment}
+                disabled={paymentLoading || Boolean(paymentAttempt)}
                 onChange={(event) => setPaymentComment(event.target.value)}
                 className="h-11 rounded-xl bg-white"
                 placeholder="Например: оплата за октябрь и ноябрь"

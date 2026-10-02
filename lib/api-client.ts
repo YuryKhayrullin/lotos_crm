@@ -1,4 +1,4 @@
-import { IBranch, ICoach, IClient, ILesson, CreateClientDto, RegisterCredentials, UserRole } from '@/store/models'
+import { IBranch, ICoach, IClient, ILesson, CreateClientDto, UserRole } from '@/store/models'
 import { normalizeLesson, normalizeClient } from './normalizers'
 
 const API_ROUTE = '/api/crm'
@@ -8,8 +8,11 @@ const clientLog = (event: string, details: Record<string, unknown> = {}): void =
 }
 
 const MUTATING_ACTIONS = new Set([
-  'createUser',
   'assignUserBranch',
+  'deactivateUser',
+  'activateUser',
+  'resetCoachPassword',
+  'linkCoachUser',
   'createClient',
   'createLesson',
   'createBranch',
@@ -27,7 +30,7 @@ const MUTATING_ACTIONS = new Set([
   'addLessons',
 ])
 
-function createRequestId(): string {
+export function createRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
@@ -37,6 +40,16 @@ export type ApiUser = {
   username: string
   role: UserRole
   branchId: string | number | null
+}
+
+export type CoachAccount = {
+  id: string
+  username: string
+  role: 'coach'
+  branchId: string | null
+  status: 'Активен' | 'Отключен'
+  disabledAt: string | null
+  disabledBy: string | null
 }
 
 export class ApiError extends Error {
@@ -64,6 +77,17 @@ const fileToBase64 = (file: File): Promise<string> =>
   })
 
 type JsonObject = Record<string, unknown>
+
+export type LessonRosterClient = {
+  id: string
+  childName: string
+  category: string
+  status: string
+  remainingLessons: number
+  mark: 'attended' | 'absent' | null
+}
+
+export type LessonRoster = { lessonId: string; date: string; clients: LessonRosterClient[] }
 
 export type ClientsPage = {
   items: ReturnType<typeof normalizeClient>[]
@@ -130,13 +154,6 @@ class ApiClient {
 
   async login(username: string, password: string): Promise<{ user: ApiUser }> {
     return this.authRequest('login', { username, password })
-  }
-
-  async register(credentials: RegisterCredentials): Promise<{ status: string }> {
-    return this.authRequest('register', {
-      username: credentials.username,
-      password: credentials.password,
-    })
   }
 
   async session(): Promise<{ authenticated: boolean; user: ApiUser | null }> {
@@ -223,6 +240,10 @@ class ApiClient {
     })
   }
 
+  async getLessonRoster(lessonId: string, date: string, signal?: AbortSignal): Promise<LessonRoster> {
+    return this.request<LessonRoster>('getLessonRoster', { lessonId, date }, signal)
+  }
+
   async fetchLessons(signal?: AbortSignal, branchId?: string): Promise<ReturnType<typeof normalizeLesson>[]> {
     const data = await this.request<unknown[]>(
       'getSheet',
@@ -238,25 +259,33 @@ class ApiClient {
   async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
     return this.request<IBranch>('createBranch', branchData)
   }
-  async createCoach(coachData: JsonObject): Promise<ICoach> {
+  async createCoach(coachData: {
+    name: string
+    specialty?: string
+    initials?: string
+    branchId: string
+    username?: string
+    password?: string
+  }): Promise<ICoach> {
     return this.request<ICoach>('createCoach', coachData)
   }
-  async createUser(userData: {
-    username: string
-    password: string
-    role: 'admin' | 'coach'
-    branchId?: string
-  }): Promise<{
-    status: string
-    user?: { username: string; role: 'admin' | 'coach'; branchId: string | null }
-  }> {
-    return this.request('createUser', userData as JsonObject)
-  }
-  async fetchUsers(): Promise<Array<{ id: string; username: string; role: UserRole; branchId: string | null }>> {
+  async fetchUsers(): Promise<CoachAccount[]> {
     return this.request('getUsers')
   }
   async assignUserBranch(userId: string, branchId: string): Promise<{ success: boolean }> {
     return this.request('assignUserBranch', { userId, branchId })
+  }
+  async deactivateUser(userId: string): Promise<{ success: boolean }> {
+    return this.request('deactivateUser', { userId })
+  }
+  async activateUser(userId: string): Promise<{ success: boolean }> {
+    return this.request('activateUser', { userId })
+  }
+  async resetCoachPassword(userId: string, newPassword: string): Promise<{ success: boolean }> {
+    return this.request('resetCoachPassword', { userId, newPassword })
+  }
+  async linkCoachUser(coachId: string, userId: string): Promise<{ success: boolean }> {
+    return this.request('linkCoachUser', { coachId, userId })
   }
   async updateCoach(id: string, coachData: JsonObject): Promise<ICoach> {
     return this.request<ICoach>('updateCoach', { ...coachData, id })
@@ -295,8 +324,9 @@ class ApiClient {
     category?: string,
     lessonsPerWeek?: number,
     comment?: string,
+    requestId?: string,
   ): Promise<{ success: boolean; payment: Record<string, unknown>; client: Record<string, unknown> }> {
-    return this.request('recordPayment', { clientId, amount, category, lessonsPerWeek, comment })
+    return this.request('recordPayment', { clientId, amount, category, lessonsPerWeek, comment, requestId })
   }
 
   async getClientHistory(clientId: string): Promise<{
@@ -311,16 +341,17 @@ class ApiClient {
     attendanceList: { clientId?: string; visitorName?: string; status: 'attended' | 'absent'; isWalkin?: boolean }[],
     lessonId: string,
     date: string,
+    requestId: string = createRequestId(),
   ) {
-    const requestId =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    return this.request<{ success: boolean; results: Array<{ clientId: string; success: boolean }> }>(
-      'recordBulkAttendance',
-      {
-        requestId,
-        attendance: attendanceList.map((a) => ({
+    const results: Array<{ clientId: string; success: boolean; message?: string }> = []
+    for (let offset = 0; offset < attendanceList.length; offset += 100) {
+      const chunk = attendanceList.slice(offset, offset + 100)
+      const response = await this.request<{
+        success: boolean
+        results: Array<{ clientId: string; success: boolean; message?: string }>
+      }>('recordBulkAttendance', {
+        requestId: `${requestId}:${offset / 100}`,
+        attendance: chunk.map((a) => ({
           clientId: a.clientId,
           visitorName: a.visitorName,
           lessonId,
@@ -328,8 +359,10 @@ class ApiClient {
           status: a.status,
           isWalkin: a.isWalkin || false,
         })),
-      },
-    )
+      })
+      results.push(...response.results)
+    }
+    return { success: results.every((item) => item.success), results }
   }
 
   async recordAttendance(

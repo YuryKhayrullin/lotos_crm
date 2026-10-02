@@ -23,28 +23,35 @@ export const dayOfWeekToNumber = (day: string): number => {
   return days[day] ?? -1
 }
 
+export const toLocalDateOnly = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+
+// For a recurring lesson, resolve the actual day in the displayed week.
+export const lessonOccurrenceDate = (lesson: LessonDateLike, weekStart: Date): string | null => {
+  const start = lesson.date ? parseDateOnly(lesson.date) : null
+  if (lesson.date && !start) return null
+  if (lesson.isRecurring !== true) return start ? toLocalDateOnly(start) : null
+  const weekday = dayOfWeekToNumber(lesson.dayOfWeek)
+  if (weekday === -1) return null
+  const occurrence = new Date(weekStart)
+  occurrence.setDate(weekStart.getDate() + ((weekday + 6) % 7))
+  if (start && occurrence < start) return null
+  return toLocalDateOnly(occurrence)
+}
+
 export const isLessonInWeek = (lesson: LessonDateLike, weekStart: Date, weekEnd: Date): boolean => {
-  if (lesson.date) {
-    const lessonDate = parseDateOnly(lesson.date)
-    if (lessonDate) {
-      return lessonDate >= weekStart && lessonDate <= weekEnd
-    }
-  }
-  return lesson.isRecurring === true
+  const occurrence = lessonOccurrenceDate(lesson, weekStart)
+  const date = occurrence ? parseDateOnly(occurrence) : null
+  return date !== null && date >= weekStart && date <= weekEnd
 }
 
 export const isLessonOnDay = (lesson: LessonDateLike, targetDate: Date): boolean => {
-  if (lesson.date) {
-    const lessonDate = parseDateOnly(lesson.date)
-    if (lessonDate) {
-      return (
-        lessonDate.getDate() === targetDate.getDate() &&
-        lessonDate.getMonth() === targetDate.getMonth() &&
-        lessonDate.getFullYear() === targetDate.getFullYear()
-      )
-    }
+  const start = lesson.date ? parseDateOnly(lesson.date) : null
+  if (lesson.date && !start) return false
+  if (lesson.isRecurring === true) {
+    return (!start || targetDate >= start) && dayOfWeekToNumber(lesson.dayOfWeek) === targetDate.getDay()
   }
-  return lesson.isRecurring === true && dayOfWeekToNumber(lesson.dayOfWeek) === targetDate.getDay()
+  return start !== null && toLocalDateOnly(start) === toLocalDateOnly(targetDate)
 }
 
 export const parseTimeToHHMM = (timeInput: unknown): string => {

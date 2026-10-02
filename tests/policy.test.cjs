@@ -8,11 +8,14 @@ const coach = { id: '2', username: 'coach', role: 'coach', branchId: 'branch-a' 
 test('admin can use administrative actions', () => {
   assert.doesNotThrow(() => assertActionAllowed('createClient', admin))
   assert.doesNotThrow(() => assertActionAllowed('uploadReceipt', admin))
+  assert.doesNotThrow(() => assertActionAllowed('deactivateUser', admin))
+  assert.doesNotThrow(() => assertActionAllowed('resetCoachPassword', admin))
 })
 
 test('coach cannot use administrative actions', () => {
   assert.throws(() => assertActionAllowed('createClient', coach), /Недостаточно прав/)
   assert.throws(() => assertActionAllowed('deleteCoach', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('deactivateUser', coach), /Недостаточно прав/)
 })
 
 test('coach is restricted to the assigned branch', () => {
