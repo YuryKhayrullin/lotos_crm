@@ -264,8 +264,7 @@ export const AttendanceModal = observer(
                   <Users className="mx-auto mb-3 size-9 text-slate-300" />
                   <p className="font-semibold text-slate-700">В этой секции пока нет клиентов</p>
                   <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">
-                    Здесь появятся клиенты этого филиала, у которых в карточке выбран вид занятия «
-                    {lesson.category}».
+                    Здесь появятся клиенты этого филиала, у которых в карточке выбран вид занятия «{lesson.category}».
                   </p>
                 </div>
               ) : (

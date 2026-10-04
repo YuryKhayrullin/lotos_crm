@@ -535,6 +535,9 @@ test('first attendance on a legacy card establishes its opening ledger balance w
   assert.equal(ledgerRows[1][LEDGER_HEADERS.indexOf('totalLessonsAfter')], 4)
   assert.equal(ledgerRows[2][LEDGER_HEADERS.indexOf('type')], 'attendance')
   assert.equal(ledgerRows[2][LEDGER_HEADERS.indexOf('balanceAfter')], 2)
+  const ledgerWrites = harness.state.writes.filter((write) => write.name === 'Журнал занятий')
+  assert.equal(ledgerWrites.length, 1)
+  assert.equal(ledgerWrites[0].height, 2)
 })
 
 test('first attendance restores a confirmed legacy payment that is missing from the ledger', () => {
