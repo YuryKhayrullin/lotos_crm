@@ -2,23 +2,10 @@ import { flow, types, Instance } from 'mobx-state-tree'
 import { apiClient, ApiError } from '@/lib/api-client'
 import { ClientStore } from './ClientStore'
 import { AuthStore } from './AuthStore'
-import {
-  BranchModel,
-  IBranch,
-  CoachModel,
-  ICoach,
-  ClientModel,
-  IClient,
-  LessonModel,
-  ILesson,
-  CreateClientDto,
-} from '@/store/models'
+import { BranchModel, IBranch, CoachModel, ICoach, LessonModel, ILesson } from '@/store/models'
 import { normalizeLesson } from '@/lib/normalizers'
 
 const SCREENS = ['Дашборд', 'Клиенты и дети', 'Тренеры', 'Расписание', 'Абонементы', 'Финансы'] as const
-const bootstrapLog = (event: string, details: Record<string, unknown> = {}): void => {
-  console.log('[lotos-bootstrap] ' + event, details)
-}
 
 const RootStoreModel = types
   .model('RootStore', {
@@ -31,25 +18,8 @@ const RootStoreModel = types
     clientStore: types.optional(ClientStore, {}),
     authStore: types.optional(AuthStore, {}),
     lessons: types.optional(types.array(LessonModel), []),
-    clientFormOpen: types.optional(types.boolean, false),
     attendanceOpen: types.optional(types.boolean, false),
     loginOpen: types.optional(types.boolean, false),
-    selectedClient: types.maybeNull(types.reference(ClientModel)),
-    selectedCoach: types.maybeNull(types.reference(CoachModel)),
-    editingClient: types.maybeNull(ClientModel),
-    editingCoach: types.maybeNull(CoachModel),
-    clientFormData: types.optional(
-      types.frozen<Partial<CreateClientDto>>({
-        childName: '',
-        parentName: '',
-        phone: '',
-        email: '',
-        birthDate: '',
-      }),
-      {},
-    ),
-    coachFormName: types.optional(types.string, ''),
-    coachFormSpecialty: types.optional(types.string, ''),
     attachCoachId: types.optional(types.string, ''),
     isLoading: types.optional(types.boolean, true),
     error: types.maybeNull(types.string),
@@ -57,10 +27,6 @@ const RootStoreModel = types
   .views((self) => ({
     get currentBranch(): IBranch | undefined {
       return self.branches.find((b: IBranch) => b.id === self.selectedBranchId)
-    },
-    get branchClients(): IClient[] {
-      if (!self.selectedBranchId) return self.clientStore.clients.slice()
-      return self.clientStore.clients.filter((c: IClient) => c.branchId === self.selectedBranchId)
     },
     get branchCoaches(): ICoach[] {
       if (!self.selectedBranchId) return self.coaches.slice()
@@ -79,24 +45,9 @@ const RootStoreModel = types
   .actions((self) => {
     let activeInitializeController: AbortController | null = null
     let initializedForUser: string | null = null
-    const closeClientForm = () => {
-      self.clientFormOpen = false
-      self.clientFormData = {}
-    }
+    let initializingForUser: string | null = null
     const closeBranchMenu = () => {
       self.branchMenuOpen = false
-    }
-    const cancelEditClient = () => {
-      self.editingClient = null
-      closeClientForm()
-    }
-    const closeClientModal = () => {
-      self.selectedClient = null
-    }
-    const cancelEditCoach = () => {
-      self.editingCoach = null
-      self.coachFormName = ''
-      self.coachFormSpecialty = ''
     }
     const setScreen = (screen: string) => {
       if (SCREENS.includes(screen as any)) {
@@ -120,33 +71,6 @@ const RootStoreModel = types
       self.branchMenuOpen = !self.branchMenuOpen
       if (self.branchMenuOpen) self.error = null
     }
-    const openClientForm = () => {
-      self.clientFormData = {
-        childName: '',
-        parentName: '',
-        phone: '',
-        email: '',
-        birthDate: '',
-      }
-      self.clientFormOpen = true
-    }
-    const setClientFormField = <K extends keyof CreateClientDto>(field: K, value: string) => {
-      self.clientFormData = { ...self.clientFormData, [field]: value }
-    }
-    const selectClient = (client: IClient) => {
-      self.selectedClient = client
-    }
-    const startEditClient = (client: IClient) => {
-      self.editingClient = client
-      self.clientFormData = {
-        childName: client.childName,
-        parentName: client.parentName,
-        phone: client.phone,
-        email: client.email,
-        birthDate: client.birthDate,
-      }
-      self.clientFormOpen = true
-    }
     const openAttendance = () => {
       self.attendanceOpen = true
     }
@@ -159,23 +83,6 @@ const RootStoreModel = types
     const closeLogin = () => {
       self.loginOpen = false
     }
-    const selectCoach = (coach: ICoach) => {
-      self.selectedCoach = coach
-    }
-    const closeCoachModal = () => {
-      self.selectedCoach = null
-    }
-    const startEditCoach = (coach: ICoach) => {
-      self.editingCoach = coach
-      self.coachFormName = coach.name
-      self.coachFormSpecialty = coach.specialty
-    }
-    const setCoachFormName = (value: string) => {
-      self.coachFormName = value
-    }
-    const setCoachFormSpecialty = (value: string) => {
-      self.coachFormSpecialty = value
-    }
     const setAttachCoachId = (value: string) => {
       self.attachCoachId = value
     }
@@ -186,6 +93,7 @@ const RootStoreModel = types
       activeInitializeController?.abort()
       activeInitializeController = null
       initializedForUser = null
+      initializingForUser = null
       self.isLoading = false
     }
     const addLessonToStore = (lessonData: any) => {
@@ -193,30 +101,17 @@ const RootStoreModel = types
     }
 
     return {
-      closeClientForm,
       closeBranchMenu,
-      cancelEditClient,
-      closeClientModal,
-      cancelEditCoach,
       setScreen,
       setBranch,
       toggleSidebar,
       closeSidebar,
       toggleBranchMenu,
-      openClientForm,
-      setClientFormField,
-      selectClient,
-      startEditClient,
       openAttendance,
       closeAttendance,
       openLogin,
       closeLogin,
-      selectCoach,
-      closeCoachModal,
       cancelInitialize,
-      startEditCoach,
-      setCoachFormName,
-      setCoachFormSpecialty,
       setAttachCoachId,
       setError,
       addLessonToStore,
@@ -224,42 +119,27 @@ const RootStoreModel = types
         const userId = self.authStore.user?.id
           ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
           : null
-        if (!force && initializedForUser === userId && self.branches.length > 0) return
-        bootstrapLog('start', { hasUser: Boolean(userId), role: self.authStore.user?.role ?? null })
+        if (!force && ((initializedForUser === userId && self.branches.length > 0) || initializingForUser === userId))
+          return
         activeInitializeController?.abort()
         const controller = new AbortController()
         activeInitializeController = controller
+        initializingForUser = userId
         self.isLoading = true
-        self.clientStore.setBranchScope(
-          self.authStore.isAdmin
-            ? self.selectedBranchId
-            : self.authStore.user?.branchId
-              ? String(self.authStore.user.branchId)
-              : null,
-        )
         try {
-          // Данные загружаются независимыми запросами: тяжёлый список клиентов
-          // больше не блокирует расписание и справочники одним bootstrap-запросом.
+          // Only shared reference data belongs in the global bootstrap. Client
+          // pages, reports and option search have independent server queries.
           const branchId = self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined
-          const [branches, coaches] = yield Promise.all([
-            apiClient.fetchBranches(controller.signal),
-            apiClient.fetchCoaches(controller.signal, branchId),
-          ])
-          if (controller.signal.aborted) return
-
-          const [lessons, clientsPage] = yield Promise.all([
-            apiClient.fetchLessons(controller.signal, branchId),
-            apiClient.fetchClientsPage(1, 100, controller.signal, branchId),
-          ])
-          if (controller.signal.aborted) return
-          bootstrapLog('requests.received', {
-            branches: branches.length,
-            coaches: coaches.length,
-            lessons: lessons.length,
-            clients: clientsPage.items.length,
-          })
-
-          yield self.clientStore.loadClients(clientsPage)
+          // Warm the first visible admin reads while the single bootstrap GAS
+          // call is already in flight. The BFF coalesces an early click with
+          // these requests and keeps the completed result private to this user.
+          if (self.authStore.isAdmin) {
+            void apiClient
+              .fetchClientsPage(1, 100, controller.signal, branchId, undefined, undefined, 'childName', 'asc')
+              .catch(() => undefined)
+            void apiClient.getDashboardSummary(controller.signal, branchId).catch(() => undefined)
+          }
+          const { branches, coaches, lessons } = yield apiClient.fetchBootstrapData(controller.signal, branchId)
           if (controller.signal.aborted) return
 
           self.branches.replace(branches)
@@ -276,33 +156,22 @@ const RootStoreModel = types
             setBranch(branchId)
           }
 
-          bootstrapLog('success', {
-            branches: branches.length,
-            coaches: coaches.length,
-            lessons: lessons.length,
-            clients: clientsPage.items.length,
-          })
           initializedForUser = userId
           self.isLoading = false
         } catch (error: any) {
-          if (error?.name === 'AbortError') {
-            bootstrapLog('aborted')
-            return
-          }
-          if (error instanceof ApiError && (error.status === 401 || error.message.includes('Unauthorized'))) {
-            bootstrapLog('unauthorized', { status: error.status, message: error.message })
+          if (error?.name === 'AbortError') return
+          if (error instanceof ApiError && (error.status === 401 || error.code === 'UNAUTHORIZED')) {
             yield self.authStore.logout()
             self.error = null
             return
           }
-          bootstrapLog('failed', {
-            name: error?.name ?? 'unknown',
-            message: error instanceof Error ? error.message : String(error),
-          })
           self.error = error instanceof ApiError ? error.message : 'Ошибка загрузки данных'
           self.isLoading = false
         } finally {
-          if (activeInitializeController === controller) activeInitializeController = null
+          if (activeInitializeController === controller) {
+            activeInitializeController = null
+            if (initializingForUser === userId) initializingForUser = null
+          }
         }
       }),
       addBranch: flow(function* (name: string, address: string) {
@@ -315,40 +184,12 @@ const RootStoreModel = types
           self.error = 'Ошибка создания филиала'
         }
       }),
-      addClient: flow(function* (clientData: CreateClientDto) {
-        try {
-          const newClient = yield apiClient.createClient(clientData)
-          self.clientStore.clients.push(newClient)
-          closeClientForm()
-        } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка создания клиента'
-        }
-      }),
-      updateClient: flow(function* () {
-        if (!self.editingClient) return
-        try {
-          const { subscription, assignedLessonIds, ...dataToUpdate } = self.clientFormData
-          const updated = yield apiClient.updateClient(self.editingClient.id, dataToUpdate as Partial<IClient>)
-          Object.assign(self.editingClient, updated)
-          cancelEditClient()
-        } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка обновления клиента'
-        }
-      }),
-      deleteClient: flow(function* (clientId: string) {
-        try {
-          yield apiClient.deleteClient(clientId)
-          const client = self.clientStore.clients.find((c: IClient) => c.id === clientId)
-          if (client) self.clientStore.clients.remove(client)
-          closeClientModal()
-        } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления клиента'
-        }
-      }),
       createCoach: flow(function* (coachData: {
         name: string
         specialty: string
         branchId: string
+        phone?: string
+        birthDate?: string
         username?: string
         password?: string
       }) {
@@ -360,6 +201,15 @@ const RootStoreModel = types
             name: coachData.name.trim(),
             specialty: coachData.specialty.trim(),
             branchId: coachData.branchId,
+            initials: coachData.name
+              .trim()
+              .split(/\s+/)
+              .map((part) => part[0])
+              .join('')
+              .slice(0, 2)
+              .toUpperCase(),
+            phone: coachData.phone?.trim() || '',
+            birthDate: coachData.birthDate?.trim() || '',
             ...(coachData.username ? { username: coachData.username.trim(), password: coachData.password } : {}),
           })
           self.coaches.push(coach)
@@ -367,19 +217,6 @@ const RootStoreModel = types
         } catch (error) {
           self.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
           throw error
-        }
-      }),
-      updateCoach: flow(function* () {
-        if (!self.editingCoach) return
-        try {
-          const updated = yield apiClient.updateCoach(self.editingCoach.id, {
-            name: self.coachFormName.trim(),
-            specialty: self.coachFormSpecialty.trim(),
-          })
-          Object.assign(self.editingCoach, updated)
-          cancelEditCoach()
-        } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка обновления тренера'
         }
       }),
       deleteCoach: flow(function* (coachId: string) {
@@ -451,12 +288,8 @@ export function getStore(): IRootStore {
       clientStore: {},
       authStore: {},
       lessons: [],
-      clientFormOpen: false,
       attendanceOpen: false,
       loginOpen: false,
-      clientFormData: {},
-      coachFormName: '',
-      coachFormSpecialty: '',
       attachCoachId: '',
       isLoading: true,
       error: null,

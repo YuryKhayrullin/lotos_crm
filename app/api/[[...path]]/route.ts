@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { isActiveAuthUser } from '@/lib/server/auth-user'
 import { callGas, GasError } from '@/lib/server/gas'
+import { codeForHttpStatus, type PublicApiErrorCode } from '@/lib/server/api-errors'
 import { dispatchCrmAction, UPLOAD_ACTIONS } from '@/lib/server/crm-router'
+import { CACHEABLE_CRM_READ_ACTIONS, crmReadCache, MUTATING_CRM_ACTIONS } from '@/lib/server/crm-read-cache'
+import { serverLog } from '@/lib/server/logger'
 import { PolicyError } from '@/lib/server/policy'
 import { rejectCrossOrigin } from '@/lib/server/request'
-import { clearSession, createSession, getSession } from '@/lib/server/session'
+import { getLoginRateLimiter, LoginRateLimitUnavailableError } from '@/lib/server/login-rate-limit'
+import { hashPassword, isScryptPasswordHash, verifyPassword } from '@/lib/server/passwords'
+import { clearSession, createSession, getSession, SessionError } from '@/lib/server/session'
 
 export const runtime = 'nodejs'
 
@@ -13,6 +19,7 @@ type HttpMethod = 'GET' | 'POST'
 type RouteValues = { clientId?: string }
 type RouteHandler = (request: NextRequest, values: RouteValues) => Promise<Response>
 type RouteDefinition = {
+  name: string
   method: HttpMethod
   match: (segments: string[]) => RouteValues | null
   handle: RouteHandler
@@ -25,26 +32,27 @@ const MAX_RECEIPT_BASE64_BYTES = 7 * 1024 * 1024
 const MAX_RECEIPT_BYTES = 5 * 1024 * 1024
 const SAFE_RECEIPT_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf'])
 
-function routeLog(event: string, details: Record<string, unknown> = {}): void {
-  console.log('[lotos-route] ' + event, details)
-}
-
 class RouteError extends Error {
   constructor(
-    message: string,
+    public readonly publicMessage: string,
     public readonly status: number,
+    public readonly code: PublicApiErrorCode = codeForHttpStatus(status),
   ) {
-    super(message)
+    super(publicMessage)
     this.name = 'RouteError'
   }
 }
 
-function jsonResponse(data: unknown, status = 200): NextResponse {
-  return NextResponse.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
+function jsonResponse(data: unknown, status = 200, headers: Record<string, string> = {}): NextResponse {
+  return NextResponse.json(data, { status, headers: { 'Cache-Control': 'no-store', ...headers } })
 }
 
-function jsonError(message: string, status: number): NextResponse {
-  return jsonResponse({ status: 'error', message }, status)
+function jsonError(
+  message: string,
+  status: number,
+  code: PublicApiErrorCode = codeForHttpStatus(status),
+): NextResponse {
+  return jsonResponse({ status: 'error', code, message }, status)
 }
 
 function bodySize(value: unknown): number {
@@ -86,19 +94,43 @@ function authPayload(user: NonNullable<Awaited<ReturnType<typeof getSession>>>):
   return { id: user.id, username: user.username, role: user.role, branchId: user.branchId }
 }
 
+function clientIp(request: NextRequest): string {
+  const forwarded = request.headers.get('x-forwarded-for')
+  if (forwarded) return forwarded.split(',')[0].trim().slice(0, 128)
+  return (request.headers.get('x-real-ip') || 'unknown').trim().slice(0, 128) || 'unknown'
+}
+
+let dummyPasswordHash: Promise<string> | null = null
+function getDummyPasswordHash(): Promise<string> {
+  dummyPasswordHash ??= hashPassword('not-a-real-password-for-timing-equalization')
+  return dummyPasswordHash
+}
+
 async function handleLogin(request: NextRequest): Promise<Response> {
-  routeLog('auth.login.start')
   const body = await readJson(request, MAX_AUTH_BYTES)
   const username = requiredText(body.username, 100)
   const password = requiredText(body.password, 200, false)
-  const response = (await callGas({ action: 'login', payload: { username, password } })) as JsonRecord
-  const gasUser = response.user as { role?: unknown; branchId?: unknown } | undefined
-  const isCoach = ['coach', '2'].includes(String(gasUser?.role ?? '').toLowerCase())
-  if (isCoach && (gasUser?.branchId === null || gasUser?.branchId === undefined || gasUser.branchId === '')) {
-    return jsonError('Аккаунт ожидает назначения филиала администратором', 403)
+  const limiter = getLoginRateLimiter()
+  const attempt = await limiter.check(clientIp(request), username)
+  if (!attempt) throw new RouteError('Неверный логин или пароль', 401)
+
+  const response = (await callGas({ action: 'getAuthUser', payload: { username } })) as JsonRecord
+  const candidate = response.user
+  const passwordHash =
+    candidate && typeof candidate === 'object' && isScryptPasswordHash((candidate as JsonRecord).passwordHash)
+      ? String((candidate as JsonRecord).passwordHash)
+      : await getDummyPasswordHash()
+  const passwordValid = await verifyPassword(password, passwordHash)
+  if (!isActiveAuthUser(candidate) || !passwordValid) {
+    throw new RouteError('Неверный логин или пароль', 401)
   }
-  const user = await createSession(response.user)
-  routeLog('auth.login.session.created', { userId: user.id, role: user.role })
+  await limiter.resetSuccessfulPair(attempt)
+
+  const isCoach = ['coach', '2'].includes(candidate.role)
+  if (isCoach && (candidate.branchId === null || candidate.branchId === undefined || candidate.branchId === '')) {
+    return jsonError('Аккаунт ожидает назначения филиала администратором', 403, 'FORBIDDEN')
+  }
+  const user = await createSession(candidate)
   return jsonResponse({ status: 'success', user })
 }
 
@@ -108,14 +140,14 @@ async function handleLogout(): Promise<Response> {
 }
 
 async function handleSession(): Promise<Response> {
-  routeLog('auth.session.start')
   const user = await getSession({ revalidate: true })
   if (!user) {
-    routeLog('auth.session.invalid', { authenticated: false })
     await clearSession()
-    return jsonResponse({ authenticated: false, user: null })
+    return jsonResponse(
+      { status: 'error', code: 'UNAUTHORIZED', message: 'Требуется авторизация', authenticated: false, user: null },
+      401,
+    )
   }
-  routeLog('auth.session.ok', { userId: user.id, role: user.role })
   return jsonResponse({ authenticated: Boolean(user), user })
 }
 
@@ -127,18 +159,32 @@ async function handleCrm(request: NextRequest): Promise<Response> {
   }
 
   const payload = safePayload(body.payload)
-  routeLog('crm.start', { action })
   if (!UPLOAD_ACTIONS.has(action) && bodySize(payload) > MAX_STANDARD_BYTES) {
     throw new RouteError('Запрос слишком большой', 413)
   }
   const user = await getSession()
   if (!user) {
-    routeLog('crm.denied', { action, reason: 'session.invalid' })
     throw new RouteError('Требуется авторизация', 401)
   }
+
+  const startedAt = performance.now()
+  if (CACHEABLE_CRM_READ_ACTIONS.has(action)) {
+    const cached = await crmReadCache.getOrLoad(action, payload, user, () =>
+      dispatchCrmAction({ action, payload, user }),
+    )
+    const duration = Math.max(0, Math.round(performance.now() - startedAt))
+    return jsonResponse(cached.value, 200, {
+      'X-CRM-Cache': cached.status,
+      'Server-Timing': `crm;dur=${duration}`,
+    })
+  }
+
   const result = await dispatchCrmAction({ action, payload, user })
-  routeLog('crm.success', { action })
-  return jsonResponse(result)
+  if (MUTATING_CRM_ACTIONS.has(action)) crmReadCache.invalidate()
+  return jsonResponse(result, 200, {
+    'X-CRM-Cache': 'BYPASS',
+    'Server-Timing': `crm;dur=${Math.max(0, Math.round(performance.now() - startedAt))}`,
+  })
 }
 
 async function handleReceipt(_request: NextRequest, values: RouteValues): Promise<Response> {
@@ -155,10 +201,10 @@ async function handleReceipt(_request: NextRequest, values: RouteValues): Promis
     auth: authPayload(user),
   })) as { base64?: string; mimeType?: string; fileName?: string }
   if (!result.base64) throw new RouteError('Квитанция не найдена', 404)
-  if (result.base64.length > MAX_RECEIPT_BASE64_BYTES) throw new GasError('Квитанция слишком большая', 502)
+  if (result.base64.length > MAX_RECEIPT_BASE64_BYTES) throw new RouteError('Квитанция слишком большая', 413)
 
   const bytes = Buffer.from(result.base64, 'base64')
-  if (bytes.byteLength > MAX_RECEIPT_BYTES) throw new GasError('Квитанция слишком большая', 502)
+  if (bytes.byteLength > MAX_RECEIPT_BYTES) throw new RouteError('Квитанция слишком большая', 413)
   const sourceMime = String(result.mimeType || '')
   const safeMime = SAFE_RECEIPT_MIME_TYPES.has(sourceMime) ? sourceMime : 'application/octet-stream'
   const disposition = SAFE_RECEIPT_MIME_TYPES.has(sourceMime) ? 'inline' : 'attachment'
@@ -180,39 +226,63 @@ function exactRoute(...expected: string[]): RouteDefinition['match'] {
 }
 
 const ROUTES: RouteDefinition[] = [
-  { method: 'GET', match: exactRoute('auth', 'session'), handle: handleSession },
+  { name: 'auth.session', method: 'GET', match: exactRoute('auth', 'session'), handle: handleSession },
   {
+    name: 'receipts.get',
     method: 'GET',
     match: (segments) => (segments.length === 2 && segments[0] === 'receipts' ? { clientId: segments[1] } : null),
     handle: handleReceipt,
   },
-  { method: 'POST', match: exactRoute('auth', 'login'), handle: handleLogin },
-  { method: 'POST', match: exactRoute('auth', 'logout'), handle: handleLogout },
-  { method: 'POST', match: exactRoute('crm'), handle: handleCrm },
+  { name: 'auth.login', method: 'POST', match: exactRoute('auth', 'login'), handle: handleLogin },
+  { name: 'auth.logout', method: 'POST', match: exactRoute('auth', 'logout'), handle: handleLogout },
+  { name: 'crm', method: 'POST', match: exactRoute('crm'), handle: handleCrm },
 ]
 
-function errorResponse(error: unknown): NextResponse {
-  if (error instanceof RouteError || error instanceof PolicyError || error instanceof GasError) {
-    console.warn('[lotos-route] request.error', { name: error.name, status: error.status, message: error.message })
-    return jsonError(error.message, error.status)
+function errorResponse(error: unknown, method: HttpMethod, route: string): NextResponse {
+  if (error instanceof LoginRateLimitUnavailableError) {
+    serverLog('warn', 'api.request.failed', { method, route, code: 'SERVICE_UNAVAILABLE', status: 503 })
+    return jsonError('Вход временно недоступен', 503, 'SERVICE_UNAVAILABLE')
   }
-  console.error('[lotos-route] request.unhandled', error)
-  return jsonError('Внутренняя ошибка сервера', 500)
+  if (error instanceof GasError) {
+    serverLog('warn', 'api.request.failed', { method, route, code: error.code, status: error.status })
+    return jsonError(error.publicMessage, error.status, error.code)
+  }
+  if (error instanceof RouteError) {
+    serverLog('warn', 'api.request.failed', { method, route, code: error.code, status: error.status })
+    return jsonError(error.publicMessage, error.status, error.code)
+  }
+  if (error instanceof SessionError) {
+    const code = codeForHttpStatus(error.status)
+    serverLog('warn', 'api.request.failed', { method, route, code, status: error.status })
+    return jsonError(error.message, error.status, code)
+  }
+  if (error instanceof PolicyError) {
+    const code = codeForHttpStatus(error.status)
+    serverLog('warn', 'api.request.failed', { method, route, code, status: error.status })
+    return jsonError(error.message, error.status, code)
+  }
+  serverLog('error', 'api.request.failed', { method, route, code: 'INTERNAL', status: 500 })
+  return jsonError('Внутренняя ошибка сервера', 500, 'INTERNAL')
 }
 
 async function dispatchRequest(method: HttpMethod, request: NextRequest, context: RouteContext): Promise<Response> {
+  let routeName = 'unmatched'
   try {
     const segments = (await context.params).path ?? []
     const matchingRoutes = ROUTES.filter((candidate) => candidate.match(segments) !== null)
     const route = matchingRoutes.find((candidate) => candidate.method === method)
     if (!route) {
-      if (matchingRoutes.length === 0) return jsonError('Маршрут не найден', 404)
+      if (matchingRoutes.length === 0) return jsonError('Маршрут не найден', 404, 'NOT_FOUND')
       const allow = [...new Set(matchingRoutes.map((candidate) => candidate.method))].join(', ')
-      return new NextResponse(JSON.stringify({ status: 'error', message: 'Метод не поддерживается' }), {
-        status: 405,
-        headers: { Allow: allow, 'Cache-Control': 'no-store', 'Content-Type': 'application/json' },
-      })
+      return new NextResponse(
+        JSON.stringify({ status: 'error', code: 'METHOD_NOT_ALLOWED', message: 'Метод не поддерживается' }),
+        {
+          status: 405,
+          headers: { Allow: allow, 'Cache-Control': 'no-store', 'Content-Type': 'application/json' },
+        },
+      )
     }
+    routeName = route.name
 
     if (method === 'POST') {
       const crossOriginResponse = rejectCrossOrigin(request)
@@ -220,7 +290,7 @@ async function dispatchRequest(method: HttpMethod, request: NextRequest, context
     }
     return await route.handle(request, route.match(segments) ?? {})
   } catch (error) {
-    return errorResponse(error)
+    return errorResponse(error, method, routeName)
   }
 }
 

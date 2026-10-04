@@ -10,12 +10,26 @@ test('admin can use administrative actions', () => {
   assert.doesNotThrow(() => assertActionAllowed('uploadReceipt', admin))
   assert.doesNotThrow(() => assertActionAllowed('deactivateUser', admin))
   assert.doesNotThrow(() => assertActionAllowed('resetCoachPassword', admin))
+  assert.doesNotThrow(() => assertActionAllowed('recordAdjustment', admin))
+  assert.doesNotThrow(() => assertActionAllowed('auditLessonLedger', admin))
+  assert.doesNotThrow(() => assertActionAllowed('repairLessonLedger', admin))
+  assert.doesNotThrow(() => assertActionAllowed('getFinanceSummary', admin))
+  assert.doesNotThrow(() => assertActionAllowed('getSubscriptionsPage', admin))
+  assert.doesNotThrow(() => assertActionAllowed('assignClientLesson', admin))
 })
 
 test('coach cannot use administrative actions', () => {
   assert.throws(() => assertActionAllowed('createClient', coach), /Недостаточно прав/)
   assert.throws(() => assertActionAllowed('deleteCoach', coach), /Недостаточно прав/)
   assert.throws(() => assertActionAllowed('deactivateUser', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('recordAdjustment', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('auditLessonLedger', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('getFinanceSummary', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('getSubscriptionsPage', coach), /Недостаточно прав/)
+  assert.throws(() => assertActionAllowed('assignClientLesson', coach), /Недостаточно прав/)
+  assert.doesNotThrow(() => assertActionAllowed('getDashboardSummary', coach))
+  assert.doesNotThrow(() => assertActionAllowed('searchClientOptions', coach))
+  assert.doesNotThrow(() => assertActionAllowed('getBootstrapData', coach))
 })
 
 test('coach is restricted to the assigned branch', () => {

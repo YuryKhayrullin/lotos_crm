@@ -7,17 +7,17 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit --incremental false",
-    "test": "tsc --target ES2020 --module commonjs --moduleResolution node --skipLibCheck --rootDir lib --outDir .test-dist lib/utils/date-core.ts lib/server/policy.ts && node --test tests/*.test.cjs",
+    "test": "tsc --target ES2020 --module commonjs --moduleResolution node --skipLibCheck --rootDir lib --outDir .test-dist lib/branch-selection.ts lib/formatters.ts lib/utils/date-core.ts lib/server/api-errors.ts lib/server/auth-user.ts lib/server/crm-read-cache.ts lib/server/policy.ts && node --test tests/*.test.cjs",
     "lint": "eslint .",
     "format": "prettier --write '**/*.{ts,tsx,js,mjs,json,css,md}'",
     "format:check": "prettier --check '**/*.{ts,tsx,js,mjs,json,css,md}'",
-    "verify:gas": "node scripts/verify-gas-config.mjs"
+    "verify:gas": "node scripts/verify-gas-config.mjs",
+    "hash-password": "node scripts/generate-scrypt-hash.mjs",
+    "release:check": "npm run typecheck && npm test && npm run lint && npm run format:check && npm run build",
+    "smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.1",
-    "@mui/material": "^9.4.0",
     "@vercel/analytics": "1.6.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

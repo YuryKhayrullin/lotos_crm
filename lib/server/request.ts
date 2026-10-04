@@ -11,10 +11,16 @@ export function rejectCrossOrigin(request: Request): NextResponse | null {
 
   try {
     if (new URL(origin).origin !== new URL(request.url).origin) {
-      return NextResponse.json({ status: 'error', message: 'Cross-origin request rejected' }, { status: 403 })
+      return NextResponse.json(
+        { status: 'error', code: 'FORBIDDEN', message: 'Запрос с другого сайта запрещён' },
+        { status: 403 },
+      )
     }
   } catch {
-    return NextResponse.json({ status: 'error', message: 'Invalid request origin' }, { status: 403 })
+    return NextResponse.json(
+      { status: 'error', code: 'FORBIDDEN', message: 'Некорректный источник запроса' },
+      { status: 403 },
+    )
   }
 
   return null

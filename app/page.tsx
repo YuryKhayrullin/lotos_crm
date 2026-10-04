@@ -19,12 +19,36 @@ import { FinanceView } from '@/components/FinanceView'
 import { AttendanceModal } from '@/components/AttendanceModal'
 import { ILesson } from '@/store/models'
 import { isLessonOnDay, toLocalDateOnly } from '@/lib/utils/date'
+import { apiClient, type DashboardSummary } from '@/lib/api-client'
+import { selectBranchAndReload } from '@/lib/branch-selection'
 
 const store = getStore()
 
 const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) => {
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
+  const [summary, setSummary] = useState<DashboardSummary | null>(null)
+  const [summaryError, setSummaryError] = useState('')
+  const isCoach = store.authStore.isCoach
+  const dashboardBranchId = store.authStore.isAdmin ? store.selectedBranchId || undefined : undefined
+
+  useEffect(() => {
+    if (isCoach) return
+    const controller = new AbortController()
+    setSummary(null)
+    setSummaryError('')
+    void apiClient
+      .getDashboardSummary(controller.signal, dashboardBranchId)
+      .then((data) => {
+        if (!controller.signal.aborted) setSummary(data)
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setSummaryError(error instanceof Error ? error.message : 'Не удалось загрузить сводку')
+      })
+    return () => controller.abort()
+  }, [dashboardBranchId, isCoach])
+
   const formatTime = (timeValue: string | number) => {
     const normalizedTime = String(timeValue ?? '')
     if (!normalizedTime) return '--:--'
@@ -40,13 +64,15 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-      {!store.authStore.isCoach && (
+      {!isCoach && (
         <div className="space-y-4">
           <div className="flex justify-between items-center cursor-pointer" onClick={() => setScreen('Клиенты и дети')}>
             <h2 className="text-xl font-bold text-slate-800 hover:text-cyan-700 transition-colors">Клиенты</h2>
           </div>
           <div className="bg-white rounded-2xl border border-pink-100 shadow-sm overflow-hidden">
-            {store.branchClients.map((client) => (
+            {!summary && !summaryError && <p className="p-5 text-sm text-slate-500">Загружаем клиентов…</p>}
+            {summaryError && <p className="p-5 text-sm text-rose-600">Не удалось загрузить список клиентов</p>}
+            {summary?.clientsPreview.map((client) => (
               <div
                 key={client.id}
                 onClick={() => setScreen('Клиенты и дети')}
@@ -71,6 +97,14 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
                 </Badge>
               </div>
             ))}
+            {summary && summary.clientsPreview.length === 0 && (
+              <p className="p-5 text-sm text-slate-500">Клиентов для показа нет</p>
+            )}
+            {summary && summary.previewTotal > summary.clientsPreview.length && (
+              <p className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+                Показаны первые {summary.clientsPreview.length} из {summary.previewTotal} неархивных клиентов
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -125,6 +159,7 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
 const Page = observer(() => {
   const isInitialized = store.authStore.isInitialized
   const isAuthenticated = store.authStore.isAuthenticated
+  const reloadForBranch = (branchId: string) => selectBranchAndReload(store, branchId)
 
   useEffect(() => {
     if (!isInitialized || !isAuthenticated) {
@@ -224,10 +259,7 @@ const Page = observer(() => {
             {store.authStore.isAdmin && (
               <Select
                 value={store.selectedBranchId || 'all'}
-                onValueChange={(value) => {
-                  store.setBranch(!value || value === 'all' ? '' : value)
-                  void store.initialize()
-                }}
+                onValueChange={(value) => reloadForBranch(!value || value === 'all' ? '' : value)}
               >
                 <SelectTrigger
                   aria-label="Выберите филиал"
@@ -296,10 +328,20 @@ const Page = observer(() => {
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wider">Мои филиалы</h3>
                 <div className="grid gap-2">
+                  <button
+                    onClick={() => reloadForBranch('')}
+                    className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
+                      !store.selectedBranchId
+                        ? 'border-cyan-400 bg-cyan-50 text-cyan-900 font-semibold shadow-sm'
+                        : 'border-slate-100 hover:border-cyan-200 hover:bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    Все филиалы
+                  </button>
                   {store.branches.map((branch) => (
                     <button
                       key={branch.id}
-                      onClick={() => store.setBranch(String(branch.id))}
+                      onClick={() => reloadForBranch(String(branch.id))}
                       className={`w-full text-left px-4 py-3 rounded-xl border transition-all ${
                         String(store.selectedBranchId) === String(branch.id)
                           ? 'border-cyan-400 bg-cyan-50 text-cyan-900 font-semibold shadow-sm'

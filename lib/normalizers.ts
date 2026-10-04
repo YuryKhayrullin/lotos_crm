@@ -2,7 +2,6 @@ import { parseTimeToHHMM } from './utils/date'
 
 // Using SnapshotIn to match what MST expects for snapshots
 import { SnapshotIn } from 'mobx-state-tree'
-import { countAttendedLessons, packageLessonsFromFrequency } from './subscription-pricing'
 
 const normalizeAttendanceHistory = (value: unknown): unknown[] => {
   if (Array.isArray(value)) return value
@@ -47,7 +46,9 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
     assignedLessonIds = [String(c.assignedLessonId)]
   }
 
-  const inferredTotalLessons = packageLessonsFromFrequency(c.lessonsPerWeek) || null
+  // The backend ledger is the only source for credited lessons. In particular,
+  // do not derive a virtual package from lessonsPerWeek or attendance history:
+  // frequency describes the next purchase, not previously paid balance.
   const paidValue = c.paid ?? c.subscription?.paid
   const hasRecordedPayment =
     Number(c.paidAmount || 0) > 0 ||
@@ -58,39 +59,25 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
   const rawTotalLessons = Number(c.totalLessons ?? 0)
   const rawRemainingLessons = Number(c.remainingLessons ?? 0)
   const hasFlatSubscription = c.remainingLessons !== undefined || c.totalLessons !== undefined
-  const shouldInferEmptySubscription =
-    hasRecordedPayment && hasFlatSubscription && rawTotalLessons <= 0 && rawRemainingLessons <= 0
-  const canInferSubscription = hasRecordedPayment && (!hasFlatSubscription || shouldInferEmptySubscription)
-  const totalLessons = rawTotalLessons > 0 ? rawTotalLessons : canInferSubscription ? (inferredTotalLessons ?? 0) : 0
-  const remainingLessons =
-    rawTotalLessons > 0 || rawRemainingLessons > 0
-      ? rawRemainingLessons
-      : Math.max(0, totalLessons - countAttendedLessons(attendanceHistory))
 
-  const flatSubscription =
-    hasFlatSubscription || inferredTotalLessons !== null
-      ? {
-          id: String(c.subscriptionId || `${c.id || 'client'}-subscription`),
-          clientId: String(c.id || ''),
-          totalLessons: shouldInferEmptySubscription || !hasFlatSubscription ? totalLessons : rawTotalLessons,
-          remainingLessons:
-            shouldInferEmptySubscription || !hasFlatSubscription ? remainingLessons : rawRemainingLessons,
-          paid: hasRecordedPayment,
-          purchasedAt: String(c.purchasedAt || ''),
-          receiptUrl: String(c.receiptUrl || ''),
-          status: String(c.subscriptionStatus || c.status || 'Активен'),
-        }
-      : null
-
+  const flatSubscription = hasFlatSubscription
+    ? {
+        id: String(c.subscriptionId || `${c.id || 'client'}-subscription`),
+        clientId: String(c.id || ''),
+        totalLessons: rawTotalLessons,
+        remainingLessons: rawRemainingLessons,
+        paid: hasRecordedPayment,
+        purchasedAt: String(c.purchasedAt || ''),
+        receiptUrl: String(c.receiptUrl || ''),
+        status: String(c.subscriptionStatus || c.status || 'Активен'),
+      }
+    : null
   const subscription = c.subscription
     ? {
         id: String(c.subscription.id || `${c.id || 'client'}-subscription`),
         clientId: String(c.id || ''),
-        totalLessons: Number(c.subscription.totalLessons ?? 0) > 0 ? Number(c.subscription.totalLessons) : totalLessons,
-        remainingLessons:
-          Number(c.subscription.totalLessons ?? 0) > 0 || Number(c.subscription.remainingLessons ?? 0) > 0
-            ? Number(c.subscription.remainingLessons ?? 0)
-            : remainingLessons,
+        totalLessons: Number(c.subscription.totalLessons ?? 0),
+        remainingLessons: Number(c.subscription.remainingLessons ?? 0),
         paid: hasRecordedPayment,
         purchasedAt: String(c.subscription.purchasedAt || ''),
         receiptUrl: String(c.subscription.receiptUrl || ''),

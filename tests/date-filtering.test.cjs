@@ -1,5 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const { spawnSync } = require('node:child_process')
+const path = require('node:path')
 const {
   isLessonInWeek,
   isLessonOnDay,
@@ -45,4 +47,29 @@ test('recurring lesson resolves each displayed week and respects its start date'
   assert.equal(isLessonInWeek(started, secondWeek, new Date(2026, 9, 11)), true)
   assert.equal(isLessonOnDay(started, new Date(2026, 9, 9)), true)
   assert.equal(isLessonOnDay(started, new Date(2026, 8, 25)), false)
+})
+
+test('date-only and recurring lesson logic does not shift across supported time zones', () => {
+  const modulePath = path.resolve(__dirname, '..', '.test-dist', 'utils', 'date-core.js')
+  const script = `
+    const dates = require(${JSON.stringify(modulePath)});
+    const target = new Date(2026, 9, 2, 23, 30);
+    const result = {
+      dateOnly: dates.isLessonOnDay({ date: '2026-10-02T00:00:00.000Z', dayOfWeek: 'Пт' }, target),
+      recurring: dates.lessonOccurrenceDate(
+        { date: '2026-10-02', dayOfWeek: 'Пт', isRecurring: true },
+        new Date(2026, 8, 28),
+      ),
+    };
+    process.stdout.write(JSON.stringify(result));
+  `
+
+  for (const timezone of ['Europe/Moscow', 'America/Los_Angeles', 'Pacific/Auckland']) {
+    const result = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, TZ: timezone },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(JSON.parse(result.stdout), { dateOnly: true, recurring: '2026-10-02' })
+  }
 })

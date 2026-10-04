@@ -2,9 +2,6 @@ import { types, flow, Instance } from 'mobx-state-tree'
 import { AuthModel } from './models/Auth'
 import { apiClient } from '@/lib/api-client'
 
-const authLog = (event: string, details: Record<string, unknown> = {}): void => {
-  console.log('[lotos-auth] ' + event, details)
-}
 export const AuthStore = types
   .model('AuthStore', {
     user: types.maybeNull(AuthModel),
@@ -15,6 +12,9 @@ export const AuthStore = types
   })
   .actions((self) => ({
     init: flow(function* () {
+      // React Strict Mode runs mount effects twice in development. Do not
+      // start a second session probe while the first one is still pending.
+      if (self.isLoading || self.isInitialized) return
       self.isLoading = true
       try {
         const response: Awaited<ReturnType<typeof apiClient.session>> = yield apiClient.session()
@@ -43,13 +43,10 @@ export const AuthStore = types
       self.isLoading = true
       try {
         const response: Awaited<ReturnType<typeof apiClient.login>> = yield apiClient.login(username, password)
-        authLog('login.password.accepted')
         const verifiedSession: Awaited<ReturnType<typeof apiClient.session>> = yield apiClient.session()
         if (!verifiedSession.authenticated || !verifiedSession.user) {
-          authLog('login.session.rejected', { authenticated: verifiedSession.authenticated })
-          throw new Error('Сессия не подтверждена сервером. Проверьте GAS deployment и пользователя.')
+          throw new Error('Не удалось подтвердить сессию. Повторите вход.')
         }
-        authLog('login.session.verified', { role: verifiedSession.user.role })
         self.user = {
           id: response.user.id,
           username: response.user.username,
@@ -60,7 +57,6 @@ export const AuthStore = types
         self.isInitialized = true
         self.sessionVersion += 1
       } catch (error) {
-        authLog('login.failed', { message: error instanceof Error ? error.message : 'unknown' })
         throw error instanceof Error ? new Error(error.message) : new Error('Ошибка входа')
       } finally {
         self.isLoading = false

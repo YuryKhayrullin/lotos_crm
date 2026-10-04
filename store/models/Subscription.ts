@@ -19,13 +19,6 @@ export const SubscriptionModel = types
       return Number(self.remainingLessons)
     },
   }))
-  .actions((self) => ({
-    update(remainingLessons: number, receiptUrl: string, status: string) {
-      self.remainingLessons = remainingLessons
-      self.receiptUrl = receiptUrl
-      self.status = status
-    },
-  }))
 
 export type ISubscription = Instance<typeof SubscriptionModel>
 export type ISubscriptionSnapshot = SnapshotIn<typeof SubscriptionModel>

@@ -17,6 +17,7 @@ function apiWithFetch(fetch) {
     fetch,
     console: { log() {} },
     require: (name) => {
+      if (name === './dev-log') return { devLog() {} }
       assert.equal(name, './normalizers')
       return { normalizeClient: (value) => value, normalizeLesson: (value) => value }
     },
@@ -74,4 +75,33 @@ test('attendance batches more than 100 marks and reuses stable chunk IDs on retr
     ['attempt:0', 'attempt:1', 'attempt:0', 'attempt:1'],
   )
   assert.equal(saved.size, 101)
+})
+
+test('duplicate reads share one request and React cleanup does not abort it', async () => {
+  let calls = 0
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const fetch = async (_url, options) => {
+    calls += 1
+    assert.equal(options.signal, undefined)
+    await gate
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => [{ id: 'client-1' }],
+    }
+  }
+  const api = apiWithFetch(fetch)
+  const controller = new AbortController()
+  const first = api.fetchClients(controller.signal)
+  controller.abort()
+  const second = api.fetchClients()
+  release()
+
+  assert.deepEqual(await first, [{ id: 'client-1' }])
+  assert.deepEqual(await second, [{ id: 'client-1' }])
+  assert.equal(calls, 1)
 })

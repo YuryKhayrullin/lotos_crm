@@ -28,11 +28,18 @@ try {
   failures.push('GAS_WEBAPP_URL имеет некорректный формат')
 }
 
-if (!values.GAS_API_SECRET || values.GAS_API_SECRET.length < 32 || values.GAS_API_SECRET === 'insert_secret_key_here') {
-  failures.push('GAS_API_SECRET должен содержать минимум 32 символа')
+if (
+  !values.GAS_HMAC_SECRET ||
+  values.GAS_HMAC_SECRET.length < 32 ||
+  values.GAS_HMAC_SECRET === 'insert_secret_key_here'
+) {
+  failures.push('GAS_HMAC_SECRET должен содержать минимум 32 символа')
 }
 if (!values.SESSION_SECRET || values.SESSION_SECRET.length < 32 || values.SESSION_SECRET === 'insert_secret_key_here') {
   failures.push('SESSION_SECRET должен содержать минимум 32 символа')
+}
+if (values.NODE_ENV === 'production' && (!values.UPSTASH_REDIS_REST_URL || !values.UPSTASH_REDIS_REST_TOKEN)) {
+  failures.push('Для production нужны UPSTASH_REDIS_REST_URL и UPSTASH_REDIS_REST_TOKEN для лимитов входа')
 }
 
 if (failures.length) {

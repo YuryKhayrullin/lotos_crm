@@ -2,9 +2,6 @@
 
 import { createContext, useContext, ReactNode, useEffect } from 'react'
 import { getStore, type IRootStore } from './RootStore'
-import { ThemeProvider } from '@mui/material/styles'
-import CssBaseline from '@mui/material/CssBaseline'
-import { theme } from '@/lib/theme'
 
 const StoreContext = createContext<IRootStore | null>(null)
 
@@ -17,14 +14,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [store])
 
-  return (
-    <StoreContext.Provider value={store}>
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        {children}
-      </ThemeProvider>
-    </StoreContext.Provider>
-  )
+  return <StoreContext.Provider value={store}>{children}</StoreContext.Provider>
 }
 
 export function useStore() {

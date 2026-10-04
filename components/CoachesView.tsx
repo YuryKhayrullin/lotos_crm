@@ -7,12 +7,21 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { KeyRound, Link2, Plus, Trash2, UserRoundCheck } from 'lucide-react'
+import { CalendarDays, KeyRound, Link2, Phone, Plus, Trash2, UserRoundCheck } from 'lucide-react'
 import { apiClient, ApiError, CoachAccount } from '@/lib/api-client'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { formatBirthDate, formatPhone } from '@/lib/formatters'
 
 const store = getStore()
-const emptyCoachForm = { name: '', surname: '', branchId: '', username: '', password: '' }
+const emptyCoachForm = {
+  name: '',
+  surname: '',
+  phone: '',
+  birthDate: '',
+  branchId: '',
+  username: '',
+  password: '',
+}
 
 const branchLabel = (branchId: string | null) => {
   const branch = store.branches.find((item) => String(item.id) === String(branchId || ''))
@@ -31,6 +40,7 @@ export const CoachesView = observer(() => {
   const [passwords, setPasswords] = useState<Record<string, string>>({})
   const [accountsError, setAccountsError] = useState<string | null>(null)
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
 
   const linkedUserIds = new Set(store.coaches.map((coach) => coach.userId).filter(Boolean))
 
@@ -154,6 +164,14 @@ export const CoachesView = observer(() => {
       setFormError('Выберите филиал тренера')
       return
     }
+    if (formData.phone && formData.phone.replace(/\D/g, '').length < 11) {
+      setFormError('Введите полный номер телефона тренера')
+      return
+    }
+    if (formData.birthDate && !/^\d{2}\.\d{2}\.\d{4}$/.test(formData.birthDate)) {
+      setFormError('Дата рождения должна быть в формате ДД.ММ.ГГГГ')
+      return
+    }
     if ((formData.username && !formData.password) || (!formData.username && formData.password)) {
       setFormError('Для создания доступа укажите и логин, и пароль')
       return
@@ -162,11 +180,14 @@ export const CoachesView = observer(() => {
       setFormError('Временный пароль должен содержать не менее 8 символов')
       return
     }
+    setIsCreating(true)
     try {
       await store.createCoach({
         name: fullName,
         specialty: 'Тренер',
         branchId: formData.branchId,
+        phone: formData.phone,
+        birthDate: formData.birthDate,
         ...(formData.username ? { username: formData.username, password: formData.password } : {}),
       })
       setIsAddCoachOpen(false)
@@ -174,6 +195,8 @@ export const CoachesView = observer(() => {
       await loadAccounts()
     } catch (error) {
       setFormError(error instanceof ApiError ? error.message : 'Не удалось создать тренера')
+    } finally {
+      setIsCreating(false)
     }
   }
 
@@ -183,10 +206,8 @@ export const CoachesView = observer(() => {
         <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Тренеры</h2>
         {store.authStore.isAdmin && (
           <Dialog open={isAddCoachOpen} onOpenChange={handleAddDialogChange}>
-            <DialogTrigger asChild>
-              <Button className="rounded-full bg-cyan-500 hover:bg-cyan-600 text-white">
-                <Plus className="mr-2 size-4" /> Добавить тренера
-              </Button>
+            <DialogTrigger render={<Button className="rounded-full bg-cyan-500 hover:bg-cyan-600 text-white" />}>
+              <Plus className="mr-2 size-4" /> Добавить тренера
             </DialogTrigger>
             <DialogContent className="max-w-[450px] p-0 rounded-3xl overflow-hidden border-pink-100 bg-white">
               <DialogHeader className="p-8 border-b border-pink-50 bg-gradient-to-br from-cyan-50 via-white to-pink-50/50">
@@ -206,6 +227,21 @@ export const CoachesView = observer(() => {
                   onChange={(event) => setFormData({ ...formData, surname: event.target.value })}
                   className="rounded-xl h-12 border-cyan-100 focus:border-cyan-400"
                 />
+                <Input
+                  inputMode="tel"
+                  placeholder="Телефон"
+                  value={formData.phone}
+                  onChange={(event) => setFormData({ ...formData, phone: formatPhone(event.target.value) })}
+                  className="rounded-xl h-12 border-cyan-100 focus:border-cyan-400"
+                />
+                <Input
+                  inputMode="numeric"
+                  placeholder="Дата рождения, ДД.ММ.ГГГГ"
+                  value={formData.birthDate}
+                  maxLength={10}
+                  onChange={(event) => setFormData({ ...formData, birthDate: formatBirthDate(event.target.value) })}
+                  className="rounded-xl h-12 border-cyan-100 focus:border-cyan-400"
+                />
                 <Select
                   value={formData.branchId}
                   onValueChange={(value) => value && setFormData({ ...formData, branchId: value })}
@@ -221,6 +257,11 @@ export const CoachesView = observer(() => {
                     ))}
                   </SelectContent>
                 </Select>
+                {!store.selectedBranchId && (
+                  <p className="-mt-3 text-xs text-amber-700">
+                    В режиме «Все филиалы» филиал тренера нужно выбрать явно.
+                  </p>
+                )}
                 <div className="border-t border-slate-100 pt-5">
                   <p className="mb-3 text-sm font-semibold text-slate-800">Доступ в CRM (необязательно)</p>
                   <div className="grid gap-3">
@@ -244,9 +285,10 @@ export const CoachesView = observer(() => {
                 </div>
                 <Button
                   onClick={() => void handleSubmit()}
+                  disabled={isCreating}
                   className="w-full rounded-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-12"
                 >
-                  Сохранить
+                  {isCreating ? 'Сохраняем…' : 'Сохранить'}
                 </Button>
               </div>
             </DialogContent>
@@ -364,12 +406,37 @@ export const CoachesView = observer(() => {
                       <p className="text-sm text-slate-500">{coach.specialty}</p>
                     </div>
                   </div>
+                  {(coach.phone || coach.birthDate) && (
+                    <div className="grid gap-2 text-sm text-slate-600">
+                      {coach.phone && (
+                        <p className="flex items-center gap-2">
+                          <Phone className="size-4 text-cyan-600" /> {coach.phone}
+                        </p>
+                      )}
+                      {coach.birthDate && (
+                        <p className="flex items-center gap-2">
+                          <CalendarDays className="size-4 text-cyan-600" /> {coach.birthDate}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   {store.authStore.isAdmin && (
                     <div className="grid gap-2 border-t border-slate-100 pt-4">
                       {linkedAccount ? (
-                        <p className="text-sm text-slate-600">
-                          Доступ: <span className="font-medium">{linkedAccount.username}</span> · {linkedAccount.status}
-                        </p>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-sm text-slate-600">
+                            Доступ: <span className="font-medium">{linkedAccount.username}</span> ·{' '}
+                            {linkedAccount.status}
+                          </p>
+                          <Button
+                            variant={linkedAccount.status === 'Активен' ? 'destructive' : 'outline'}
+                            size="sm"
+                            disabled={busyAccountId === linkedAccount.id}
+                            onClick={() => void changeAccountStatus(linkedAccount)}
+                          >
+                            {linkedAccount.status === 'Активен' ? 'Отключить доступ' : 'Активировать доступ'}
+                          </Button>
+                        </div>
                       ) : linkableAccounts.length > 0 ? (
                         <>
                           <p className="text-sm text-amber-700">Аккаунт ещё не связан с карточкой.</p>

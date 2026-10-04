@@ -7,7 +7,17 @@ import { Badge } from '@/components/ui/badge'
 import { AttendanceModal } from './AttendanceModal'
 import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import {
+  CalendarDays,
+  CalendarX,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  MapPin,
+  Plus,
+  RotateCcw,
+  Users,
+} from 'lucide-react'
 import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay, lessonOccurrenceDate } from '@/lib/utils/date'
 import { RoleGuard } from './RoleGuard'
 
@@ -75,57 +85,89 @@ export const ScheduleView = observer(() => {
   }, [sortedBranchLessons, viewMode, startOfWeek, endOfWeek, selectedDayData])
 
   const branch = store.currentBranch
+  const selectedDateLabel = selectedDayData
+    ? selectedDayData.fullDate.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })
+    : ''
 
   const weekRange = `${startOfWeek.getDate()} ${startOfWeek.toLocaleString('ru-RU', { month: 'short' })} – ${endOfWeek.getDate()} ${endOfWeek.toLocaleString('ru-RU', { month: 'short' })} ${endOfWeek.getFullYear()}`
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100 gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
-            Расписание · {branch ? branch.name : 'Филиал'}
-          </h2>
-          <div className="flex items-center gap-2 mt-2">
-            <Button variant="ghost" size="sm" onClick={() => setWeekOffset((prev) => prev - 1)}>
-              <ChevronLeft className="size-4" />
-            </Button>
-            <p className="text-sm text-slate-500">Неделя {weekRange}</p>
-            <Button variant="ghost" size="sm" onClick={() => setWeekOffset((prev) => prev + 1)}>
-              <ChevronRight className="size-4" />
-            </Button>
+      <div className="overflow-hidden rounded-3xl border border-cyan-100 bg-white shadow-sm">
+        <div className="flex flex-col gap-5 bg-gradient-to-br from-cyan-50 via-white to-sky-50/70 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+          <div className="flex min-w-0 items-center gap-4">
+            <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-600 text-white shadow-lg shadow-cyan-200">
+              <CalendarDays className="size-6" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-700">Расписание</p>
+              <h2 className="truncate text-2xl font-bold tracking-tight text-slate-950">
+                {branch ? branch.name : 'Выберите филиал'}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {viewMode === 'день' ? selectedDateLabel : `${lessons.length} занятий на неделе`}
+              </p>
+            </div>
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+            <div className="flex rounded-xl bg-slate-100 p-1">
+              {(['день', 'неделя'] as const).map((mode) => (
+                <Button
+                  key={mode}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setViewMode(mode)}
+                  className={
+                    viewMode === mode
+                      ? 'rounded-lg bg-white text-cyan-700 shadow-sm hover:bg-white'
+                      : 'rounded-lg text-slate-500'
+                  }
+                >
+                  {mode === 'день' ? 'День' : 'Неделя'}
+                </Button>
+              ))}
+            </div>
+            <RoleGuard roles={['admin']}>
+              <Button
+                onClick={() => setIsCreateLessonOpen(true)}
+                className="h-10 flex-1 rounded-xl bg-cyan-600 px-4 text-white shadow-sm hover:bg-cyan-700 sm:flex-none"
+              >
+                <Plus className="mr-1.5 size-4" /> Новое занятие
+              </Button>
+            </RoleGuard>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <RoleGuard roles={['admin']}>
-            <Button
-              onClick={() => setIsCreateLessonOpen(true)}
-              className="rounded-xl bg-cyan-500 hover:bg-cyan-600 text-white shadow-sm"
-            >
-              <Plus className="size-4 mr-2" /> Занятие
-            </Button>
-          </RoleGuard>
-          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
-            <Button
-              variant={viewMode === 'день' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setViewMode('день')}
-              className={
-                viewMode === 'день' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'
-              }
-            >
-              День
-            </Button>
-            <Button
-              variant={viewMode === 'неделя' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setViewMode('неделя')}
-              className={
-                viewMode === 'неделя' ? 'bg-cyan-500 text-white rounded-lg shadow-sm' : 'text-slate-600 rounded-lg'
-              }
-            >
-              Неделя
-            </Button>
+        <div className="flex items-center justify-between border-t border-cyan-100/70 px-3 py-2 sm:px-5">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Предыдущая неделя"
+            onClick={() => setWeekOffset((prev) => prev - 1)}
+            className="rounded-xl text-slate-500 hover:text-cyan-700"
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          <div className="flex items-center gap-2 text-center text-sm font-medium text-slate-600">
+            <span>{weekRange}</span>
+            {weekOffset !== 0 && (
+              <button
+                type="button"
+                onClick={() => setWeekOffset(0)}
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-cyan-700 hover:bg-cyan-50"
+              >
+                <RotateCcw className="size-3" /> Сегодня
+              </button>
+            )}
           </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Следующая неделя"
+            onClick={() => setWeekOffset((prev) => prev + 1)}
+            className="rounded-xl text-slate-500 hover:text-cyan-700"
+          >
+            <ChevronRight className="size-4" />
+          </Button>
         </div>
       </div>
 
@@ -137,7 +179,7 @@ export const ScheduleView = observer(() => {
               setSelectedDay(d.key)
               setViewMode('день')
             }}
-            className={`px-5 py-2.5 rounded-2xl font-semibold text-sm transition-all whitespace-nowrap shadow-sm border ${
+            className={`min-w-[74px] rounded-2xl border px-4 py-2.5 text-sm font-semibold whitespace-nowrap shadow-sm transition-all ${
               viewMode === 'день' && selectedDay === d.key
                 ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
                 : isToday(d.fullDate)
@@ -161,8 +203,22 @@ export const ScheduleView = observer(() => {
 
       <div className="grid gap-4">
         {lessons.length === 0 ? (
-          <Card className="rounded-2xl border-slate-100 shadow-sm p-12 text-center">
-            <p className="text-slate-500">Нет занятий на выбранный день</p>
+          <Card className="rounded-3xl border-dashed border-cyan-200 bg-cyan-50/30 p-8 text-center shadow-none sm:p-12">
+            <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-white text-cyan-600 shadow-sm">
+              <CalendarX className="size-6" />
+            </div>
+            <h3 className="mt-4 font-bold text-slate-900">Занятий пока нет</h3>
+            <p className="mx-auto mt-1 max-w-sm text-sm text-slate-500">
+              {viewMode === 'день' ? `На ${selectedDateLabel} ничего не запланировано` : 'На этой неделе занятий нет'}
+            </p>
+            <RoleGuard roles={['admin']}>
+              <Button
+                onClick={() => setIsCreateLessonOpen(true)}
+                className="mt-5 rounded-xl bg-cyan-600 text-white hover:bg-cyan-700"
+              >
+                <Plus className="mr-1.5 size-4" /> Добавить занятие
+              </Button>
+            </RoleGuard>
           </Card>
         ) : (
           lessons.map((lesson) => {
@@ -172,30 +228,48 @@ export const ScheduleView = observer(() => {
             return (
               <Card
                 key={lesson.id}
-                className="rounded-2xl border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
+                className="group cursor-pointer overflow-hidden rounded-2xl border-slate-100 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cyan-200 hover:shadow-md"
                 onClick={() => {
                   setSelectedOccurrenceDate(occurrenceDate)
                   setSelectedLesson(lesson)
                 }}
               >
-                <CardContent className="p-5 flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="w-1.5 h-12 bg-cyan-500 rounded-full group-hover:bg-pink-400 transition-colors" />
-                    <div>
-                      <p className="text-lg font-bold text-cyan-950">{parseTimeToHHMM(lesson.time)}</p>
-                      <p className="text-xs font-medium text-cyan-600 mb-1">{cleanDate(occurrenceDate)}</p>
-                      <p className="text-sm font-semibold text-slate-800">{lesson.title}</p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        {lesson.coachName} · {lesson.pool}
-                      </p>
+                <CardContent className="flex items-center justify-between gap-4 p-4 sm:p-5">
+                  <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+                    <div
+                      className={`h-16 w-1.5 shrink-0 rounded-full transition-colors ${
+                        lesson.category === 'синхронное плавание'
+                          ? 'bg-pink-400 group-hover:bg-pink-500'
+                          : 'bg-cyan-500 group-hover:bg-cyan-600'
+                      }`}
+                    />
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <p className="text-xl font-extrabold tabular-nums text-cyan-950">
+                          {parseTimeToHHMM(lesson.time)}
+                        </p>
+                        <p className="text-xs font-semibold text-cyan-700">{cleanDate(occurrenceDate)}</p>
+                      </div>
+                      <p className="mt-1 truncate font-semibold text-slate-900">{lesson.title}</p>
+                      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+                        <span className="inline-flex items-center gap-1">
+                          <Users className="size-3.5" /> {lesson.coachName || 'Тренер не назначен'}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <MapPin className="size-3.5" /> {lesson.pool || 'Бассейн'}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <Clock3 className="size-3.5" /> {lesson.duration || '1 час'}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4">
-                    <Badge className="bg-cyan-50 text-cyan-700 font-bold px-3 py-1 text-sm rounded-xl">
+                  <div className="flex shrink-0 items-center gap-2 sm:gap-4">
+                    <Badge className="rounded-xl bg-cyan-50 px-2.5 py-1 text-xs font-bold text-cyan-700 sm:text-sm">
                       До {maxCap}
                     </Badge>
-                    <div className="text-slate-400 group-hover:text-cyan-600 transition-colors font-bold text-xl px-2">
+                    <div className="px-1 text-xl font-bold text-slate-300 transition-colors group-hover:text-cyan-600 sm:px-2">
                       ›
                     </div>
                   </div>

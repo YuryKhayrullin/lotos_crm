@@ -11,14 +11,18 @@ export const cleanTime = (timeStr?: string | null): string => {
   }
 }
 
-export const formatPhone = (value: string) => {
-  const phone = value.replace(/\D/g, '').slice(0, 11)
-  if (!phone) return ''
-  if (phone.length === 1) return `+7 (${phone.replace('7', '')}`
-  if (phone.length < 5) return `+7 (${phone.slice(1)}`
-  if (phone.length < 8) return `+7 (${phone.slice(1, 4)}) ${phone.slice(4)}`
-  if (phone.length < 10) return `+7 (${phone.slice(1, 4)}) ${phone.slice(4, 7)}-${phone.slice(7)}`
-  return `+7 (${phone.slice(1, 4)}) ${phone.slice(4, 7)}-${phone.slice(7, 9)}-${phone.slice(9)}`
+export const formatPhone = (value: string): string => {
+  const digits = value.replace(/\D/g, '')
+  if (!digits) return ''
+
+  const national = (/^[78]/.test(digits) ? digits.slice(1) : digits).slice(0, 10)
+  if (!national) return '+7 ('
+  if (national.length < 3) return `+7 (${national}`
+  if (national.length === 3) return `+7 (${national})`
+  if (national.length < 6) return `+7 (${national.slice(0, 3)}) ${national.slice(3)}`
+  if (national.length === 6) return `+7 (${national.slice(0, 3)}) ${national.slice(3, 6)}`
+  if (national.length < 8) return `+7 (${national.slice(0, 3)}) ${national.slice(3, 6)}-${national.slice(6)}`
+  return `+7 (${national.slice(0, 3)}) ${national.slice(3, 6)}-${national.slice(6, 8)}-${national.slice(8)}`
 }
 
 export const formatBirthDate = (value: string) => {
@@ -36,5 +40,5 @@ export const calculateAge = (birthDate: string) => {
   let age = today.getFullYear() - year
   const m = today.getMonth() + 1 - month
   if (m < 0 || (m === 0 && today.getDate() < day)) age--
-  return `${age} лет`
+  return `${Math.max(age, 0)} лет`
 }

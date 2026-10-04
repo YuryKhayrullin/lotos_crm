@@ -65,31 +65,6 @@ export const ClientModel = types
         self.assignedLessonId = null
       }
     },
-    updateSubscription(remaining: number, total: number, receiptUrl: string, status: 'Активен' | 'Пауза') {
-      if (!self.subscription) {
-        self.subscription = {
-          id: Date.now().toString(),
-          clientId: self.id,
-          totalLessons: total,
-          remainingLessons: remaining,
-          paid: true,
-          purchasedAt: new Date().toISOString(),
-          receiptUrl,
-        } as any
-      } else {
-        self.subscription.remainingLessons = remaining
-        self.subscription.totalLessons = total
-        self.subscription.paid = true
-        ;(self.subscription as any).receiptUrl = receiptUrl
-      }
-      self.status = status
-    },
-    consumeLesson(newRemaining: number, newStatus: 'Активен' | 'Пауза') {
-      if (self.subscription) {
-        self.subscription.remainingLessons = newRemaining
-      }
-      self.status = newStatus
-    },
   }))
 
 export type IClient = Instance<typeof ClientModel>

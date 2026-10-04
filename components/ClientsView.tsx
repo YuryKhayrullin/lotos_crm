@@ -1,10 +1,12 @@
 'use client'
 
 import { observer } from 'mobx-react-lite'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore } from '@/store/StoreProvider'
-import { CreateClientDto, IClient } from '@/store/models'
-import { apiClient, createRequestId } from '@/lib/api-client'
+import { CreateClientDto } from '@/store/models'
+import { calculateAge, formatBirthDate, formatPhone } from '@/lib/formatters'
+import { normalizeClient } from '@/lib/normalizers'
+import { apiClient, createRequestId, type LessonLedgerDiscrepancy } from '@/lib/api-client'
 import { packagePrice, calculatePaymentLessons } from '@/lib/subscription-pricing'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -23,32 +25,15 @@ import {
   CreditCard,
   History,
   ArrowUpRight,
+  ClipboardCheck,
   Loader2,
+  Settings2,
+  Archive,
+  Pencil,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-
-const formatPhone = (value: string) => {
-  const phone = value.replace(/\D/g, '').slice(0, 11)
-  if (!phone) return ''
-  const digits = phone.startsWith('7') ? phone : `7${phone}`
-  return `+7 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7, 9)}-${digits.slice(9, 11)}`.trim()
-}
-
-const formatBirthDate = (value: string) =>
-  value
-    .replace(/\D/g, '')
-    .replace(/^(\d{2})(\d)/, '$1.$2')
-    .replace(/\.(\d{2})(\d)/, '.$1.$2')
-    .slice(0, 10)
-
-const calculateAge = (birthDate: string) => {
-  const [day, month, year] = birthDate.split('.').map(Number)
-  if (!day || !month || !year) return '0 лет'
-  const today = new Date()
-  let age = today.getFullYear() - year
-  if (today.getMonth() + 1 < month || (today.getMonth() + 1 === month && today.getDate() < day)) age--
-  return `${Math.max(age, 0)} лет`
-}
 
 const statusStyle = (status: string) =>
   ({
@@ -69,6 +54,21 @@ type FormState = {
   branchId: string
 }
 
+type EditFormState = Pick<
+  FormState,
+  'childName' | 'parentName' | 'phone' | 'email' | 'birthDate' | 'category' | 'lessonsPerWeek'
+>
+
+const emptyEditForm: EditFormState = {
+  childName: '',
+  parentName: '',
+  phone: '',
+  email: '',
+  birthDate: '',
+  category: '',
+  lessonsPerWeek: '',
+}
+
 const emptyForm = (branchId = ''): FormState => ({
   childName: '',
   parentName: '',
@@ -81,12 +81,90 @@ const emptyForm = (branchId = ''): FormState => ({
   branchId,
 })
 
+type ClientListItem = Omit<
+  ReturnType<typeof normalizeClient>,
+  | 'id'
+  | 'childName'
+  | 'parentName'
+  | 'phone'
+  | 'email'
+  | 'birthDate'
+  | 'age'
+  | 'branchId'
+  | 'status'
+  | 'category'
+  | 'lessonsPerWeek'
+  | 'initials'
+  | 'paidAmount'
+  | 'paymentBalance'
+  | 'assignedLessonId'
+  | 'assignedLessonIds'
+  | 'attendanceHistory'
+> & {
+  id: string
+  childName: string
+  parentName: string
+  phone: string
+  email: string
+  birthDate: string
+  age: string
+  branchId: string
+  status: 'Активен' | 'Пауза' | 'Архив'
+  category: 'плавание' | 'синхронное плавание'
+  lessonsPerWeek: number
+  initials: string
+  paidAmount: number
+  paymentBalance: number
+  assignedLessonId: string | null
+  assignedLessonIds: readonly string[]
+  attendanceHistory: readonly unknown[]
+  remainingLessons: number
+  totalLessons: number
+  isAssignedTo: (lessonId: string) => boolean
+}
+
+const toClientListItem = (client: ReturnType<typeof normalizeClient>): ClientListItem => {
+  const assignedLessonIds = client.assignedLessonIds ?? []
+  return {
+    ...client,
+    id: String(client.id || ''),
+    childName: String(client.childName || ''),
+    parentName: String(client.parentName || ''),
+    phone: String(client.phone || ''),
+    email: String(client.email || ''),
+    birthDate: String(client.birthDate || ''),
+    age: String(client.age || '0 лет'),
+    branchId: String(client.branchId || ''),
+    status: client.status === 'Пауза' || client.status === 'Архив' ? client.status : 'Активен',
+    category: client.category === 'синхронное плавание' ? 'синхронное плавание' : 'плавание',
+    lessonsPerWeek: Number(client.lessonsPerWeek || 1),
+    initials: String(client.initials || ''),
+    paidAmount: Number(client.paidAmount || 0),
+    paymentBalance: Number(client.paymentBalance || 0),
+    assignedLessonId: client.assignedLessonId ?? null,
+    assignedLessonIds,
+    attendanceHistory: client.attendanceHistory ?? [],
+    remainingLessons: Number(client.subscription?.remainingLessons ?? 0),
+    totalLessons: Number(client.subscription?.totalLessons ?? 0),
+    isAssignedTo: (lessonId: string) => assignedLessonIds.includes(lessonId) || client.assignedLessonId === lessonId,
+  }
+}
+
+const CLIENT_PAGE_SIZE = 100
+
 export const ClientsView = observer(() => {
   const store = useStore()
-  const clients = store.branchClients
+  const [clients, setClients] = useState<ClientListItem[]>([])
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [isListLoading, setIsListLoading] = useState(false)
+  const [listError, setListError] = useState('')
+  const [reloadVersion, setReloadVersion] = useState(0)
+  const clientRequestVersion = useRef(0)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'Активен' | 'Пауза' | 'Архив'>('all')
-  const [sortConfig, setSortConfig] = useState<{ key: keyof IClient; dir: 'asc' | 'desc' }>({
+  const [sortConfig, setSortConfig] = useState<{ key: 'childName' | 'paidAmount'; dir: 'asc' | 'desc' }>({
     key: 'childName',
     dir: 'asc',
   })
@@ -96,6 +174,7 @@ export const ClientsView = observer(() => {
     emptyForm(store.selectedBranchId || String(store.branches[0]?.id || '')),
   )
   const [formError, setFormError] = useState('')
+  const [isCreating, setIsCreating] = useState(false)
   const [isPaymentOpen, setIsPaymentOpen] = useState(false)
   const [paymentAmount, setPaymentAmount] = useState('')
   const [paymentComment, setPaymentComment] = useState('')
@@ -112,37 +191,157 @@ export const ClientsView = observer(() => {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [paymentHistory, setPaymentHistory] = useState<Array<Record<string, unknown>>>([])
   const [lessonLedger, setLessonLedger] = useState<Array<Record<string, unknown>>>([])
+  const [ledgerAudit, setLedgerAudit] = useState<LessonLedgerDiscrepancy | null>(null)
+  const [ledgerAuditChecked, setLedgerAuditChecked] = useState(false)
+  const [auditRepairReason, setAuditRepairReason] = useState('')
+  const [auditRepairConfirmed, setAuditRepairConfirmed] = useState(false)
+  const [auditRepairError, setAuditRepairError] = useState('')
+  const [auditRepairLoading, setAuditRepairLoading] = useState(false)
+  const [auditRepairAttempt, setAuditRepairAttempt] = useState<{
+    clientId: string
+    expectedRemainingLessons: number
+    expectedTotalLessons: number
+    reason: string
+    requestId: string
+  } | null>(null)
+  const [isAdjustmentOpen, setIsAdjustmentOpen] = useState(false)
+  const [adjustmentDelta, setAdjustmentDelta] = useState('')
+  const [adjustmentReason, setAdjustmentReason] = useState('')
+  const [adjustmentError, setAdjustmentError] = useState('')
+  const [adjustmentLoading, setAdjustmentLoading] = useState(false)
+  const [adjustmentAttempt, setAdjustmentAttempt] = useState<{
+    clientId: string
+    lessonsDelta: number
+    reason: string
+    requestId: string
+  } | null>(null)
+  const [isEditOpen, setIsEditOpen] = useState(false)
+  const [editForm, setEditForm] = useState<EditFormState>(emptyEditForm)
+  const [editError, setEditError] = useState('')
+  const [isEditing, setIsEditing] = useState(false)
+  const [clientActionError, setClientActionError] = useState('')
+  const [clientActionLoading, setClientActionLoading] = useState(false)
+
+  const branchId = store.authStore.isAdmin ? store.selectedBranchId || undefined : undefined
+  const refreshClients = () => setReloadVersion((version) => version + 1)
+  const openClientProfile = (clientId: string) => {
+    setClientActionError('')
+    setPaymentHistory([])
+    setLessonLedger([])
+    setHistoryLoading(true)
+    setSelectedClientId(clientId)
+  }
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void store.clientStore.setFilters(search, statusFilter)
-    }, 250)
-    return () => window.clearTimeout(timer)
-  }, [search, statusFilter, store.clientStore])
+    const controller = new AbortController()
+    const requestVersion = ++clientRequestVersion.current
+    const timer = window.setTimeout(
+      () => {
+        setIsListLoading(true)
+        setListError('')
+        void apiClient
+          .fetchClientsPage(
+            1,
+            CLIENT_PAGE_SIZE,
+            controller.signal,
+            branchId,
+            search.trim() || undefined,
+            statusFilter === 'all' ? undefined : statusFilter,
+            sortConfig.key,
+            sortConfig.dir,
+          )
+          .then((nextPage) => {
+            if (controller.signal.aborted || requestVersion !== clientRequestVersion.current) return
+            setClients(nextPage.items.map(toClientListItem))
+            setPage(nextPage.page)
+            setTotal(nextPage.total)
+            setHasMore(nextPage.hasMore)
+          })
+          .catch((error) => {
+            if (controller.signal.aborted || requestVersion !== clientRequestVersion.current) return
+            setListError(error instanceof Error ? error.message : 'Не удалось загрузить клиентов')
+            setClients([])
+            setTotal(0)
+            setHasMore(false)
+          })
+          .finally(() => {
+            if (!controller.signal.aborted && requestVersion === clientRequestVersion.current) setIsListLoading(false)
+          })
+      },
+      search.trim() ? 250 : 0,
+    )
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [branchId, reloadVersion, search, sortConfig, statusFilter])
 
-  const selectedClient = selectedClientId
-    ? store.clientStore.clients.find((client) => client.id === selectedClientId) || null
-    : null
+  const loadNextPage = async () => {
+    if (isListLoading || !hasMore) return
+    const requestVersion = ++clientRequestVersion.current
+    setIsListLoading(true)
+    setListError('')
+    try {
+      const nextPage = await apiClient.fetchClientsPage(
+        page + 1,
+        CLIENT_PAGE_SIZE,
+        undefined,
+        branchId,
+        search.trim() || undefined,
+        statusFilter === 'all' ? undefined : statusFilter,
+        sortConfig.key,
+        sortConfig.dir,
+      )
+      if (requestVersion !== clientRequestVersion.current) return
+      setClients((current) => [...current, ...nextPage.items.map(toClientListItem)])
+      setPage(nextPage.page)
+      setTotal(nextPage.total)
+      setHasMore(nextPage.hasMore)
+    } catch (error) {
+      if (requestVersion === clientRequestVersion.current)
+        setListError(error instanceof Error ? error.message : 'Не удалось загрузить клиентов')
+    } finally {
+      if (requestVersion === clientRequestVersion.current) setIsListLoading(false)
+    }
+  }
+
+  const selectedClient = selectedClientId ? clients.find((client) => client.id === selectedClientId) || null : null
+  const canDeleteSelected = Boolean(
+    selectedClient &&
+    !historyLoading &&
+    ledgerAuditChecked &&
+    paymentHistory.length === 0 &&
+    lessonLedger.length === 0 &&
+    selectedClient.attendanceHistory.length === 0 &&
+    selectedClient.assignedLessonIds.length === 0 &&
+    selectedClient.paidAmount === 0 &&
+    selectedClient.totalLessons === 0,
+  )
 
   useEffect(() => {
     if (!selectedClient || !store.authStore.isAdmin) {
       setPaymentHistory([])
       setLessonLedger([])
+      setLedgerAudit(null)
+      setLedgerAuditChecked(false)
       return
     }
     let cancelled = false
     setHistoryLoading(true)
-    void apiClient
-      .getClientHistory(selectedClient.id)
-      .then((history) => {
+    setLedgerAuditChecked(false)
+    void Promise.all([apiClient.getClientHistory(selectedClient.id), apiClient.auditLessonLedger(selectedClient.id)])
+      .then(([history, audit]) => {
         if (cancelled) return
         setPaymentHistory(history.payments)
         setLessonLedger(history.ledger)
+        setLedgerAudit(audit.discrepancies[0] || null)
+        setLedgerAuditChecked(true)
       })
       .catch(() => {
         if (!cancelled) {
           setPaymentHistory([])
           setLessonLedger([])
+          setLedgerAudit(null)
         }
       })
       .finally(() => {
@@ -196,19 +395,27 @@ export const ClientsView = observer(() => {
       )
       setPaymentAttempt(null)
       setIsPaymentOpen(false)
-      await store.clientStore.loadClients()
-      const history = await apiClient.getClientHistory(attempt.clientId)
+      refreshClients()
+      const [history, audit] = await Promise.all([
+        apiClient.getClientHistory(attempt.clientId),
+        apiClient.auditLessonLedger(attempt.clientId),
+      ])
       setPaymentHistory(history.payments)
       setLessonLedger(history.ledger)
+      setLedgerAudit(audit.discrepancies[0] || null)
+      setLedgerAuditChecked(true)
     } catch (error) {
       // A lost HTTP response is not proof that Sheets rejected the payment.
       const history = await apiClient.getClientHistory(attempt.clientId).catch(() => null)
       if (history?.payments.some((payment) => String(payment.requestId) === attempt.requestId)) {
         setPaymentAttempt(null)
         setIsPaymentOpen(false)
+        const audit = await apiClient.auditLessonLedger(attempt.clientId).catch(() => null)
         setPaymentHistory(history.payments)
         setLessonLedger(history.ledger)
-        await store.clientStore.loadClients()
+        setLedgerAudit(audit?.discrepancies[0] || null)
+        setLedgerAuditChecked(Boolean(audit))
+        refreshClients()
       } else {
         setPaymentError(error instanceof Error ? error.message : 'Не удалось сохранить платёж')
       }
@@ -216,27 +423,203 @@ export const ClientsView = observer(() => {
       setPaymentLoading(false)
     }
   }
-  const filteredClients = useMemo(
-    () =>
-      [...clients]
-        .filter(
-          (client) =>
-            !search ||
-            [client.childName, client.parentName, client.phone].some((value) =>
-              value.toLowerCase().includes(search.toLowerCase()),
-            ),
-        )
-        .filter((client) => statusFilter === 'all' || client.status === statusFilter)
-        .sort((a, b) => {
-          const result = String(a[sortConfig.key] ?? '').localeCompare(String(b[sortConfig.key] ?? ''), 'ru', {
-            numeric: true,
-          })
-          return sortConfig.dir === 'asc' ? result : -result
-        }),
-    [clients, search, statusFilter, sortConfig],
-  )
+  const openAdjustment = () => {
+    if (!selectedClient) return
+    setAdjustmentDelta('')
+    setAdjustmentReason('')
+    setAdjustmentError('')
+    setAdjustmentAttempt(null)
+    setIsAdjustmentOpen(true)
+  }
 
-  const toggleSort = (key: keyof IClient) =>
+  const openEdit = () => {
+    if (!selectedClient) return
+    setEditForm({
+      childName: selectedClient.childName,
+      parentName: selectedClient.parentName,
+      phone: selectedClient.phone,
+      email: selectedClient.email,
+      birthDate: selectedClient.birthDate,
+      category: selectedClient.category,
+      lessonsPerWeek: String(selectedClient.lessonsPerWeek),
+    })
+    setEditError('')
+    setIsEditOpen(true)
+  }
+
+  const updateEditForm = (field: keyof EditFormState, value: string) =>
+    setEditForm((current) => ({ ...current, [field]: value }))
+
+  const submitEdit = async () => {
+    if (!selectedClient || isEditing) return
+    if (!editForm.childName.trim() || !editForm.parentName.trim()) {
+      setEditError('Укажите имя ребёнка и родителя')
+      return
+    }
+    if (editForm.phone.replace(/\D/g, '').length < 11) {
+      setEditError('Введите полный номер телефона')
+      return
+    }
+    if (!editForm.category || !editForm.lessonsPerWeek) {
+      setEditError('Выберите секцию и количество занятий в неделю')
+      return
+    }
+    if (editForm.birthDate && !/^\d{2}\.\d{2}\.\d{4}$/.test(editForm.birthDate)) {
+      setEditError('Дата должна быть в формате ДД.ММ.ГГГГ')
+      return
+    }
+    setIsEditing(true)
+    setEditError('')
+    try {
+      await apiClient.updateClient(selectedClient.id, {
+        childName: editForm.childName.trim(),
+        parentName: editForm.parentName.trim(),
+        phone: editForm.phone,
+        email: editForm.email.trim(),
+        birthDate: editForm.birthDate,
+        age: calculateAge(editForm.birthDate),
+        category: editForm.category,
+        lessonsPerWeek: Number(editForm.lessonsPerWeek),
+        initials: editForm.childName
+          .trim()
+          .split(/\s+/)
+          .map((part) => part[0])
+          .join('')
+          .slice(0, 2)
+          .toUpperCase(),
+      })
+      setIsEditOpen(false)
+      setClientActionError('')
+      refreshClients()
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : 'Не удалось сохранить изменения')
+    } finally {
+      setIsEditing(false)
+    }
+  }
+
+  const changeClientArchiveStatus = async (archive: boolean) => {
+    if (!selectedClient || clientActionLoading) return
+    const message = archive
+      ? `Переместить «${selectedClient.childName}» в архив? Клиент исчезнет из roster, но история и финансы сохранятся.`
+      : `Вернуть «${selectedClient.childName}» в активные клиенты?`
+    if (!window.confirm(message)) return
+    setClientActionLoading(true)
+    setClientActionError('')
+    try {
+      await apiClient.updateClient(selectedClient.id, { status: archive ? 'Архив' : 'Активен' })
+      setSelectedClientId(null)
+      refreshClients()
+    } catch (error) {
+      setClientActionError(error instanceof Error ? error.message : 'Не удалось изменить статус клиента')
+    } finally {
+      setClientActionLoading(false)
+    }
+  }
+
+  const deleteEmptyClient = async () => {
+    if (!selectedClient || clientActionLoading || !canDeleteSelected) return
+    if (
+      !window.confirm(
+        `Безвозвратно удалить пустую карточку «${selectedClient.childName}»? Это разрешено только если нет оплат, посещений и связи с расписанием.`,
+      )
+    )
+      return
+    setClientActionLoading(true)
+    setClientActionError('')
+    try {
+      await apiClient.deleteClient(selectedClient.id)
+      setSelectedClientId(null)
+      refreshClients()
+    } catch (error) {
+      setClientActionError(error instanceof Error ? error.message : 'Не удалось удалить карточку')
+    } finally {
+      setClientActionLoading(false)
+    }
+  }
+
+  const refreshSelectedAccounting = async (clientId: string) => {
+    const [history, audit] = await Promise.all([
+      apiClient.getClientHistory(clientId),
+      apiClient.auditLessonLedger(clientId),
+    ])
+    setPaymentHistory(history.payments)
+    setLessonLedger(history.ledger)
+    setLedgerAudit(audit.discrepancies[0] || null)
+    setLedgerAuditChecked(true)
+  }
+
+  const submitAdjustment = async () => {
+    if (!selectedClient || adjustmentLoading) return
+    const lessonsDelta = Number(adjustmentDelta)
+    if (!adjustmentAttempt && (!Number.isInteger(lessonsDelta) || lessonsDelta === 0 || Math.abs(lessonsDelta) > 100)) {
+      setAdjustmentError('Укажите целую корректировку от -100 до 100 занятий')
+      return
+    }
+    if (!adjustmentAttempt && !adjustmentReason.trim()) {
+      setAdjustmentError('Укажите обязательную причину корректировки')
+      return
+    }
+    const attempt =
+      adjustmentAttempt?.clientId === selectedClient.id
+        ? adjustmentAttempt
+        : { clientId: selectedClient.id, lessonsDelta, reason: adjustmentReason.trim(), requestId: createRequestId() }
+    setAdjustmentAttempt(attempt)
+    setAdjustmentLoading(true)
+    setAdjustmentError('')
+    try {
+      await apiClient.recordAdjustment(attempt.clientId, attempt.lessonsDelta, attempt.reason, '', attempt.requestId)
+      refreshClients()
+      await refreshSelectedAccounting(attempt.clientId)
+      setAdjustmentAttempt(null)
+      setIsAdjustmentOpen(false)
+    } catch (error) {
+      setAdjustmentError(error instanceof Error ? error.message : 'Не удалось сохранить корректировку')
+    } finally {
+      setAdjustmentLoading(false)
+    }
+  }
+
+  const submitAuditRepair = async () => {
+    if (!selectedClient || !ledgerAudit || auditRepairLoading) return
+    if (!auditRepairConfirmed) return setAuditRepairError('Подтвердите исправление результатов аудита')
+    if (!auditRepairAttempt && !auditRepairReason.trim()) return setAuditRepairError('Укажите причину исправления')
+    const attempt =
+      auditRepairAttempt?.clientId === selectedClient.id
+        ? auditRepairAttempt
+        : {
+            clientId: selectedClient.id,
+            expectedRemainingLessons: ledgerAudit.current.remainingLessons,
+            expectedTotalLessons: ledgerAudit.current.totalLessons,
+            reason: auditRepairReason.trim(),
+            requestId: createRequestId(),
+          }
+    setAuditRepairAttempt(attempt)
+    setAuditRepairLoading(true)
+    setAuditRepairError('')
+    try {
+      await apiClient.repairLessonLedger(
+        attempt.clientId,
+        attempt.expectedRemainingLessons,
+        attempt.expectedTotalLessons,
+        attempt.reason,
+        attempt.requestId,
+      )
+      refreshClients()
+      await refreshSelectedAccounting(attempt.clientId)
+      setAuditRepairAttempt(null)
+      setAuditRepairConfirmed(false)
+      setAuditRepairReason('')
+    } catch (error) {
+      setAuditRepairError(error instanceof Error ? error.message : 'Не удалось исправить журнал')
+    } finally {
+      setAuditRepairLoading(false)
+    }
+  }
+
+  const filteredClients = clients
+
+  const toggleSort = (key: 'childName' | 'paidAmount') =>
     setSortConfig((previous) => ({ key, dir: previous.key === key && previous.dir === 'asc' ? 'desc' : 'asc' }))
 
   const updateForm = (field: keyof FormState, value: string) =>
@@ -290,13 +673,17 @@ export const ClientsView = observer(() => {
         receiptUrl: '',
       },
     }
+    setIsCreating(true)
     try {
-      await store.clientStore.addClient(clientData)
+      await apiClient.createClient(clientData)
+      refreshClients()
       setIsAddOpen(false)
       setFormData(emptyForm(formData.branchId))
       setFormError('')
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'Не удалось сохранить клиента')
+    } finally {
+      setIsCreating(false)
     }
   }
 
@@ -333,6 +720,16 @@ export const ClientsView = observer(() => {
         </select>
       </div>
 
+      <div className="flex items-center justify-between text-sm text-slate-500">
+        <span>Найдено клиентов: {total}</span>
+        {isListLoading && <span>Загрузка…</span>}
+      </div>
+      {listError && (
+        <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          Не удалось загрузить клиентов
+        </p>
+      )}
+
       <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm md:block">
         <Table>
           <TableHeader>
@@ -359,7 +756,7 @@ export const ClientsView = observer(() => {
               <TableRow
                 key={client.id}
                 className="cursor-pointer hover:bg-slate-50"
-                onClick={() => setSelectedClientId(client.id)}
+                onClick={() => openClientProfile(client.id)}
               >
                 <TableCell className="font-medium">
                   <div className="flex items-center gap-2">
@@ -391,7 +788,7 @@ export const ClientsView = observer(() => {
         {filteredClients.map((client) => (
           <button
             key={client.id}
-            onClick={() => setSelectedClientId(client.id)}
+            onClick={() => openClientProfile(client.id)}
             className="rounded-2xl border border-slate-100 bg-white p-4 text-left shadow-sm"
           >
             <div className="flex items-start justify-between gap-3">
@@ -409,15 +806,15 @@ export const ClientsView = observer(() => {
         ))}
       </div>
 
-      {store.clientStore.hasMore && (
+      {hasMore && (
         <div className="flex justify-center">
           <Button
             variant="outline"
-            onClick={() => void store.clientStore.loadNextPage(store.selectedBranchId || undefined)}
-            disabled={store.clientStore.isLoading}
+            onClick={() => void loadNextPage()}
+            disabled={isListLoading}
             className="rounded-full border-cyan-200 text-cyan-700"
           >
-            {store.clientStore.isLoading ? 'Загрузка…' : 'Загрузить ещё'}
+            {isListLoading ? 'Загрузка…' : 'Загрузить ещё'}
           </Button>
         </div>
       )}
@@ -588,10 +985,10 @@ export const ClientsView = observer(() => {
 
             <Button
               onClick={handleSubmit}
-              disabled={store.clientStore.isLoading}
+              disabled={isCreating}
               className="h-12 rounded-xl bg-cyan-600 text-base font-bold text-white shadow-lg shadow-cyan-200 hover:bg-cyan-700"
             >
-              {store.clientStore.isLoading ? 'Сохраняем…' : 'Создать профиль клиента'}
+              {isCreating ? 'Сохраняем…' : 'Создать профиль клиента'}
             </Button>
           </div>
         </DialogContent>
@@ -616,6 +1013,59 @@ export const ClientsView = observer(() => {
                 </DialogHeader>
               </div>
               <div className="grid gap-5 p-5 sm:p-8">
+                {store.authStore.isAdmin && (
+                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" onClick={openEdit} disabled={clientActionLoading}>
+                        <Pencil className="mr-2 size-4" /> Редактировать
+                      </Button>
+                      {selectedClient.status === 'Архив' ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => void changeClientArchiveStatus(false)}
+                          disabled={clientActionLoading}
+                          className="border-emerald-200 text-emerald-700"
+                        >
+                          <RotateCcw className="mr-2 size-4" /> Восстановить
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          onClick={() => void changeClientArchiveStatus(true)}
+                          disabled={clientActionLoading}
+                          className="border-amber-200 text-amber-700"
+                        >
+                          <Archive className="mr-2 size-4" /> В архив
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        onClick={() => void deleteEmptyClient()}
+                        disabled={clientActionLoading || !canDeleteSelected}
+                        title={
+                          historyLoading || !ledgerAuditChecked
+                            ? 'Проверяем историю клиента'
+                            : canDeleteSelected
+                              ? 'Удалить пустую ошибочно созданную карточку'
+                              : 'Карточку с оплатами, посещениями или расписанием можно только архивировать'
+                        }
+                        className="border-rose-200 text-rose-700"
+                      >
+                        <Trash2 className="mr-2 size-4" /> Удалить пустую карточку
+                      </Button>
+                    </div>
+                    {!canDeleteSelected && (
+                      <p className="mt-3 text-xs text-slate-500">
+                        {historyLoading || !ledgerAuditChecked
+                          ? 'Проверяем платежи, посещения и журнал перед удалением…'
+                          : 'Удаление недоступно: используемая карточка должна остаться в истории. Её можно архивировать.'}
+                      </p>
+                    )}
+                    {clientActionError && (
+                      <p className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{clientActionError}</p>
+                    )}
+                  </section>
+                )}
                 <section className="grid gap-3 sm:grid-cols-3">
                   <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Остаток занятий</p>
@@ -720,10 +1170,19 @@ export const ClientsView = observer(() => {
                         </p>
                       </div>
                     </div>
-                    {store.authStore.isAdmin && (
-                      <Button onClick={openPayment} className="rounded-xl bg-cyan-600 text-white hover:bg-cyan-700">
-                        <Plus className="mr-2 size-4" /> Продлить абонемент
-                      </Button>
+                    {store.authStore.isAdmin && selectedClient.status !== 'Архив' && (
+                      <div className="flex flex-wrap gap-2">
+                        <Button onClick={openPayment} className="rounded-xl bg-cyan-600 text-white hover:bg-cyan-700">
+                          <Plus className="mr-2 size-4" /> Продлить абонемент
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={openAdjustment}
+                          className="rounded-xl border-cyan-200 text-cyan-800"
+                        >
+                          <Settings2 className="mr-2 size-4" /> Корректировка
+                        </Button>
+                      </div>
                     )}
                   </div>
                   <div className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -786,6 +1245,74 @@ export const ClientsView = observer(() => {
                   {lessonLedger.length > 0 && (
                     <p className="mt-3 text-xs text-slate-400">В журнале движений: {lessonLedger.length} операций</p>
                   )}
+                  {store.authStore.isAdmin && ledgerAuditChecked && (
+                    <div className="mt-5 rounded-xl border border-slate-200 bg-white/80 p-4">
+                      <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                        <ClipboardCheck className="size-4 text-cyan-600" /> Сверка журнала занятий
+                      </div>
+                      {!ledgerAudit ? (
+                        <p className="mt-2 text-sm text-emerald-700">
+                          Остаток и начисленные занятия совпадают с журналом и платежами.
+                        </p>
+                      ) : (
+                        <div className="mt-3 grid gap-3 text-sm">
+                          <p className="text-amber-800">
+                            В карточке: {ledgerAudit.current.remainingLessons} / {ledgerAudit.current.totalLessons}; по
+                            журналу: {ledgerAudit.calculated.remainingLessons} / {ledgerAudit.calculated.totalLessons}.
+                          </p>
+                          {[...ledgerAudit.ledgerIssues, ...ledgerAudit.paymentIssues].map((issue) => (
+                            <p key={issue} className="text-rose-700">
+                              {issue}
+                            </p>
+                          ))}
+                          {ledgerAudit.missingPaymentIds.length > 0 && (
+                            <p className="text-amber-800">
+                              Не связаны с журналом платежи: {ledgerAudit.missingPaymentIds.join(', ')}.
+                            </p>
+                          )}
+                          {ledgerAudit.repairable ? (
+                            <div className="grid gap-2 rounded-lg bg-amber-50 p-3">
+                              <p className="text-xs text-amber-900">
+                                Исправление создаст отдельную подтверждённую запись в журнале и не изменит историю
+                                платежей.
+                              </p>
+                              <Input
+                                value={auditRepairReason}
+                                onChange={(event) => setAuditRepairReason(event.target.value)}
+                                disabled={auditRepairLoading || Boolean(auditRepairAttempt)}
+                                placeholder="Причина исправления"
+                                className="h-10 bg-white"
+                              />
+                              <label className="flex items-start gap-2 text-xs text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={auditRepairConfirmed}
+                                  disabled={auditRepairLoading || Boolean(auditRepairAttempt)}
+                                  onChange={(event) => setAuditRepairConfirmed(event.target.checked)}
+                                />
+                                Подтверждаю, что проверил(а) расхождение и хочу восстановить журнал.
+                              </label>
+                              {auditRepairError && <p className="text-xs text-rose-700">{auditRepairError}</p>}
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void submitAuditRepair()}
+                                disabled={auditRepairLoading || !auditRepairConfirmed || !auditRepairReason.trim()}
+                                className="w-fit border-amber-300 bg-white text-amber-900"
+                              >
+                                {auditRepairLoading ? 'Исправляем…' : 'Подтвердить исправление'}
+                              </Button>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-rose-700">
+                              Автоматическое исправление заблокировано: сначала устраните противоречия в журнале или
+                              платежах.
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </section>
 
                 <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -819,6 +1346,170 @@ export const ClientsView = observer(() => {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isEditOpen && !!selectedClient} onOpenChange={setIsEditOpen}>
+        <DialogContent className="max-h-[92vh] max-w-xl overflow-y-auto rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+          <div className="bg-gradient-to-br from-cyan-700 to-sky-800 px-6 py-7 text-white">
+            <DialogHeader>
+              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                <Pencil className="size-6" />
+              </div>
+              <DialogTitle className="text-2xl font-bold text-white">Редактирование клиента</DialogTitle>
+              <p className="mt-1 text-sm text-cyan-50">
+                Баланс занятий и суммы меняются только через платёж или журналируемую корректировку.
+              </p>
+            </DialogHeader>
+          </div>
+          <div className="grid gap-4 p-6">
+            {editError && (
+              <p className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {editError}
+              </p>
+            )}
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Имя ребёнка
+              <Input
+                value={editForm.childName}
+                onChange={(event) => updateEditForm('childName', event.target.value)}
+                disabled={isEditing}
+                className="h-11 bg-white"
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Родитель
+              <Input
+                value={editForm.parentName}
+                onChange={(event) => updateEditForm('parentName', event.target.value)}
+                disabled={isEditing}
+                className="h-11 bg-white"
+              />
+            </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Телефон
+                <Input
+                  inputMode="tel"
+                  value={editForm.phone}
+                  onChange={(event) => updateEditForm('phone', formatPhone(event.target.value))}
+                  disabled={isEditing}
+                  className="h-11 bg-white"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Email
+                <Input
+                  type="email"
+                  value={editForm.email}
+                  onChange={(event) => updateEditForm('email', event.target.value)}
+                  disabled={isEditing}
+                  className="h-11 bg-white"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Дата рождения
+                <Input
+                  inputMode="numeric"
+                  value={editForm.birthDate}
+                  maxLength={10}
+                  onChange={(event) => updateEditForm('birthDate', formatBirthDate(event.target.value))}
+                  disabled={isEditing}
+                  placeholder="ДД.ММ.ГГГГ"
+                  className="h-11 bg-white"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Секция
+                <select
+                  value={editForm.category}
+                  onChange={(event) => updateEditForm('category', event.target.value)}
+                  disabled={isEditing}
+                  className="h-11 rounded-md border border-slate-200 bg-white px-3"
+                >
+                  <option value="плавание">Плавание</option>
+                  <option value="синхронное плавание">Синхронное плавание</option>
+                </select>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">
+                Нагрузка для следующей покупки
+                <select
+                  value={editForm.lessonsPerWeek}
+                  onChange={(event) => updateEditForm('lessonsPerWeek', event.target.value)}
+                  disabled={isEditing}
+                  className="h-11 rounded-md border border-slate-200 bg-white px-3"
+                >
+                  <option value="1">1 занятие в неделю</option>
+                  <option value="2">2 занятия в неделю</option>
+                  <option value="3">3 занятия в неделю</option>
+                </select>
+              </label>
+            </div>
+            <Button
+              onClick={() => void submitEdit()}
+              disabled={isEditing}
+              className="h-12 rounded-xl bg-cyan-700 text-base font-bold text-white hover:bg-cyan-800"
+            >
+              {isEditing ? 'Сохраняем…' : 'Сохранить изменения'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isAdjustmentOpen} onOpenChange={setIsAdjustmentOpen}>
+        <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+          <div className="bg-gradient-to-br from-amber-500 to-orange-600 px-6 py-7 text-white">
+            <DialogHeader>
+              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                <Settings2 className="size-6" />
+              </div>
+              <DialogTitle className="text-2xl font-bold text-white">Корректировка абонемента</DialogTitle>
+              <p className="mt-1 text-sm text-amber-50">
+                Операция будет записана в журнал с автором, причиной и остатком до/после.
+              </p>
+            </DialogHeader>
+          </div>
+          <div className="grid gap-4 p-6">
+            {adjustmentError && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {adjustmentError}
+              </div>
+            )}
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Изменение занятий
+              <Input
+                type="number"
+                min="-100"
+                max="100"
+                step="1"
+                value={adjustmentDelta}
+                disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
+                onChange={(event) => setAdjustmentDelta(event.target.value)}
+                placeholder="Например, 2 или -1"
+                className="h-12 bg-white text-lg"
+              />
+              <span className="text-xs font-normal text-slate-500">
+                Положительное число начисляет, отрицательное уменьшает и общий лимит, и остаток.
+              </span>
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+              Причина <span className="text-rose-600">*</span>
+              <Input
+                value={adjustmentReason}
+                disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
+                onChange={(event) => setAdjustmentReason(event.target.value)}
+                placeholder="Например: корректировка после смены тарифа"
+                className="h-11 bg-white"
+              />
+            </label>
+            <Button
+              onClick={() => void submitAdjustment()}
+              disabled={adjustmentLoading}
+              className="h-12 rounded-xl bg-amber-600 text-base font-bold text-white hover:bg-amber-700"
+            >
+              {adjustmentLoading ? 'Сохраняем…' : 'Сохранить корректировку'}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 
