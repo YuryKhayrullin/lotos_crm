@@ -78,8 +78,10 @@ function rejectUnauthorized(stage, details) {
 
 function createResponse(data) {
   if (ACTIVE_MUTATION_LOCK) {
+    var finalizeStartedAt = new Date().getTime()
     SpreadsheetApp.flush()
     invalidateReadCache()
+    diagnosticLog('mutation.finalized', { durationMs: new Date().getTime() - finalizeStartedAt })
     if (ACTIVE_IDEMPOTENCY_KEY && data && data.status !== 'error' && data.success !== false) {
       try {
         CacheService.getScriptCache().put(
@@ -277,6 +279,7 @@ function requireId(body) {
 function isMutatingAction(action) {
   return (
     [
+      'registerCoach',
       'assignUserBranch',
       'deactivateUser',
       'activateUser',
@@ -405,8 +408,16 @@ function validateRequest(body) {
   if (!body || !body.action || typeof body.action !== 'string') {
     throw new Error('Не указано действие')
   }
+  if (body.action === 'getBootstrapData' && body.includeCoaches !== undefined && typeof body.includeCoaches !== 'boolean')
+    throw new Error('Некорректный параметр includeCoaches')
 
-  if (body.action === 'getAuthUser') {
+  if (body.action === 'registerCoach') {
+    requireText(body, 'username', 64)
+    requireText(body, 'passwordHash', 600)
+    if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(String(body.username || '').trim().toLowerCase()))
+      throw new Error('Некорректный логин')
+    if (!isScryptPasswordHash(body.passwordHash)) throw new Error('Некорректный хеш пароля')
+  } else if (body.action === 'getAuthUser') {
     requireText(body, 'username', 100)
   } else if (
     body.action === 'getUsers' ||
@@ -605,6 +616,7 @@ function validateRequest(body) {
 function isKnownAction(action) {
   return (
     [
+      'registerCoach',
       'getAuthUser',
       'getUsers',
       'getCurrentUser',
@@ -953,10 +965,10 @@ function appendLessonLedgerEntry(sheet, entry, knownHeaders) {
   return { rowIndex: rowIndex, row: row, headers: headers }
 }
 
-function appendLessonLedgerEntries(sheet, headers, entries) {
+function appendLessonLedgerEntries(sheet, headers, entries, plannedFirstRow) {
   if (!entries.length) return []
   requireLessonLedgerHeaders(headers)
-  var firstRow = sheet.getLastRow() + 1
+  var firstRow = plannedFirstRow || sheet.getLastRow() + 1
   var rows = entries.map(function (entry) {
     return lessonLedgerRow(headers, entry)
   })
@@ -1190,41 +1202,8 @@ function requireServerAuth(body) {
   var claimedId = String(auth.id || '').trim()
   if (!claimedId) rejectUnauthorized('session.invalid_claims', { hasId: false })
 
-  // Reads may use a short-lived canonical snapshot. Mutations and the
-  // session probe always bypass it and read the authoritative Users row.
-  var forceFresh = isMutatingAction(body.action) || body.action === 'getCurrentUser'
-  var authCache = getScriptCacheSafe()
-  var authCacheKey = authUserCacheKey(claimedId)
-  if (forceFresh) {
-    invalidateAuthUserCache(claimedId)
-  } else if (authCache) {
-    var cachedUser = null
-    try {
-      cachedUser = parseCachedAuthUser(authCache.get(authCacheKey))
-    } catch (error) {}
-    if (cachedUser) {
-      var cachedClaimedUsername = String(auth.username || '').trim()
-      var cachedClaimedRole = normalizeRole(auth.role)
-      var cachedClaimedBranchId =
-        auth.branchId === undefined || auth.branchId === null ? null : String(auth.branchId).trim() || null
-      if (
-        cachedClaimedUsername !== cachedUser.username ||
-        cachedClaimedRole !== cachedUser.role ||
-        String(cachedClaimedBranchId || '') !== String(cachedUser.branchId || '')
-      ) {
-        diagnosticLog('auth.claims_refreshed', {
-          roleChanged: cachedClaimedRole !== cachedUser.role,
-          usernameChanged: cachedClaimedUsername !== cachedUser.username,
-          branchChanged: String(cachedClaimedBranchId || '') !== String(cachedUser.branchId || ''),
-          source: 'cache',
-        })
-      }
-      diagnosticLog('auth.cache_hit', { role: cachedUser.role })
-      return cachedUser
-    }
-    diagnosticLog('auth.cache_miss', {})
-  }
-
+  // Reference-data caching must never cache permission to access that data.
+  // Read Users once per signed call, including reads and idempotent retries.
   var usersSheet = requireExistingSheet(SpreadsheetApp.getActiveSpreadsheet(), 'Users')
   var usersData = usersSheet.getDataRange().getValues()
   if (!usersData.length) throw new Error('Users schema is invalid')
@@ -1277,15 +1256,10 @@ function requireServerAuth(body) {
     role: storedRole,
     branchId: storedBranchId,
   }
-  if (authCache && !forceFresh) {
-    try {
-      authCache.put(authCacheKey, JSON.stringify(canonicalUser), AUTH_USER_CACHE_TTL_SECONDS)
-    } catch (error) {}
-  }
   diagnosticLog('auth.accepted', {
     role: storedRole,
     branchAssigned: Boolean(storedBranchId),
-    source: forceFresh ? 'users.fresh' : 'users',
+    source: 'users.fresh',
   })
   return canonicalUser
 }
@@ -1728,9 +1702,9 @@ function getLessonRoster(ss, body, auth) {
   var lessonCategoryIdx = lesson.headers.indexOf('category')
   var lessonCategory = lessonCategoryIdx === -1 ? '' : String(occurrence.row[lessonCategoryIdx] || '')
 
-  var clientsSheet = requireExistingSheet(ss, 'Клиенты')
-  var headers = requireClientSubscriptionColumns(clientsSheet)
-  var data = clientsSheet.getDataRange().getValues()
+  var clientsContext = sheetContext(ss, 'Клиенты')
+  var headers = requireClientSubscriptionHeaders(clientsContext.headers)
+  var data = clientsContext.data
   var idIdx = headers.indexOf('id'),
     branchIdx = headers.indexOf('branchId')
   var nameIdx = headers.indexOf('childName'),
@@ -1776,7 +1750,12 @@ function validateAttendanceItem(item, ss, auth, sharedClients, sharedLessons) {
   if (['attended', 'absent'].indexOf(item.status) === -1) throw new Error('Недопустимый статус посещения')
   if (!item.requestId) throw new Error('Не указан idempotency key')
   var lesson = sharedLessons || sheetObjects(requireExistingSheet(ss, 'Расписание'))
-  var occurrence = requireLessonOccurrence(lesson, item.lessonId, item.date, auth, ss)
+  var occurrenceKey = JSON.stringify([String(item.lessonId), String(item.date)])
+  var occurrence = lesson.occurrences && lesson.occurrences[occurrenceKey]
+  if (!occurrence) {
+    occurrence = requireLessonOccurrence(lesson, item.lessonId, item.date, auth, ss)
+    if (lesson.occurrences) lesson.occurrences[occurrenceKey] = occurrence
+  }
   var lessonBranch = occurrence.branchId
   if (!item.clientId) throw new Error('Не указан клиент')
   if (item.isWalkin === true || item.visitorName) throw new Error('Проходные посетители не поддерживаются')
@@ -1786,7 +1765,10 @@ function validateAttendanceItem(item, ss, auth, sharedClients, sharedLessons) {
   var data = sharedClients ? sharedClients.data : clientSheet.getDataRange().getValues()
   var idIdx = headers.indexOf('id')
   var clientBranchIdx = headers.indexOf('branchId')
-  var clientRow = findRowById(data, idIdx, item.clientId)
+  var clientRow = sharedClients && sharedClients.rowById
+    ? sharedClients.rowById[String(item.clientId || '').trim()]
+    : findRowById(data, idIdx, item.clientId)
+  if (clientRow === undefined) clientRow = -1
   var lessonCategoryIdx = lesson.headers.indexOf('category')
   var clientCategoryIdx = headers.indexOf('category')
   if (clientRow === -1) throw new Error('Клиент не найден')
@@ -1949,13 +1931,14 @@ function requireClientSubscriptionHeaders(headers) {
   return headers
 }
 
-function writeAttendanceChanges(batch, dirtyRows) {
+function attendanceChangedRanges(batch, dirtyRows) {
   var indices = Object.keys(dirtyRows)
     .map(Number)
     .sort(function (left, right) {
       return left - right
     })
-  if (!indices.length) return
+  var ranges = []
+  if (!indices.length) return ranges
 
   ;['remainingLessons', 'attendanceHistory', 'status'].forEach(function (header) {
     var column = batch.headers.indexOf(header)
@@ -1966,10 +1949,82 @@ function writeAttendanceChanges(batch, dirtyRows) {
       var values = indices.slice(start, end).map(function (index) {
         return [batch.data[index][column]]
       })
-      batch.sheet.getRange(indices[start] + 1, column + 1, values.length, 1).setValues(values)
+      ranges.push({ row: indices[start] + 1, column: column + 1, values: values })
       start = end
     }
   })
+  return ranges
+}
+
+function writeAttendanceChanges(batch, dirtyRows) {
+  attendanceChangedRanges(batch, dirtyRows).forEach(function (range) {
+    batch.sheet.getRange(range.row, range.column, range.values.length, 1).setValues(range.values)
+  })
+}
+
+function attendanceApiCell(value) {
+  var entered = {}
+  if (typeof value === 'number') {
+    if (!isFinite(value)) throw new Error('Некорректное число в записи посещения')
+    entered.numberValue = value
+  } else if (typeof value === 'boolean') entered.boolValue = value
+  // stringValue is literal, never interpreted as a spreadsheet formula.
+  else entered.stringValue = String(value === null || value === undefined ? '' : value)
+  return { userEnteredValue: entered }
+}
+
+function writeAttendanceAtomic(ss, batch, dirtyRows, ledgerSheet, ledgerHeaders, entries) {
+  // Enable only after adding the Advanced Google Sheets service to this GAS
+  // project and testing on a copy. Missing configuration fails BEFORE writes.
+  if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || !Sheets.Spreadsheets.batchUpdate) {
+    var unavailable = new Error('Схема атомарной записи не настроена')
+    unavailable.apiCode = 'SCHEMA'
+    throw unavailable
+  }
+  var clientSheetId = batch.sheet.getSheetId()
+  var requests = attendanceChangedRanges(batch, dirtyRows).map(function (range) {
+    return {
+      updateCells: {
+        range: {
+          sheetId: clientSheetId,
+          startRowIndex: range.row - 1,
+          endRowIndex: range.row - 1 + range.values.length,
+          startColumnIndex: range.column - 1,
+          endColumnIndex: range.column,
+        },
+        rows: range.values.map(function (values) { return { values: values.map(attendanceApiCell) } }),
+        fields: 'userEnteredValue',
+      },
+    }
+  })
+  if (entries.length) {
+    requireLessonLedgerHeaders(ledgerHeaders)
+    requests.push({
+      appendCells: {
+        sheetId: ledgerSheet.getSheetId(),
+        rows: entries.map(function (entry) {
+          return { values: lessonLedgerRow(ledgerHeaders, entry).map(attendanceApiCell) }
+        }),
+        fields: 'userEnteredValue',
+      },
+    })
+  }
+  if (!requests.length) return
+  // ONE atomic commit across both sheets. Never fall back or roll back after
+  // an API error: a lost acknowledgement may mean the commit already happened.
+  // A retry under the same lock recognizes the durable ledger request marker.
+  try {
+    var spreadsheetId = ss.getId()
+    var acknowledgement = Sheets.Spreadsheets.batchUpdate({ requests: requests }, spreadsheetId)
+    if (!acknowledgement || String(acknowledgement.spreadsheetId || '') !== String(spreadsheetId)) {
+      throw new Error('Запись не подтверждена')
+    }
+  } catch (error) {
+    diagnosticLog('attendance.atomic_commit_unconfirmed', {})
+    var unconfirmed = new Error('Сервис данных временно недоступен')
+    unconfirmed.apiCode = 'SCHEMA'
+    throw unconfirmed
+  }
 }
 
 function sheetContext(ss, name) {
@@ -2308,6 +2363,11 @@ function activateCoachUser(ss, userId, auth, body) {
   var disabledByIdx = context.headers.indexOf('disabledBy')
   var previousRow = context.data[context.rowIndex].slice()
   var row = previousRow.slice()
+  if (String(row[statusIdx] || '') === 'Ожидает подтверждения') {
+    var branchId = String(row[context.headers.indexOf('branchId')] || '').trim()
+    if (!branchId) throw new Error('У пользователя не назначен филиал')
+    assertBranchExists(ss, branchId)
+  }
   row[statusIdx] = 'Активен'
   row[disabledAtIdx] = ''
   row[disabledByIdx] = ''
@@ -2431,6 +2491,32 @@ function assignCoachUserBranch(ss, body, auth) {
   return { success: true }
 }
 
+function registerPendingCoachUser(ss, body) {
+  var sheet = requireExistingSheet(ss, 'Users')
+  var data = sheet.getDataRange().getValues()
+  var headers = requireUsersAccessHeaders(data[0] || [])
+  var username = String(body.username || '').trim().toLowerCase()
+  var usernameIdx = headers.indexOf('username')
+  // Username is the durable natural idempotency key under the mutation lock.
+  // A retry hashes the password with a new salt; never compare those hashes or
+  // overwrite ANY existing account. The same reply prevents user enumeration.
+  if (data.slice(1).some(function (row) {
+    return String(row[usernameIdx] || '').trim().toLowerCase() === username
+  })) return { status: 'success', pending: true }
+  var row = headers.map(function (header) {
+    if (header === 'id') return nextId()
+    if (header === 'username') return username
+    if (header === 'password') return String(body.passwordHash)
+    if (header === 'role') return '2'
+    if (header === 'status') return 'Ожидает подтверждения'
+    return ''
+  })
+  // One append only: no orphan coach card or partially-written second sheet.
+  sheet.appendRow(row)
+  diagnosticLog('registration.pending_created', {})
+  return { status: 'success', pending: true }
+}
+
 function createCoachWithOptionalAccount(ss, body) {
   var coachSheet = requireExistingSheet(ss, 'Тренеры')
   var coachHeaders = requireCoachUserIdColumn(coachSheet)
@@ -2521,6 +2607,32 @@ function hasLedgerValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== ''
 }
 
+// Request-local only, built after acquiring the mutation lock. Partition
+// once, then reconcile only this client's rows; no cached accounting state.
+// Preserve physical row indices so audit diagnostics still name the right row.
+function accountingRowsByClient(parsed, selectedClients) {
+  var clientIdx = parsed.headers.indexOf('clientId')
+  var byClient = Object.create(null)
+  parsed.rows.forEach(function (row, index) {
+    var key = String(row[clientIdx] || '')
+    if (selectedClients && !selectedClients[key]) return
+    if (!byClient[key]) byClient[key] = { headers: parsed.headers, rows: [], sourceRowIndices: [] }
+    byClient[key].rows.push(row)
+    byClient[key].sourceRowIndices.push(index)
+  })
+  return byClient
+}
+
+function accountingClientRows(byClient, headers, clientId) {
+  return byClient[String(clientId)] || { headers: headers, rows: [], sourceRowIndices: [] }
+}
+
+function accountingSourceIndex(parsed, index) {
+  return parsed.sourceRowIndices && parsed.sourceRowIndices[index] !== undefined
+    ? parsed.sourceRowIndices[index]
+    : index
+}
+
 function ledgerTotalDelta(row, headers) {
   var type = String(row[headers.indexOf('type')] || '')
   var explicitIdx = headers.indexOf('totalLessonsDelta')
@@ -2543,6 +2655,7 @@ function calculateLessonLedgerState(ledger, clientId) {
   var totalAfterIdx = headers.indexOf('totalLessonsAfter')
   var state = { balance: 0, totalLessons: 0, rows: [], issues: [] }
   ledger.rows.forEach(function (row, index) {
+    index = accountingSourceIndex(ledger, index)
     if (String(row[clientIdx] || '') !== String(clientId)) return
     if (!hasLedgerValue(row[deltaIdx]) || !isFinite(Number(row[deltaIdx]))) {
       state.issues.push('Строка журнала ' + String(index + 2) + ' содержит некорректное движение занятий')
@@ -2597,8 +2710,9 @@ function reconcilePaymentsWithLedger(payments, ledger, clientId) {
     ledgerPaymentIdx = ledgerHeaders.indexOf('paymentId')
   var ledgerTypeIdx = ledgerHeaders.indexOf('type'),
     ledgerDeltaIdx = ledgerHeaders.indexOf('lessonsDelta')
-  var byPayment = {}
+  var byPayment = Object.create(null)
   ledger.rows.forEach(function (row, index) {
+    index = accountingSourceIndex(ledger, index)
     if (String(row[ledgerClientIdx] || '') !== String(clientId)) return
     var paymentId = String(row[ledgerPaymentIdx] || '')
     var type = String(row[ledgerTypeIdx] || '')
@@ -2610,6 +2724,7 @@ function reconcilePaymentsWithLedger(payments, ledger, clientId) {
   var missingPayments = [],
     issues = []
   payments.rows.forEach(function (row, index) {
+    index = accountingSourceIndex(payments, index)
     if (String(row[paymentClientIdx] || '') !== String(clientId)) return
     var paymentId = String(row[paymentIdIdx] || '')
     if (
@@ -2646,6 +2761,8 @@ function clientLedgerReconciliation(clientRow, clientHeaders, ledger, payments, 
   var currentRemaining = finiteNumber(clientRow[clientHeaders.indexOf('remainingLessons')])
   var currentTotal = finiteNumber(clientRow[clientHeaders.indexOf('totalLessons')])
   return {
+    ledgerState: state,
+    paymentCheck: paymentCheck,
     currentRemainingLessons: currentRemaining,
     currentTotalLessons: currentTotal,
     calculatedRemainingLessons: state.balance,
@@ -2662,8 +2779,8 @@ function clientLedgerReconciliation(clientRow, clientHeaders, ledger, payments, 
   }
 }
 
-function assertClientLedgerReconciled(clientRow, clientHeaders, ledger, payments, clientId) {
-  var reconciliation = clientLedgerReconciliation(clientRow, clientHeaders, ledger, payments, clientId)
+function assertClientLedgerReconciled(clientRow, clientHeaders, ledger, payments, clientId, knownReconciliation) {
+  var reconciliation = knownReconciliation || clientLedgerReconciliation(clientRow, clientHeaders, ledger, payments, clientId)
   if (!reconciliation.isConsistent) {
     throw new Error('Остаток абонемента требует сверки с журналом. Выполните аудит и подтверждённое исправление.')
   }
@@ -2674,7 +2791,7 @@ function assertClientLedgerReconciled(clientRow, clientHeaders, ledger, payments
 // Confirmed payment rows are restored first; any historical usage that only
 // exists in the old card is then recorded as one reconciliation movement.
 // Client balances and payment amounts are never changed or invented here.
-function prepareLegacyLedgerBaseline(ledger, payments, clientRow, clientHeaders, clientId, auth) {
+function prepareLegacyLedgerBaseline(ledger, payments, clientRow, clientHeaders, clientId, auth, knownReconciliation) {
   var remainingIdx = clientHeaders.indexOf('remainingLessons')
   var totalIdx = clientHeaders.indexOf('totalLessons')
   var branchIdx = clientHeaders.indexOf('branchId')
@@ -2685,8 +2802,8 @@ function prepareLegacyLedgerBaseline(ledger, payments, clientRow, clientHeaders,
     throw new Error('Остаток абонемента требует сверки с журналом. Выполните аудит и подтверждённое исправление.')
   }
 
-  var state = calculateLessonLedgerState(ledger, clientId)
-  var paymentCheck = reconcilePaymentsWithLedger(payments, ledger, clientId)
+  var state = knownReconciliation ? knownReconciliation.ledgerState : calculateLessonLedgerState(ledger, clientId)
+  var paymentCheck = knownReconciliation ? knownReconciliation.paymentCheck : reconcilePaymentsWithLedger(payments, ledger, clientId)
   var alreadyConsistent =
     state.issues.length === 0 &&
     paymentCheck.issues.length === 0 &&
@@ -2695,6 +2812,9 @@ function prepareLegacyLedgerBaseline(ledger, payments, clientRow, clientHeaders,
     state.totalLessons === total
   if (alreadyConsistent) return []
   if (state.issues.length || paymentCheck.issues.length) return []
+  // Once a client has ledger movements, discrepancies require a confirmed
+  // admin audit. An empty purchasedAt must never permit repeated migration.
+  if (state.rows.length > 0) return []
 
   var isLegacyCard =
     purchasedAtIdx === -1 ||
@@ -3235,6 +3355,7 @@ function doPost(e) {
   ACTIVE_IDEMPOTENCY_FINGERPRINT = ''
   ACTIVE_MUTATION_LOCK = false
   var mutationLock = null
+  var requestStartedAt = new Date().getTime()
   if (!e || !e.postData || !e.postData.contents) return options()
 
   try {
@@ -3276,17 +3397,19 @@ function doPost(e) {
     // All CRM mutation actions use the same lock. Read their sheet snapshots only
     // after acquiring it, including authorization and idempotency checks.
     if (isMutatingAction(body.action)) {
+      var lockStartedAt = new Date().getTime()
       var requestedLock = LockService.getScriptLock()
       if (!requestedLock.tryLock(20000)) throw new Error('Система занята, повторите операцию')
       mutationLock = requestedLock
       ACTIVE_MUTATION_LOCK = true
+      diagnosticLog('mutation.lock_acquired', { waitMs: new Date().getTime() - lockStartedAt })
     }
 
     // Every mutating operation carries a request id. Keep a short-lived
     // response cache so retries cannot create a second row or spend lessons twice.
     // The cached response is returned only after fresh authorization succeeds.
     var cachedMutationResponse = null
-    if (isMutatingAction(body.action)) {
+    if (isMutatingAction(body.action) && body.action !== 'registerCoach') {
       var requestId = String(body.requestId || '')
       var actorId = body.auth && body.auth.id ? String(body.auth.id) : 'anonymous'
       var idempotencyKey = 'gas-idem:' + sha256(body.action + ':' + actorId + ':' + requestId)
@@ -3309,15 +3432,27 @@ function doPost(e) {
     }
 
     var auth = null
-    if (body.action !== 'getAuthUser') {
+    if (body.action !== 'getAuthUser' && body.action !== 'registerCoach') {
+      var authorizationStartedAt = new Date().getTime()
       auth = requireServerAuth(body)
       diagnosticLog('authorization.checked', { action: String(body.action || ''), role: auth.role })
       assertGasPermission(body, auth)
+      diagnosticLog('authorization.completed', { durationMs: new Date().getTime() - authorizationStartedAt })
     }
 
     if (cachedMutationResponse) {
-      ACTIVE_MUTATION_LOCK = false
-      return createResponse(cachedMutationResponse)
+      // Attendance retries must return CURRENT balances, not a five-minute-old
+      // snapshot. Durable request markers below prevent a second deduction.
+      if (body.action !== 'recordAttendance' && body.action !== 'recordBulkAttendance') {
+        ACTIVE_MUTATION_LOCK = false
+        return createResponse(cachedMutationResponse)
+      }
+    }
+
+    // Public browser registration is mediated by the HMAC-authenticated BFF.
+    // It can create only a pending coach, never an active user or administrator.
+    if (body.action === 'registerCoach') {
+      return createResponse(registerPendingCoachUser(ss, body))
     }
 
     // --- 1. АВТОРИЗАЦИЯ ---
@@ -3434,7 +3569,7 @@ function doPost(e) {
       var bootstrapCacheVersion = readCacheVersion()
       return createResponse({
         branches: objectsForAuth(requireExistingSheet(ss, 'Филиалы'), auth, '', bootstrapCacheVersion),
-        coaches: objectsForAuth(
+        coaches: body.includeCoaches === false ? [] : objectsForAuth(
           requireExistingSheet(ss, 'Тренеры'),
           auth,
           body.branchId,
@@ -3501,20 +3636,53 @@ function doPost(e) {
                 requestId: body.requestId,
               },
             ]
-          : body.attendance
+          : body.attendance.map(function (entry) {
+              var copy = {}
+              Object.keys(entry).forEach(function (key) { copy[key] = entry[key] })
+              return copy
+            })
+      var attendanceReadStartedAt = new Date().getTime()
       var lessonBatch = sheetObjects(requireExistingSheet(ss, 'Расписание'))
+      lessonBatch.occurrences = Object.create(null)
       var clientBatchContext = sheetContext(ss, 'Клиенты')
       requireClientSubscriptionHeaders(clientBatchContext.headers)
       var clientBatch = {
         sheet: clientBatchContext.sheet,
         headers: clientBatchContext.headers,
         data: clientBatchContext.data,
+        rowById: Object.create(null),
       }
+      clientBatch.data.forEach(function (row, index) {
+        if (!index) return
+        var key = String(row[clientBatchContext.idIdx] || '').trim()
+        if (clientBatch.rowById[key] === undefined) clientBatch.rowById[key] = index
+      })
       var attendanceLedgerSheet = requireExistingSheet(ss, 'Журнал занятий')
       var attendanceLedger = sheetObjects(attendanceLedgerSheet)
       requireLessonLedgerHeaders(attendanceLedger.headers)
       var attendancePayments = sheetObjects(requireExistingSheet(ss, 'Платежи'))
-      var checkedAccountingClients = {}
+      var selectedAccountingClients = Object.create(null)
+      var selectedAttendanceRequests = Object.create(null)
+      attendanceList.forEach(function (item) {
+        var clientId = String(item.clientId)
+        selectedAccountingClients[clientId] = true
+        selectedAttendanceRequests[String(item.requestId || body.requestId) + ':' + clientId] = true
+      })
+      var ledgerByClient = accountingRowsByClient(attendanceLedger, selectedAccountingClients)
+      var paymentsByClient = accountingRowsByClient(attendancePayments, selectedAccountingClients)
+      var requestColumn = attendanceLedger.headers.indexOf('requestId')
+      var attendanceRequests = Object.create(null)
+      attendanceLedger.rows.forEach(function (row, index) {
+        var key = String(row[requestColumn] || '')
+        if (!selectedAttendanceRequests[key]) return
+        if (!attendanceRequests[key]) attendanceRequests[key] = { row: row, index: index }
+      })
+      diagnosticLog('attendance.snapshot_loaded', {
+        durationMs: new Date().getTime() - attendanceReadStartedAt,
+        marks: attendanceList.length,
+      })
+      var attendanceValidationStartedAt = new Date().getTime()
+      var checkedAccountingClients = Object.create(null)
       var originalAttendanceValues = {}
       var legacyLedgerEntries = []
       var attendanceLedgerEntries = []
@@ -3526,23 +3694,39 @@ function doPost(e) {
           item.requestId = String(requestId) + ':' + String(item.clientId)
           var context = validateAttendanceItem(item, ss, auth, clientBatch, lessonBatch)
           var clientId = String(item.clientId)
+          var attendanceFingerprint = sha256(JSON.stringify({
+            actorId: String(auth.id), clientId: clientId, lessonId: String(item.lessonId),
+            date: String(item.date), status: String(item.status),
+          }))
+          var previousRequest = attendanceRequests[item.requestId]
+          if (previousRequest) {
+            if (String(previousRequest.row[attendanceLedger.headers.indexOf('requestFingerprint')] || '') !== attendanceFingerprint)
+              throw new Error('Этот requestId уже использован с другими данными')
+            return { success: true, duplicate: true, clientId: clientId }
+          }
           if (!checkedAccountingClients[clientId]) {
-            legacyLedgerEntries = legacyLedgerEntries.concat(
-              prepareLegacyLedgerBaseline(
-                attendanceLedger,
-                attendancePayments,
+            var clientLedger = accountingClientRows(ledgerByClient, attendanceLedger.headers, clientId)
+            var clientPayments = accountingClientRows(paymentsByClient, attendancePayments.headers, clientId)
+            var reconciliation = clientLedgerReconciliation(
+              context.clientData[context.clientRowIndex], context.clientHeaders, clientLedger, clientPayments, clientId,
+            )
+            var preparedBaseline = prepareLegacyLedgerBaseline(
+                clientLedger,
+                clientPayments,
                 context.clientData[context.clientRowIndex],
                 context.clientHeaders,
                 clientId,
                 auth,
-              ),
-            )
+                reconciliation,
+              )
+            legacyLedgerEntries = legacyLedgerEntries.concat(preparedBaseline)
             assertClientLedgerReconciled(
               context.clientData[context.clientRowIndex],
               context.clientHeaders,
-              attendanceLedger,
-              attendancePayments,
+              clientLedger,
+              clientPayments,
               clientId,
+              preparedBaseline.length ? null : reconciliation,
             )
             checkedAccountingClients[clientId] = true
           }
@@ -3556,7 +3740,27 @@ function doPost(e) {
           }
           var result = processClientAttendance(item, context, auth)
           if (!result.duplicate) dirtyClientRows[context.clientRowIndex] = true
-          if (result.ledgerEntry) attendanceLedgerEntries.push(result.ledgerEntry)
+          // Record EVERY confirmed request, including absences and unchanged
+          // marks. Zero-delta markers make retries durable after cache expiry,
+          // without undoing a newer correction or spending another credit.
+          if (!result.ledgerEntry) {
+            var attendanceRow = context.clientData[context.clientRowIndex]
+            var currentBalance = Number(attendanceRow[context.clientHeaders.indexOf('remainingLessons')] || 0)
+            var currentTotal = Number(attendanceRow[context.clientHeaders.indexOf('totalLessons')] || 0)
+            result.ledgerEntry = {
+              requestId: item.requestId, clientId: clientId, branchId: context.lessonBranch,
+              type: 'attendance_confirmation', lessonsDelta: 0, totalLessonsDelta: 0,
+              balanceBefore: currentBalance, balanceAfter: currentBalance,
+              totalLessonsBefore: currentTotal, totalLessonsAfter: currentTotal,
+              recordedBy: auth.username, comment: 'Занятие ' + String(item.lessonId) + ' · ' + String(item.date),
+              reason: 'Подтверждение отметки посещения',
+            }
+          }
+          result.ledgerEntry.requestFingerprint = attendanceFingerprint
+          attendanceLedgerEntries.push(result.ledgerEntry)
+          var confirmedRequestRow = lessonLedgerRow(attendanceLedger.headers, result.ledgerEntry)
+          attendanceRequests[item.requestId] = { row: confirmedRequestRow }
+          delete result.ledgerEntry
           result.clientId = clientId
           return result
         } catch (error) {
@@ -3572,6 +3776,10 @@ function doPost(e) {
       var attendanceSuccess = results.every(function (result) {
         return result.success
       })
+      diagnosticLog('attendance.validated', {
+        durationMs: new Date().getTime() - attendanceValidationStartedAt,
+        success: attendanceSuccess,
+      })
       var attendanceFailure = null
       if (!attendanceSuccess) {
         attendanceFailure = results.filter(function (result) {
@@ -3586,33 +3794,59 @@ function doPost(e) {
         })
       }
 
-      // Nothing has been written to client rows yet. Validation of the whole
-      // group succeeds first, so "Сохранить" is atomic for all selected pupils.
-      writeAttendanceChanges(clientBatch, dirtyClientRows)
+      // Validate the whole chunk before writing. SpreadsheetApp has no
+      // multi-sheet transaction: include both client and ledger writes in the
+      // rollback scope, and retain row indices even if a write throws late.
       var appendedLedgerRows = []
-      try {
-        appendedLedgerRows = appendLessonLedgerEntries(
-          attendanceLedgerSheet,
-          attendanceLedger.headers,
-          legacyLedgerEntries.concat(attendanceLedgerEntries),
-        )
-      } catch (ledgerError) {
-        ;['remainingLessons', 'attendanceHistory', 'status'].forEach(function (header) {
-          var column = clientBatch.headers.indexOf(header)
-          if (column === -1) return
-          Object.keys(originalAttendanceValues).forEach(function (index) {
-            clientBatch.sheet.getRange(Number(index) + 1, column + 1).setValue(originalAttendanceValues[index][header])
+      var attendanceWriteStartedAt = new Date().getTime()
+      var allAttendanceEntries = legacyLedgerEntries.concat(attendanceLedgerEntries)
+      var atomicAttendance = PropertiesService.getScriptProperties().getProperty('ATTENDANCE_ATOMIC_WRITES') === 'true'
+      if (atomicAttendance) {
+        writeAttendanceAtomic(ss, clientBatch, dirtyClientRows, attendanceLedgerSheet, attendanceLedger.headers, allAttendanceEntries)
+      } else {
+        try {
+          writeAttendanceChanges(clientBatch, dirtyClientRows)
+          var firstAttendanceLedgerRow = attendanceLedgerSheet.getLastRow() + 1
+          appendedLedgerRows = allAttendanceEntries.map(function (_entry, index) { return firstAttendanceLedgerRow + index })
+          appendLessonLedgerEntries(
+            attendanceLedgerSheet,
+            attendanceLedger.headers,
+            allAttendanceEntries,
+            firstAttendanceLedgerRow,
+          )
+        } catch (ledgerError) {
+          var attendanceRollbackFailed = false
+          ;['remainingLessons', 'attendanceHistory', 'status'].forEach(function (header) {
+            var column = clientBatch.headers.indexOf(header)
+            if (column === -1) return
+            Object.keys(originalAttendanceValues).forEach(function (index) {
+              try {
+                clientBatch.sheet.getRange(Number(index) + 1, column + 1).setValue(originalAttendanceValues[index][header])
+              } catch (rollbackError) { attendanceRollbackFailed = true }
+            })
           })
-        })
-        appendedLedgerRows
-          .sort(function (left, right) {
-            return right - left
-          })
-          .forEach(function (rowIndex) {
-            if (attendanceLedgerSheet.getLastRow() >= rowIndex) attendanceLedgerSheet.deleteRow(rowIndex)
-          })
-        throw ledgerError
+          appendedLedgerRows
+            .sort(function (left, right) {
+              return right - left
+            })
+            .forEach(function (rowIndex) {
+              try {
+                if (attendanceLedgerSheet.getLastRow() >= rowIndex) attendanceLedgerSheet.deleteRow(rowIndex)
+              } catch (rollbackError) { attendanceRollbackFailed = true }
+            })
+          if (attendanceRollbackFailed) diagnosticLog('attendance.rollback_failed', { action: String(body.action) })
+          throw ledgerError
+        }
       }
+      diagnosticLog('attendance.written', { durationMs: new Date().getTime() - attendanceWriteStartedAt })
+      results.forEach(function (result) {
+        var clientRow = clientBatch.data[clientBatch.rowById[String(result.clientId).trim()]]
+        result.client = {
+          remainingLessons: Number(clientRow[clientBatch.headers.indexOf('remainingLessons')] || 0),
+          totalLessons: Number(clientRow[clientBatch.headers.indexOf('totalLessons')] || 0),
+          status: String(clientRow[clientBatch.headers.indexOf('status')] || ''),
+        }
+      })
       return createResponse({
         status: 'success',
         success: true,
@@ -3720,5 +3954,9 @@ function doPost(e) {
       mutationLock.releaseLock()
       ACTIVE_MUTATION_LOCK = false
     }
+    diagnosticLog('request.finished', {
+      action: body && isKnownAction(body.action) ? String(body.action) : 'unknown',
+      durationMs: new Date().getTime() - requestStartedAt,
+    })
   }
 }

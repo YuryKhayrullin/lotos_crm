@@ -20,6 +20,7 @@ type RateLimitConfig = {
   windowSeconds?: number
   pairLimit?: number
   ipLimit?: number
+  namespace?: 'registration'
 }
 
 export class LoginRateLimitUnavailableError extends Error {
@@ -67,21 +68,25 @@ class UpstashRateLimitStore implements RateLimitStore {
   ) {}
 
   private async command(command: Array<string | number>): Promise<unknown> {
-    let response: Response
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 5_000)
     try {
-      response = await fetch(this.url, {
+      const response = await fetch(this.url, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
         body: JSON.stringify(command),
         cache: 'no-store',
+        signal: controller.signal,
       })
+      if (!response.ok) throw new LoginRateLimitUnavailableError()
+      const data = (await response.json().catch(() => null)) as { result?: unknown; error?: unknown } | null
+      if (!data || data.error !== undefined) throw new LoginRateLimitUnavailableError()
+      return data.result
     } catch {
       throw new LoginRateLimitUnavailableError()
+    } finally {
+      clearTimeout(timeout)
     }
-    if (!response.ok) throw new LoginRateLimitUnavailableError()
-    const data = (await response.json().catch(() => null)) as { result?: unknown; error?: unknown } | null
-    if (!data || data.error !== undefined) throw new LoginRateLimitUnavailableError()
-    return data.result
   }
 
   async increment(key: string, windowSeconds: number): Promise<number> {
@@ -121,13 +126,14 @@ export function createLoginRateLimiter(store: RateLimitStore, config: RateLimitC
   const windowSeconds = config.windowSeconds ?? DEFAULT_WINDOW_SECONDS
   const pairLimit = config.pairLimit ?? DEFAULT_PAIR_LIMIT
   const ipLimit = config.ipLimit ?? DEFAULT_IP_LIMIT
+  const keyPrefix = config.namespace ? KEY_PREFIX + config.namespace + ':' : KEY_PREFIX
 
   return {
     async check(ip: string, username: string): Promise<LoginRateLimitAttempt | null> {
       const normalizedIp = normalizeIp(ip)
       const normalizedUsername = normalizeUsername(username)
-      const pairKey = KEY_PREFIX + 'pair:' + keyDigest(normalizedIp + '\u0000' + normalizedUsername)
-      const ipKey = KEY_PREFIX + 'ip:' + keyDigest(normalizedIp)
+      const pairKey = keyPrefix + 'pair:' + keyDigest(normalizedIp + '\u0000' + normalizedUsername)
+      const ipKey = keyPrefix + 'ip:' + keyDigest(normalizedIp)
       const [pairCount, ipCount] = await Promise.all([
         store.increment(pairKey, windowSeconds),
         store.increment(ipKey, windowSeconds),
@@ -143,4 +149,9 @@ export function createLoginRateLimiter(store: RateLimitStore, config: RateLimitC
 
 export function getLoginRateLimiter() {
   return createLoginRateLimiter(configuredStore())
+}
+
+export function getRegistrationRateLimiter() {
+  // Separate counters: registration spam must not exhaust the login quota.
+  return createLoginRateLimiter(configuredStore(), { namespace: 'registration', pairLimit: 3, ipLimit: 10 })
 }

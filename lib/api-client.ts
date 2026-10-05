@@ -1,6 +1,7 @@
 import { IBranch, ICoach, IClient, ILesson, CreateClientDto, UserRole } from '@/store/models'
 import { devLog } from './dev-log'
 import { normalizeLesson, normalizeClient } from './normalizers'
+import { clearAttendanceDrafts } from './attendance-recovery'
 
 const API_ROUTE = '/api/crm'
 const AUTH_ROUTE = '/api/auth'
@@ -41,12 +42,28 @@ export type ApiUser = {
   branchId: string | number | null
 }
 
+function isApiUser(value: unknown): value is ApiUser {
+  if (!value || typeof value !== 'object') return false
+  const user = value as ApiUser
+  const validId =
+    typeof user.id === 'string' ? Boolean(user.id.trim()) : typeof user.id === 'number' && Number.isFinite(user.id)
+  return (
+    validId &&
+    typeof user.username === 'string' &&
+    Boolean(user.username.trim()) &&
+    ['admin', 'coach'].includes(user.role) &&
+    (user.branchId === null ||
+      typeof user.branchId === 'string' ||
+      (typeof user.branchId === 'number' && Number.isFinite(user.branchId)))
+  )
+}
+
 export type CoachAccount = {
   id: string
   username: string
   role: 'coach'
   branchId: string | null
-  status: 'Активен' | 'Отключен'
+  status: 'Активен' | 'Отключен' | 'Ожидает подтверждения'
   disabledAt: string | null
   disabledBy: string | null
 }
@@ -80,6 +97,42 @@ const fileToBase64 = (file: File): Promise<string> =>
 
 type JsonObject = Record<string, unknown>
 
+async function fetchJson(url: string, options: RequestInit = {}): Promise<{ response: Response; data: unknown }> {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (options.signal?.aborted) abort()
+  options.signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, 45_000)
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal })
+    const data = await response.json().catch(() => null)
+    return { response, data }
+  } catch {
+    throw new ApiError(503, {
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'Сервис не ответил. Проверьте соединение и повторите попытку.',
+    })
+  } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', abort)
+  }
+}
+
+function rowsWithIds(value: unknown): JsonObject[] {
+  const ids = new Set<string>()
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => {
+      if (!item || typeof item !== 'object' || !String(item.id ?? '').trim() || ids.has(String(item.id))) return true
+      ids.add(String(item.id))
+      return false
+    })
+  ) {
+    throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Сервис вернул неполные данные. Повторите загрузку.' })
+  }
+  return value as JsonObject[]
+}
+
 export type LessonRosterClient = {
   id: string
   childName: string
@@ -91,6 +144,14 @@ export type LessonRosterClient = {
 }
 
 export type LessonRoster = { lessonId: string; date: string; clients: LessonRosterClient[] }
+
+export type AttendanceResult = {
+  clientId: string
+  success: boolean
+  message?: string
+  duplicate?: boolean
+  client?: { remainingLessons: number; totalLessons: number; status: string }
+}
 
 export type ClientsPage = {
   items: ReturnType<typeof normalizeClient>[]
@@ -165,6 +226,13 @@ export type LessonLedgerAudit = {
 
 class ApiClient {
   private readonly inFlightReads = new Map<string, Promise<unknown>>()
+  private readGeneration = 0
+
+  clearPrivateState(): void {
+    this.readGeneration += 1
+    this.inFlightReads.clear()
+    clearAttendanceDrafts()
+  }
 
   private async request<T = unknown>(action: string, payload: JsonObject = {}, signal?: AbortSignal): Promise<T> {
     const isMutation = MUTATING_ACTIONS.has(action)
@@ -173,7 +241,7 @@ class ApiClient {
 
     const execute = async (): Promise<T> => {
       devLog('api.request.start', { action })
-      const response = await fetch(API_ROUTE, {
+      const { response, data } = await fetchJson(API_ROUTE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -185,16 +253,6 @@ class ApiClient {
       })
       devLog('api.request.response', { action, status: response.status, ok: response.ok })
 
-      const contentType = response.headers.get('content-type') ?? ''
-      let data: unknown
-      try {
-        data = contentType.includes('application/json')
-          ? await response.json()
-          : { status: 'error', code: 'SERVICE_UNAVAILABLE', message: 'Сервис временно недоступен' }
-      } catch {
-        data = { status: 'error', message: 'Некорректный ответ API' }
-      }
-
       const object = data && typeof data === 'object' ? (data as JsonObject) : null
       if (!response.ok) {
         throw new ApiError(
@@ -202,13 +260,26 @@ class ApiClient {
           object ?? { status: 'error', message: 'Ошибка запроса (' + response.status + ')' },
         )
       }
+      if (data === null)
+        throw new ApiError(502, {
+          code: 'INVALID_RESPONSE',
+          message: 'Сервис вернул неполный ответ. Повторите попытку.',
+        })
       if (object?.status === 'error') throw new ApiError(500, object)
       return data as T
     }
 
-    if (isMutation) return execute()
+    if (isMutation) {
+      try {
+        return await execute()
+      } finally {
+        // Never join a pre-mutation read when refreshing the result.
+        this.readGeneration += 1
+        this.inFlightReads.clear()
+      }
+    }
 
-    const readKey = `${action}:${JSON.stringify(requestPayload)}`
+    const readKey = `${this.readGeneration}:${action}:${JSON.stringify(requestPayload)}`
     const existing = this.inFlightReads.get(readKey)
     if (existing) return existing as Promise<T>
 
@@ -221,16 +292,13 @@ class ApiClient {
 
   private async authRequest<T>(path: string, payload?: JsonObject): Promise<T> {
     devLog('auth.request.start', { path })
-    const response = await fetch(`${AUTH_ROUTE}/${path}`, {
+    const { response, data } = await fetchJson(`${AUTH_ROUTE}/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify(payload ?? {}),
     })
     devLog('auth.request.response', { path, status: response.status, ok: response.ok })
-    const data = (await response
-      .json()
-      .catch(() => ({ status: 'error', message: 'Некорректный ответ API' }))) as unknown
     const object = data && typeof data === 'object' ? (data as JsonObject) : null
     if (!response.ok || object?.status === 'error') {
       throw new ApiError(
@@ -238,17 +306,47 @@ class ApiClient {
         object ?? { status: 'error', message: 'Ошибка запроса (' + response.status + ')' },
       )
     }
+    if (data === null) throw new ApiError(502, { message: 'Сервис вернул неполный ответ. Повторите попытку.' })
     return data as T
   }
 
   async login(username: string, password: string): Promise<{ user: ApiUser }> {
-    return this.authRequest('login', { username, password })
+    const data = await this.authRequest<{ user: ApiUser }>('login', { username, password })
+    if (!isApiUser(data?.user)) {
+      throw new ApiError(502, { message: 'Не удалось подтвердить вход. Повторите попытку.' })
+    }
+    return data
+  }
+
+  async register(username: string, password: string, requestId: string): Promise<void> {
+    const result = await this.authRequest<{ status: string; pending: boolean }>('register', {
+      username,
+      password,
+      requestId,
+    })
+    if (!result || result.status !== 'success' || result.pending !== true) {
+      throw new ApiError(502, {
+        code: 'INVALID_RESPONSE',
+        message: 'Регистрация не подтверждена. Повторите тот же запрос.',
+      })
+    }
   }
 
   async session(): Promise<{ authenticated: boolean; user: ApiUser | null }> {
-    const response = await fetch(`${AUTH_ROUTE}/session`, { credentials: 'same-origin', cache: 'no-store' })
+    const { response, data: value } = await fetchJson(`${AUTH_ROUTE}/session`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
     devLog('auth.session.response', { status: response.status, ok: response.ok })
-    return response.json() as Promise<{ authenticated: boolean; user: ApiUser | null }>
+    if (response.status === 401) return { authenticated: false, user: null }
+    const data = value as { authenticated?: boolean; user?: ApiUser } | null
+    if (!response.ok || !data || data.authenticated !== true || !isApiUser(data.user)) {
+      throw new ApiError(response.ok ? 502 : response.status, {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'Не удалось проверить доступ. Повторите попытку.',
+      })
+    }
+    return { authenticated: true, user: data.user }
   }
 
   async logout(): Promise<void> {
@@ -434,7 +532,36 @@ class ApiClient {
   }
 
   async getLessonRoster(lessonId: string, date: string, signal?: AbortSignal): Promise<LessonRoster> {
-    return this.request<LessonRoster>('getLessonRoster', { lessonId, date }, signal)
+    const data = await this.request<LessonRoster>('getLessonRoster', { lessonId, date }, signal)
+    const ids = new Set<string>()
+    if (
+      !data ||
+      data.lessonId !== lessonId ||
+      data.date !== date ||
+      !Array.isArray(data.clients) ||
+      data.clients.some((client) => {
+        if (
+          !client ||
+          typeof client.id !== 'string' ||
+          !client.id ||
+          ids.has(client.id) ||
+          typeof client.childName !== 'string' ||
+          typeof client.parentName !== 'string' ||
+          !Number.isFinite(client.remainingLessons) ||
+          client.remainingLessons < 0 ||
+          ![null, 'attended', 'absent'].includes(client.mark)
+        )
+          return true
+        ids.add(client.id)
+        return false
+      })
+    ) {
+      throw new ApiError(502, {
+        code: 'INVALID_RESPONSE',
+        message: 'Не удалось загрузить список занятия. Повторите попытку.',
+      })
+    }
+    return data
   }
 
   async fetchLessons(signal?: AbortSignal, branchId?: string): Promise<ReturnType<typeof normalizeLesson>[]> {
@@ -446,27 +573,34 @@ class ApiClient {
     return (Array.isArray(data) ? data : []).map(normalizeLesson)
   }
 
-  async fetchBootstrapData(signal?: AbortSignal, branchId?: string): Promise<BootstrapData> {
+  async fetchBootstrapData(signal?: AbortSignal, branchId?: string, includeCoaches = true): Promise<BootstrapData> {
     try {
       const data = await this.request<{ branches?: unknown[]; coaches?: unknown[]; lessons?: unknown[] }>(
         'getBootstrapData',
-        branchId ? { branchId } : {},
+        { ...(branchId ? { branchId } : {}), ...(!includeCoaches ? { includeCoaches: false } : {}) },
         signal,
       )
       return {
-        branches: (Array.isArray(data.branches) ? data.branches : []).map((raw) => {
-          const value = raw as JsonObject
-          return { ...value, id: String(value.id) } as IBranch
-        }),
-        coaches: (Array.isArray(data.coaches) ? data.coaches : []).map((raw) => {
-          const value = raw as JsonObject
+        branches: rowsWithIds(data.branches).map((value) => {
           return {
-            ...value,
+            id: String(value.id),
+            name: String(value.name || ''),
+            address: String(value.address || ''),
+          } as IBranch
+        }),
+        coaches: rowsWithIds(data.coaches).map((value) => {
+          return {
             id: String(value.id),
             branchId: value.branchId ? String(value.branchId) : '',
+            name: String(value.name || ''),
+            specialty: String(value.specialty || ''),
+            initials: String(value.initials || ''),
+            userId: String(value.userId || ''),
+            phone: String(value.phone || ''),
+            birthDate: String(value.birthDate || ''),
           } as ICoach
         }),
-        lessons: (Array.isArray(data.lessons) ? data.lessons : []).map(normalizeLesson),
+        lessons: rowsWithIds(data.lessons).map(normalizeLesson),
       }
     } catch (error) {
       // Keep rolling deployments usable: an older GAS version does not know
@@ -475,7 +609,7 @@ class ApiClient {
       if (!(error instanceof ApiError) || (error.status !== 404 && error.code !== 'NOT_FOUND')) throw error
       const [branches, coaches, lessons] = await Promise.all([
         this.fetchBranches(signal),
-        this.fetchCoaches(signal, branchId),
+        includeCoaches ? this.fetchCoaches(signal, branchId) : Promise.resolve([]),
         this.fetchLessons(signal, branchId),
       ])
       return { branches, coaches, lessons }
@@ -605,22 +739,71 @@ class ApiClient {
     date: string,
     requestId: string = createRequestId(),
   ) {
-    const results: Array<{ clientId: string; success: boolean; message?: string }> = []
+    const results: AttendanceResult[] = []
     for (let offset = 0; offset < attendanceList.length; offset += 100) {
       const chunk = attendanceList.slice(offset, offset + 100)
-      const response = await this.request<{
-        success: boolean
-        results: Array<{ clientId: string; success: boolean; message?: string }>
-      }>('recordBulkAttendance', {
-        requestId: `${requestId}:${offset / 100}`,
-        attendance: chunk.map((a) => ({
-          clientId: a.clientId,
-          lessonId,
-          date,
-          status: a.status,
-          isWalkin: false,
-        })),
-      })
+      let response: { success: boolean; results: AttendanceResult[] }
+      try {
+        response = await this.request<{
+          success: boolean
+          results: AttendanceResult[]
+        }>('recordBulkAttendance', {
+          requestId: `${requestId}:${offset / 100}`,
+          attendance: chunk.map((a) => ({
+            clientId: a.clientId,
+            lessonId,
+            date,
+            status: a.status,
+            isWalkin: false,
+          })),
+        })
+        const confirmedIds = new Set<string>()
+        const requestedIds = new Set(chunk.map((mark) => mark.clientId))
+        const validResults =
+          Array.isArray(response?.results) &&
+          response.results.every((result) => {
+            if (!result || result.success !== true || confirmedIds.has(result.clientId)) return false
+            confirmedIds.add(result.clientId)
+            return true
+          })
+        if (
+          !response ||
+          response.success !== true ||
+          !validResults ||
+          requestedIds.size !== chunk.length ||
+          response.results.length !== chunk.length ||
+          chunk.some((mark) => !confirmedIds.has(mark.clientId))
+        ) {
+          throw new ApiError(502, {
+            code: 'INVALID_RESPONSE',
+            message: 'Сервер не подтвердил сохранение всех отметок. Проверьте результат или повторите тот же запрос.',
+          })
+        }
+        // Balances are optional for compatibility with an older GAS deployment.
+        // A malformed optional snapshot must never poison the visible counters,
+        // or turn an otherwise confirmed write into an uncertain retry.
+        response.results = response.results.map((result) => {
+          const client = result.client
+          const validClient =
+            client &&
+            Number.isSafeInteger(client.remainingLessons) &&
+            Number.isSafeInteger(client.totalLessons) &&
+            client.remainingLessons >= 0 &&
+            client.totalLessons >= client.remainingLessons &&
+            ['Активен', 'Пауза', 'Архив'].includes(client.status)
+          return {
+            ...result,
+            client: validClient
+              ? { remainingLessons: client.remainingLessons, totalLessons: client.totalLessons, status: client.status }
+              : undefined,
+          }
+        })
+      } catch (error) {
+        if (error && typeof error === 'object' && results.length > 0) {
+          Object.assign(error, { attendanceOutcomeUnknown: true })
+        }
+        throw error
+      }
       results.push(...response.results)
     }
     return { success: results.every((item) => item.success), results }

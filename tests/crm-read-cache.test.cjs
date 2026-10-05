@@ -20,6 +20,20 @@ test('CRM read cache serves a fresh private result without a second load', async
   assert.equal(calls, 1)
 })
 
+test('post-mutation reads cannot join an earlier pending request', async () => {
+  const cache = createCrmReadCache()
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const before = cache.getOrLoad('getClients', {}, user, async () => { await gate; return 'old' })
+  cache.invalidate()
+  const after = await cache.getOrLoad('getClients', {}, user, async () => 'new')
+  assert.equal(after.status, 'MISS')
+  assert.equal(after.value, 'new')
+  release()
+  await before
+  assert.equal((await cache.getOrLoad('getClients', {}, user, async () => 'unexpected')).value, 'new')
+})
+
 test('CRM read cache returns stale data immediately and refreshes it in background', async () => {
   let calls = 0
   let clock = 0

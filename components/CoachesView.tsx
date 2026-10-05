@@ -1,13 +1,14 @@
 'use client'
 
 import { observer } from 'mobx-react-lite'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import Link from 'next/link'
 import { getStore } from '@/store/RootStore'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { CalendarDays, KeyRound, Link2, Phone, Plus, Trash2, UserRoundCheck } from 'lucide-react'
+import { CalendarDays, KeyRound, Link2, Phone, Plus, RefreshCw, Trash2, UserRoundCheck } from 'lucide-react'
 import { apiClient, ApiError, CoachAccount } from '@/lib/api-client'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { formatBirthDate, formatPhone } from '@/lib/formatters'
@@ -39,24 +40,125 @@ export const CoachesView = observer(() => {
   const [linkingAccounts, setLinkingAccounts] = useState<Record<string, string>>({})
   const [passwords, setPasswords] = useState<Record<string, string>>({})
   const [accountsError, setAccountsError] = useState<string | null>(null)
+  const [accountsNotice, setAccountsNotice] = useState<string | null>(null)
+  const [accountsLoading, setAccountsLoading] = useState(true)
+  const [registrationLink, setRegistrationLink] = useState('')
+  const [sharingNotice, setSharingNotice] = useState('')
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null)
   const [isCreating, setIsCreating] = useState(false)
+  const actionInFlight = useRef(false)
+  const mounted = useRef(true)
+  const accountsRead = useRef<Promise<void> | null>(null)
 
   const linkedUserIds = new Set(store.coaches.map((coach) => coach.userId).filter(Boolean))
+  const branchItems = store.branches.map((branch) => ({ value: String(branch.id), label: branch.name }))
+  const visibleAccounts = accounts.filter(
+    (account) =>
+      store.authStore.isAdmin &&
+      (!store.selectedBranchId || !account.branchId || account.branchId === store.selectedBranchId),
+  )
+  const pendingAccounts = visibleAccounts.filter((account) => account.status === 'Ожидает подтверждения')
+  const trainerAccounts = visibleAccounts.filter((account) => account.status !== 'Ожидает подтверждения')
+  // Join only by explicit userId; names are not an identity key.
+  const standaloneCoaches = coaches.filter(
+    (coach) => !store.authStore.isAdmin || !accounts.some((account) => account.id === coach.userId),
+  )
+  const controlsBusy = busyAccountId !== null || isCreating || accountsLoading
 
-  const loadAccounts = async () => {
+  const copyRegistrationLink = async () => {
+    const link = window.location.origin + '/register'
+    setRegistrationLink(link)
     try {
-      const users = await apiClient.fetchUsers()
-      setAccounts(users)
-      setAccountsError(null)
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось загрузить аккаунты тренеров')
+      if (typeof navigator === 'undefined' || !navigator.clipboard) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(link)
+      setSharingNotice('Ссылка скопирована.')
+    } catch {
+      setSharingNotice('Не удалось скопировать автоматически. Выделите и скопируйте ссылку из поля.')
     }
   }
 
+  const loadAccounts = (): Promise<void> => {
+    if (accountsRead.current) return accountsRead.current
+    const version = store.authStore.sessionVersion
+    setAccountsLoading(true)
+    const currentRead = (async () => {
+      try {
+        const users = await apiClient.fetchUsers()
+        if (
+          !Array.isArray(users) ||
+          users.some(
+            (user) =>
+              !user ||
+              typeof user.id !== 'string' ||
+              !user.id.trim() ||
+              typeof user.username !== 'string' ||
+              !user.username.trim() ||
+              user.role !== 'coach' ||
+              !['Активен', 'Отключен', 'Ожидает подтверждения'].includes(user.status) ||
+              (user.branchId !== null && typeof user.branchId !== 'string'),
+          )
+        )
+          throw new Error('Invalid accounts response')
+        if (!mounted.current || !store.authStore.isAdmin || version !== store.authStore.sessionVersion) return
+        setAccounts(users)
+        setAccountsError(null)
+      } catch (error) {
+        if (!mounted.current || version !== store.authStore.sessionVersion) return
+        setAccountsError(
+          error instanceof ApiError ? error.message : 'Не удалось загрузить аккаунты. Нажмите «Обновить список».',
+        )
+      } finally {
+        if (mounted.current && version === store.authStore.sessionVersion) setAccountsLoading(false)
+      }
+    })().finally(() => {
+      if (accountsRead.current === currentRead) accountsRead.current = null
+    })
+    accountsRead.current = currentRead
+    return currentRead
+  }
+
   useEffect(() => {
+    mounted.current = true
+    setAccounts([])
+    setAccountsError(null)
+    setAccountsNotice(null)
+    setAssigningBranches({})
+    setLinkingAccounts({})
+    setPasswords({})
     if (store.authStore.isAdmin) void loadAccounts()
+    return () => {
+      mounted.current = false
+      accountsRead.current = null
+    }
   }, [sessionVersion])
+
+  const confirmed = (result: { success: boolean }) => {
+    if (!result || result.success !== true)
+      throw new ApiError(502, { message: 'Сервис не подтвердил изменение. Обновите список перед повтором.' })
+  }
+
+  const runAccountAction = async (userId: string, action: () => Promise<void>) => {
+    // React may not have rendered the disabled state before a second click.
+    if (actionInFlight.current || accountsRead.current || !store.authStore.isAdmin) return
+    actionInFlight.current = true
+    setBusyAccountId(userId)
+    setAccountsError(null)
+    setAccountsNotice(null)
+    try {
+      await action()
+    } catch (error) {
+      await loadAccounts()
+      if (mounted.current)
+        setAccountsError(
+          error instanceof ApiError
+            ? error.message
+            : 'Изменение не подтверждено. Проверьте статус в списке перед повтором.',
+        )
+    } finally {
+      actionInFlight.current = false
+      if (mounted.current) setBusyAccountId(null)
+    }
+  }
 
   const handleAddDialogChange = (open: boolean) => {
     setIsAddCoachOpen(open)
@@ -71,32 +173,58 @@ export const CoachesView = observer(() => {
   const assignBranch = async (userId: string) => {
     const account = accounts.find((item) => item.id === userId)
     const branchId = assigningBranches[userId] || account?.branchId || ''
-    if (!branchId) {
+    if (!branchItems.some((branch) => branch.value === branchId)) {
       setAccountsError('Выберите филиал для аккаунта тренера')
       return
     }
-    setBusyAccountId(userId)
-    try {
-      await apiClient.assignUserBranch(userId, branchId)
+    await runAccountAction(userId, async () => {
+      confirmed(await apiClient.assignUserBranch(userId, branchId))
+      setAccounts((current) => current.map((item) => (item.id === userId ? { ...item, branchId } : item)))
+      setAccountsNotice('Филиал сохранён.')
       await loadAccounts()
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось назначить филиал')
-    } finally {
-      setBusyAccountId(null)
-    }
+    })
   }
 
   const changeAccountStatus = async (account: CoachAccount) => {
-    setBusyAccountId(account.id)
-    try {
-      if (account.status === 'Активен') await apiClient.deactivateUser(account.id)
-      else await apiClient.activateUser(account.id)
-      await loadAccounts()
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось изменить доступ тренера')
-    } finally {
-      setBusyAccountId(null)
+    const branchId = assigningBranches[account.id] || account.branchId || ''
+    if (account.status !== 'Активен' && !branchItems.some((branch) => branch.value === branchId)) {
+      setAccountsError('Выберите филиал, в котором тренер будет работать.')
+      return
     }
+    if (
+      account.status === 'Активен' &&
+      !window.confirm('Отключить вход для «' + account.username + '»? Карточка и история сохранятся.')
+    )
+      return
+    await runAccountAction(account.id, async () => {
+      if (account.status === 'Активен') confirmed(await apiClient.deactivateUser(account.id))
+      else {
+        // Only activate after the branch assignment is confirmed. An interrupted
+        // second step leaves a pending account pending; it never grants access.
+        if (branchId !== account.branchId) {
+          confirmed(await apiClient.assignUserBranch(account.id, branchId))
+          setAccounts((current) => current.map((item) => (item.id === account.id ? { ...item, branchId } : item)))
+        }
+        confirmed(await apiClient.activateUser(account.id))
+      }
+      setAccounts((current) =>
+        current.map((item) =>
+          item.id === account.id
+            ? {
+                ...item,
+                status: account.status === 'Активен' ? 'Отключен' : 'Активен',
+                branchId: account.status === 'Активен' ? item.branchId : branchId,
+              }
+            : item,
+        ),
+      )
+      setAccountsNotice(
+        account.status === 'Активен'
+          ? 'Вход отключён.'
+          : 'Доступ подтверждён. Тренер может войти со своим логином и паролем.',
+      )
+      await loadAccounts()
+    })
   }
 
   const resetPassword = async (userId: string) => {
@@ -105,55 +233,54 @@ export const CoachesView = observer(() => {
       setAccountsError('Временный пароль должен содержать не менее 8 символов')
       return
     }
-    setBusyAccountId(userId)
-    try {
-      await apiClient.resetCoachPassword(userId, newPassword)
-      setPasswords((current) => ({ ...current, [userId]: '' }))
-      setAccountsError(null)
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось сбросить пароль')
-    } finally {
-      setBusyAccountId(null)
+    if (newPassword.length > 200) {
+      setAccountsError('Пароль должен содержать не более 200 символов')
+      return
     }
+    await runAccountAction(userId, async () => {
+      confirmed(await apiClient.resetCoachPassword(userId, newPassword))
+      setPasswords((current) => ({ ...current, [userId]: '' }))
+      setAccountsNotice('Пароль изменён. Передайте новый пароль тренеру по защищённому каналу.')
+    })
   }
 
   const linkAccount = async (coachId: string) => {
-    const userId = linkingAccounts[coachId]
-    if (!userId) {
+    const coach = store.coaches.find((item) => String(item.id) === coachId)
+    const eligible = accounts.filter(
+      (account) =>
+        account.branchId === String(coach?.branchId) &&
+        (!linkedUserIds.has(account.id) || account.id === coach?.userId),
+    )
+    const userId = linkingAccounts[coachId] || (eligible.length === 1 ? eligible[0].id : '')
+    if (!userId || !eligible.some((account) => account.id === userId)) {
       setAccountsError('Выберите аккаунт для связи с карточкой тренера')
       return
     }
-    setBusyAccountId(userId)
-    try {
-      await apiClient.linkCoachUser(coachId, userId)
+    await runAccountAction(userId, async () => {
+      confirmed(await apiClient.linkCoachUser(coachId, userId))
       await store.initialize(true)
       await loadAccounts()
       setLinkingAccounts((current) => ({ ...current, [coachId]: '' }))
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось связать аккаунт с тренером')
-    } finally {
-      setBusyAccountId(null)
-    }
+      setAccountsNotice('Записи объединены. Тренер отображается в списке один раз.')
+    })
   }
 
   const deleteCoach = async (coachId: string, coachName: string) => {
     if (
       !window.confirm(
-        'Удалить карточку тренера «' +
-          coachName +
-          '»? Связанный аккаунт будет деактивирован, история посещений и платежей сохранится.',
+        'Удалить сведения о тренере «' + coachName + '»? Его вход будет отключён. Учётная запись и история сохранятся.',
       )
     )
       return
-    try {
+    await runAccountAction('coach:' + coachId, async () => {
       await store.deleteCoach(coachId)
       await loadAccounts()
-    } catch (error) {
-      setAccountsError(error instanceof ApiError ? error.message : 'Не удалось удалить тренера')
-    }
+      setAccountsNotice('Сведения удалены. Связанный вход отключён; учётная запись и история сохранены.')
+    })
   }
 
   const handleSubmit = async () => {
+    if (actionInFlight.current || accountsRead.current || !store.authStore.isAdmin) return
     setFormError(null)
     const fullName = (formData.name + ' ' + formData.surname).trim()
     if (!fullName) {
@@ -180,6 +307,7 @@ export const CoachesView = observer(() => {
       setFormError('Временный пароль должен содержать не менее 8 символов')
       return
     }
+    actionInFlight.current = true
     setIsCreating(true)
     try {
       await store.createCoach({
@@ -196,17 +324,176 @@ export const CoachesView = observer(() => {
     } catch (error) {
       setFormError(error instanceof ApiError ? error.message : 'Не удалось создать тренера')
     } finally {
+      actionInFlight.current = false
       setIsCreating(false)
     }
   }
 
+  const renderAccount = (account: CoachAccount) => {
+    const selectedBranch = assigningBranches[account.id] || account.branchId || ''
+    const validBranch = branchItems.some((branch) => branch.value === selectedBranch)
+    const pending = account.status === 'Ожидает подтверждения'
+    const active = account.status === 'Активен'
+    const linkedCoach = store.coaches.find((coach) => coach.userId === account.id)
+    const management = (
+      <>
+        <div className="grid min-w-0 gap-3">
+          <label htmlFor={'account-branch-' + account.id} className="text-xs font-medium text-slate-600">
+            Филиал для работы
+          </label>
+          <Select
+            items={branchItems}
+            value={selectedBranch || null}
+            disabled={controlsBusy || branchItems.length === 0}
+            onValueChange={(value) => value && setAssigningBranches((current) => ({ ...current, [account.id]: value }))}
+          >
+            <SelectTrigger
+              id={'account-branch-' + account.id}
+              className="w-full min-w-0 rounded-lg data-[size=default]:h-10"
+              aria-label={'Филиал для ' + account.username}
+            >
+              <SelectValue className="min-w-0 truncate" placeholder="Выберите филиал">
+                {(value) => (value ? branchLabel(String(value)) : 'Выберите филиал')}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent alignItemWithTrigger={false} align="start">
+              {store.branches.map((branch) => (
+                <SelectItem key={branch.id} value={String(branch.id)}>
+                  {branch.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {branchItems.length === 0 && (
+            <p className="text-xs text-amber-800">Сначала добавьте филиал в настройках филиалов.</p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {active && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={controlsBusy || !validBranch || selectedBranch === account.branchId}
+                onClick={() => void assignBranch(account.id)}
+              >
+                Сохранить филиал
+              </Button>
+            )}
+            <Button
+              variant={account.status === 'Активен' ? 'destructive' : 'default'}
+              size="sm"
+              disabled={controlsBusy || (!active && !validBranch)}
+              onClick={() => void changeAccountStatus(account)}
+            >
+              <UserRoundCheck className="mr-1 size-3.5" />{' '}
+              {busyAccountId === account.id
+                ? 'Сохраняем…'
+                : active
+                  ? 'Отключить вход'
+                  : pending
+                    ? 'Подтвердить доступ'
+                    : 'Разрешить вход'}
+            </Button>
+          </div>
+          {!active && !validBranch && <p className="text-xs text-slate-500">Выберите филиал, чтобы разрешить вход.</p>}
+        </div>
+        <details
+          className={pending ? 'border-t border-slate-100 pt-3 md:col-span-2' : 'border-t border-slate-100 pt-3'}
+        >
+          <summary className="w-fit cursor-pointer text-sm text-slate-600">Изменить пароль</summary>
+          <p className="my-3 text-xs text-slate-500">
+            Только если тренер забыл пароль. При подтверждении регистрации менять его не нужно.
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              type="password"
+              value={passwords[account.id] || ''}
+              onChange={(event) => setPasswords((current) => ({ ...current, [account.id]: event.target.value }))}
+              aria-label={'Новый пароль для ' + account.username}
+              autoComplete="new-password"
+              maxLength={200}
+              disabled={controlsBusy}
+              placeholder="Новый пароль: от 8 символов"
+              className="h-9 rounded-lg"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={controlsBusy || (passwords[account.id] || '').length < 8}
+              onClick={() => void resetPassword(account.id)}
+            >
+              <KeyRound className="mr-1 size-3.5" /> Изменить пароль
+            </Button>
+          </div>
+        </details>
+        {!pending && linkedCoach && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-fit text-rose-600"
+            disabled={controlsBusy}
+            onClick={() => void deleteCoach(linkedCoach.id, linkedCoach.name)}
+          >
+            <Trash2 className="mr-1 size-3.5" /> Удалить сведения
+          </Button>
+        )}
+      </>
+    )
+    return (
+      <div
+        key={account.id}
+        data-trainer-id={account.id}
+        className={
+          pending
+            ? 'grid min-w-0 gap-4 rounded-xl border border-slate-200 bg-white p-4 md:grid-cols-[minmax(0,1fr)_minmax(240px,1fr)]'
+            : 'grid min-w-0 content-start gap-4 rounded-2xl border border-slate-200 bg-white p-6'
+        }
+      >
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="break-all font-semibold text-slate-900">{linkedCoach?.name || account.username}</p>
+            <span
+              className={
+                pending
+                  ? 'rounded-full bg-amber-50 px-2 py-1 text-xs text-amber-800'
+                  : active
+                    ? 'rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-800'
+                    : 'rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600'
+              }
+            >
+              {pending ? 'Новая заявка' : active ? 'Вход разрешён' : 'Вход отключён'}
+            </span>
+          </div>
+          <p className="mt-2 text-sm text-slate-600">{branchLabel(account.branchId)}</p>
+          {linkedCoach && <p className="mt-1 text-xs text-slate-500">Логин: {account.username}</p>}
+          {linkedCoach?.phone && <p className="mt-2 text-sm text-slate-600">{linkedCoach.phone}</p>}
+          {linkedCoach?.birthDate && <p className="mt-1 text-sm text-slate-600">{linkedCoach.birthDate}</p>}
+        </div>
+        {pending ? (
+          management
+        ) : (
+          <details className="min-w-0 border-t border-slate-100 pt-3">
+            <summary className="w-fit cursor-pointer text-sm text-cyan-800">Управление тренером</summary>
+            <div className="mt-4 grid min-w-0 gap-4">{management}</div>
+          </details>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-        <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Тренеры</h2>
+      <div className="flex flex-wrap justify-between items-center gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900">Тренеры</h2>
+          <p className="mt-1 text-sm text-slate-500">Подтвердите новых тренеров и управляйте входом в CRM.</p>
+        </div>
         {store.authStore.isAdmin && (
           <Dialog open={isAddCoachOpen} onOpenChange={handleAddDialogChange}>
-            <DialogTrigger render={<Button className="rounded-full bg-cyan-500 hover:bg-cyan-600 text-white" />}>
+            <DialogTrigger
+              render={
+                <Button disabled={controlsBusy} className="rounded-full bg-cyan-500 hover:bg-cyan-600 text-white" />
+              }
+            >
               <Plus className="mr-2 size-4" /> Добавить тренера
             </DialogTrigger>
             <DialogContent className="max-w-[450px] p-0 rounded-3xl overflow-hidden border-pink-100 bg-white">
@@ -243,13 +530,19 @@ export const CoachesView = observer(() => {
                   className="rounded-xl h-12 border-cyan-100 focus:border-cyan-400"
                 />
                 <Select
-                  value={formData.branchId}
+                  items={branchItems}
+                  value={formData.branchId || null}
                   onValueChange={(value) => value && setFormData({ ...formData, branchId: value })}
                 >
-                  <SelectTrigger className="h-12 rounded-xl" aria-label="Филиал тренера">
-                    <SelectValue placeholder="Выберите филиал" />
+                  <SelectTrigger
+                    className="w-full min-w-0 rounded-xl data-[size=default]:h-12"
+                    aria-label="Филиал тренера"
+                  >
+                    <SelectValue className="min-w-0 truncate" placeholder="Выберите филиал">
+                      {(value) => (value ? branchLabel(String(value)) : 'Выберите филиал')}
+                    </SelectValue>
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent alignItemWithTrigger={false} align="start">
                     {store.branches.map((branch) => (
                       <SelectItem key={branch.id} value={String(branch.id)}>
                         {branch.name}
@@ -285,7 +578,7 @@ export const CoachesView = observer(() => {
                 </div>
                 <Button
                   onClick={() => void handleSubmit()}
-                  disabled={isCreating}
+                  disabled={controlsBusy}
                   className="w-full rounded-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold h-12"
                 >
                   {isCreating ? 'Сохраняем…' : 'Сохранить'}
@@ -297,198 +590,205 @@ export const CoachesView = observer(() => {
       </div>
 
       {store.authStore.isAdmin && (
-        <Card className="rounded-2xl border-amber-200 bg-amber-50/60">
+        <Card className="rounded-2xl border-slate-200 bg-white">
           <CardContent className="grid gap-4 p-5">
-            <div>
-              <h3 className="font-semibold text-slate-900">Доступы тренеров</h3>
-              <p className="mt-1 text-sm text-slate-600">
-                Здесь можно назначить филиал, временно отключить вход, восстановить доступ и выдать новый пароль.
-              </p>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-slate-900">Пригласить тренера</h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  Тренер регистрируется по ссылке. Вы подтверждаете его заявку ниже.
+                </p>
+              </div>
+              <Button variant="outline" size="sm" disabled={controlsBusy} onClick={() => void loadAccounts()}>
+                <RefreshCw className={accountsLoading ? 'mr-1 size-4 animate-spin' : 'mr-1 size-4'} />
+                Обновить список
+              </Button>
             </div>
-            {accountsError && <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{accountsError}</p>}
-            {accounts.length === 0 ? (
-              <p className="text-sm text-slate-500">Аккаунтов тренеров пока нет.</p>
-            ) : (
-              accounts.map((account) => (
-                <div
-                  key={account.id}
-                  className="grid gap-3 rounded-xl border border-amber-200 bg-white p-4 lg:grid-cols-[minmax(0,1fr)_220px_auto] lg:items-center"
-                >
-                  <div className="min-w-0">
-                    <p className="font-medium text-slate-800">{account.username}</p>
-                    <p className="text-xs text-slate-500">
-                      {branchLabel(account.branchId)} · {account.status}
-                      {account.disabledAt ? ' · отключён ' + account.disabledAt.slice(0, 10) : ''}
-                    </p>
-                  </div>
-                  <Select
-                    value={assigningBranches[account.id] || account.branchId || ''}
-                    onValueChange={(value) =>
-                      value && setAssigningBranches((current) => ({ ...current, [account.id]: value }))
-                    }
-                  >
-                    <SelectTrigger className="rounded-xl" aria-label={'Филиал для ' + account.username}>
-                      <SelectValue placeholder="Выберите филиал" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {store.branches.map((branch) => (
-                        <SelectItem key={branch.id} value={String(branch.id)}>
-                          {branch.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busyAccountId === account.id || store.branches.length === 0}
-                      onClick={() => void assignBranch(account.id)}
-                    >
-                      Филиал
-                    </Button>
-                    <Button
-                      variant={account.status === 'Активен' ? 'destructive' : 'default'}
-                      size="sm"
-                      disabled={busyAccountId === account.id}
-                      onClick={() => void changeAccountStatus(account)}
-                    >
-                      <UserRoundCheck className="mr-1 size-3.5" />{' '}
-                      {account.status === 'Активен' ? 'Отключить' : 'Активировать'}
-                    </Button>
-                  </div>
-                  <div className="flex gap-2 lg:col-start-2 lg:col-span-2">
-                    <Input
-                      type="password"
-                      value={passwords[account.id] || ''}
-                      onChange={(event) =>
-                        setPasswords((current) => ({ ...current, [account.id]: event.target.value }))
-                      }
-                      placeholder="Новый временный пароль"
-                      className="h-9 rounded-lg"
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busyAccountId === account.id}
-                      onClick={() => void resetPassword(account.id)}
-                    >
-                      <KeyRound className="mr-1 size-3.5" /> Сбросить
-                    </Button>
-                  </div>
-                </div>
-              ))
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-slate-500">
+                Отправьте тренеру ссылку на ваш сайт с адресом{' '}
+                <Link href="/register" prefetch={false} className="text-cyan-800 underline">
+                  /register
+                </Link>
+                . Пароль он задаст самостоятельно.
+              </p>
+              <Button variant="outline" size="sm" onClick={() => void copyRegistrationLink()}>
+                Скопировать ссылку
+              </Button>
+            </div>
+            {registrationLink && (
+              <div className="grid gap-2">
+                <Input
+                  aria-label="Ссылка для регистрации тренера"
+                  readOnly
+                  value={registrationLink}
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+                <p role="status" className="text-xs text-slate-600">
+                  {sharingNotice}
+                </p>
+                {/^https?:\/\/(localhost|127\.0\.0\.1)([:/])/.test(registrationLink) && (
+                  <p className="text-xs text-amber-800">
+                    Это локальная ссылка: на другом компьютере она не откроется. Для тренера нужна ссылка на
+                    опубликованный сайт.
+                  </p>
+                )}
+              </div>
+            )}
+            {accountsError && (
+              <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                {accountsError}
+              </p>
+            )}
+            {accountsNotice && (
+              <p role="status" className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                {accountsNotice}
+              </p>
             )}
           </CardContent>
         </Card>
       )}
+      {store.authStore.isAdmin && pendingAccounts.length > 0 && (
+        <Card className="rounded-2xl border-amber-200 bg-white" data-section="pending-coaches">
+          <CardContent className="grid gap-4 p-5">
+            <h3 className="font-semibold text-slate-900">Новые заявки · {pendingAccounts.length}</h3>
+            <p className="text-sm text-slate-600">
+              Выберите филиал и подтвердите тренера. После подтверждения он появится в списке «Тренеры».
+            </p>
+            {pendingAccounts.map(renderAccount)}
+          </CardContent>
+        </Card>
+      )}
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {coaches.length === 0 ? (
-          <p className="col-span-full py-10 text-center text-slate-500">В этом филиале пока нет тренеров</p>
-        ) : (
-          coaches.map((coach) => {
-            const linkedAccount = accounts.find((account) => account.id === coach.userId)
-            const linkableAccounts = accounts.filter(
-              (account) =>
-                account.branchId === String(coach.branchId) &&
-                (!linkedUserIds.has(account.id) || account.id === coach.userId),
-            )
-            return (
-              <Card key={coach.id} className="rounded-2xl border-cyan-100 hover:shadow-md transition-shadow">
-                <CardContent className="grid gap-4 p-6">
-                  <div className="flex items-center gap-4">
-                    <div className="flex size-16 items-center justify-center rounded-full bg-gradient-to-tr from-cyan-100 to-pink-100 text-xl font-bold text-cyan-700">
-                      {coach.initials}
+      <div>
+        <h3 className="mb-4 font-semibold text-slate-900">Тренеры</h3>
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {store.authStore.isAdmin && trainerAccounts.map(renderAccount)}
+          {standaloneCoaches.length === 0 && trainerAccounts.length === 0 ? (
+            <p className="col-span-full py-10 text-center text-slate-500">
+              {accountsLoading
+                ? 'Загружаем тренеров…'
+                : accountsError
+                  ? 'Не удалось загрузить всех тренеров. Обновите список.'
+                  : pendingAccounts.length
+                    ? 'Новые заявки ожидают вашего подтверждения.'
+                    : 'В этом филиале пока нет тренеров'}
+            </p>
+          ) : (
+            standaloneCoaches.map((coach) => {
+              const linkableAccounts = accounts.filter(
+                (account) =>
+                  account.branchId === String(coach.branchId) &&
+                  (!linkedUserIds.has(account.id) || account.id === coach.userId),
+              )
+              const selectedAccount =
+                linkingAccounts[coach.id] || (linkableAccounts.length === 1 ? linkableAccounts[0].id : '')
+              return (
+                <Card key={coach.id} className="rounded-2xl border-cyan-100 hover:shadow-md transition-shadow">
+                  <CardContent className="grid gap-4 p-6">
+                    <div className="flex items-center gap-4">
+                      <div className="flex size-16 items-center justify-center rounded-full bg-gradient-to-tr from-cyan-100 to-pink-100 text-xl font-bold text-cyan-700">
+                        {coach.initials}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-bold text-lg text-slate-900">{coach.name}</h3>
+                        <p className="text-sm text-slate-500">{coach.specialty}</p>
+                        <p className="mt-1 text-xs text-slate-500">{branchLabel(String(coach.branchId))}</p>
+                      </div>
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <h3 className="font-bold text-lg text-slate-900">{coach.name}</h3>
-                      <p className="text-sm text-slate-500">{coach.specialty}</p>
-                    </div>
-                  </div>
-                  {(coach.phone || coach.birthDate) && (
-                    <div className="grid gap-2 text-sm text-slate-600">
-                      {coach.phone && (
-                        <p className="flex items-center gap-2">
-                          <Phone className="size-4 text-cyan-600" /> {coach.phone}
-                        </p>
-                      )}
-                      {coach.birthDate && (
-                        <p className="flex items-center gap-2">
-                          <CalendarDays className="size-4 text-cyan-600" /> {coach.birthDate}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  {store.authStore.isAdmin && (
-                    <div className="grid gap-2 border-t border-slate-100 pt-4">
-                      {linkedAccount ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p className="text-sm text-slate-600">
-                            Доступ: <span className="font-medium">{linkedAccount.username}</span> ·{' '}
-                            {linkedAccount.status}
+                    {(coach.phone || coach.birthDate) && (
+                      <div className="grid gap-2 text-sm text-slate-600">
+                        {coach.phone && (
+                          <p className="flex items-center gap-2">
+                            <Phone className="size-4 text-cyan-600" /> {coach.phone}
                           </p>
+                        )}
+                        {coach.birthDate && (
+                          <p className="flex items-center gap-2">
+                            <CalendarDays className="size-4 text-cyan-600" /> {coach.birthDate}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {store.authStore.isAdmin && (
+                      <details className="border-t border-slate-100 pt-4">
+                        <summary className="w-fit cursor-pointer text-sm text-cyan-800">Управление тренером</summary>
+                        <div className="mt-4 grid gap-2">
+                          {linkableAccounts.length > 0 ? (
+                            <>
+                              <p className="text-sm text-slate-600">Объединить с зарегистрированным тренером</p>
+                              <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+                                <Select
+                                  items={linkableAccounts.map((account) => ({
+                                    value: account.id,
+                                    label: account.username,
+                                  }))}
+                                  value={selectedAccount || null}
+                                  disabled={controlsBusy}
+                                  onValueChange={(value) =>
+                                    value && setLinkingAccounts((current) => ({ ...current, [coach.id]: value }))
+                                  }
+                                >
+                                  <SelectTrigger
+                                    className="w-full min-w-0 flex-1 rounded-lg data-[size=default]:h-10"
+                                    aria-label={'Аккаунт для ' + coach.name}
+                                  >
+                                    <SelectValue className="min-w-0 truncate" placeholder="Выберите логин">
+                                      {(value) =>
+                                        value
+                                          ? linkableAccounts.find((account) => account.id === String(value))
+                                              ?.username || 'Логин недоступен'
+                                          : 'Выберите логин'
+                                      }
+                                    </SelectValue>
+                                  </SelectTrigger>
+                                  <SelectContent alignItemWithTrigger={false} align="start">
+                                    {linkableAccounts.map((account) => (
+                                      <SelectItem key={account.id} value={account.id}>
+                                        {account.username}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={controlsBusy || !selectedAccount}
+                                  onClick={() => void linkAccount(coach.id)}
+                                >
+                                  <Link2 className="mr-1 size-3.5" /> Объединить
+                                </Button>
+                              </div>
+                            </>
+                          ) : (
+                            <p className="text-sm text-slate-500">
+                              {accountsLoading
+                                ? 'Проверяем логин…'
+                                : accountsError
+                                  ? 'Не удалось проверить логин. Обновите список выше.'
+                                  : coach.userId
+                                    ? 'Связанный логин не найден. Обновите список выше.'
+                                    : 'Вход ещё не создан. Отправьте тренеру ссылку на регистрацию. Если он уже зарегистрирован, объедините записи после подтверждения заявки.'}
+                            </p>
+                          )}
                           <Button
-                            variant={linkedAccount.status === 'Активен' ? 'destructive' : 'outline'}
+                            variant="ghost"
                             size="sm"
-                            disabled={busyAccountId === linkedAccount.id}
-                            onClick={() => void changeAccountStatus(linkedAccount)}
+                            className="w-fit text-rose-600 hover:text-rose-700"
+                            disabled={controlsBusy}
+                            onClick={() => void deleteCoach(coach.id, coach.name)}
                           >
-                            {linkedAccount.status === 'Активен' ? 'Отключить доступ' : 'Активировать доступ'}
+                            <Trash2 className="mr-1 size-3.5" /> Удалить карточку
                           </Button>
                         </div>
-                      ) : linkableAccounts.length > 0 ? (
-                        <>
-                          <p className="text-sm text-amber-700">Аккаунт ещё не связан с карточкой.</p>
-                          <div className="flex gap-2">
-                            <Select
-                              value={linkingAccounts[coach.id] || ''}
-                              onValueChange={(value) =>
-                                value && setLinkingAccounts((current) => ({ ...current, [coach.id]: value }))
-                              }
-                            >
-                              <SelectTrigger
-                                className="h-9 min-w-0 flex-1 rounded-lg"
-                                aria-label={'Аккаунт для ' + coach.name}
-                              >
-                                <SelectValue placeholder="Выберите аккаунт" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {linkableAccounts.map((account) => (
-                                  <SelectItem key={account.id} value={account.id}>
-                                    {account.username}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={busyAccountId !== null}
-                              onClick={() => void linkAccount(coach.id)}
-                            >
-                              <Link2 className="mr-1 size-3.5" /> Связать
-                            </Button>
-                          </div>
-                        </>
-                      ) : (
-                        <p className="text-sm text-slate-500">Доступ в CRM не создан.</p>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="w-fit text-rose-600 hover:text-rose-700"
-                        onClick={() => void deleteCoach(coach.id, coach.name)}
-                      >
-                        <Trash2 className="mr-1 size-3.5" /> Удалить карточку
-                      </Button>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            )
-          })
-        )}
+                      </details>
+                    )}
+                  </CardContent>
+                </Card>
+              )
+            })
+          )}
+        </div>
       </div>
     </div>
   )

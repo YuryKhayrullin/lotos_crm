@@ -1,11 +1,11 @@
 import { useState, useMemo } from 'react'
+import dynamic from 'next/dynamic'
 import { observer } from 'mobx-react-lite'
 import { getStore } from '@/store/RootStore'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { AttendanceModal } from './AttendanceModal'
-import { CreateLessonModal } from './CreateLessonModal'
 import { ILesson } from '@/store/models'
 import {
   CalendarDays,
@@ -22,6 +22,7 @@ import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay, lessonOccurr
 import { RoleGuard } from './RoleGuard'
 
 const store = getStore()
+const CreateLessonModal = dynamic(() => import('./CreateLessonModal').then((module) => module.CreateLessonModal))
 
 // Обновленная функция с учетом смещения
 const getStartOfWeek = (offset: number) => {
@@ -53,18 +54,22 @@ export const ScheduleView = observer(() => {
     return end
   }, [startOfWeek])
 
-  const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
-    const d = new Date(startOfWeek)
-    d.setDate(startOfWeek.getDate() + i)
-    return { key: label, label: `${label} ${d.getDate()}`, fullDate: d }
-  })
+  const DAYS = useMemo(
+    () =>
+      ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((label, i) => {
+        const d = new Date(startOfWeek)
+        d.setDate(startOfWeek.getDate() + i)
+        return { key: label, label: `${label} ${d.getDate()}`, fullDate: d }
+      }),
+    [startOfWeek],
+  )
 
   const [selectedDay, setSelectedDay] = useState(
     DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн',
   )
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<'день' | 'неделя'>('неделя')
+  const [viewMode, setViewMode] = useState<'день' | 'неделя'>(store.authStore.isCoach ? 'день' : 'неделя')
 
   // Получаем выбранную дату для режима "день"
   const selectedDayData = DAYS.find((d) => d.key === selectedDay)
@@ -199,7 +204,9 @@ export const ScheduleView = observer(() => {
         occurrenceDate={selectedOccurrenceDate}
       />
 
-      <CreateLessonModal isOpen={isCreateLessonOpen} onClose={() => setIsCreateLessonOpen(false)} />
+      {store.authStore.isAdmin && isCreateLessonOpen && (
+        <CreateLessonModal isOpen onClose={() => setIsCreateLessonOpen(false)} />
+      )}
 
       <div className="grid gap-4">
         {lessons.length === 0 ? (
@@ -231,7 +238,7 @@ export const ScheduleView = observer(() => {
                 className="group cursor-pointer overflow-hidden rounded-2xl border-slate-100 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cyan-200 hover:shadow-md"
                 onClick={() => {
                   setSelectedOccurrenceDate(occurrenceDate)
-                  setSelectedLesson(lesson)
+                  setSelectedLesson({ ...lesson })
                 }}
               >
                 <CardContent className="flex items-center justify-between gap-4 p-4 sm:p-5">

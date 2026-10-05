@@ -25,7 +25,7 @@ export const normalizeLesson = (l: any): SnapshotIn<typeof import('@/store/model
   coachName: String(l.coachName || ''),
   pool: String(l.pool || ''),
   duration: String(l.duration || '1 час'),
-  maxCapacity: Number(l.maxCapacity || 10),
+  maxCapacity: Number.isFinite(Number(l.maxCapacity)) && Number(l.maxCapacity) > 0 ? Number(l.maxCapacity) : 10,
   count: String(l.count || '0 / 10'),
   isRecurring: l.isRecurring === true || l.isRecurring === 'true' || l.isRecurring === 'TRUE',
 })

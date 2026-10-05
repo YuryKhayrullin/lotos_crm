@@ -1,25 +1,32 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { observer } from 'mobx-react-lite'
 import { CalendarDays, Check, Clock3, Loader2, MapPin, RotateCcw, Save, Users, X } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useStore } from '@/store/StoreProvider'
-import { apiClient, createRequestId, type LessonRosterClient } from '@/lib/api-client'
+import { apiClient, ApiError, createRequestId, type AttendanceResult, type LessonRosterClient } from '@/lib/api-client'
+import {
+  forgetAttendanceDraft,
+  getAttendanceDraft,
+  rememberAttendanceDraft,
+  isDefiniteAttendanceRejection,
+  summarizeAttendance,
+  type AttendanceAttempt,
+  type AttendanceMap,
+  type AttendanceStatus,
+} from '@/lib/attendance-recovery'
 import { ILesson } from '@/store/models'
-
-type AttendanceStatus = 'attended' | 'absent'
-type AttendanceMap = Record<string, AttendanceStatus | null>
 
 function formatLessonDate(value: string | null) {
   if (!value) return 'Дата не указана'
   const [year, month, day] = value.split('-').map(Number)
   if (!year || !month || !day) return value
-  return new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' }).format(
-    new Date(year, month - 1, day),
-  )
+  const date = new Date(year, month - 1, day)
+  if (!Number.isFinite(date.getTime())) return 'Дата не определена'
+  return new Intl.DateTimeFormat('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' }).format(date)
 }
 
 export const AttendanceModal = observer(
@@ -28,11 +35,13 @@ export const AttendanceModal = observer(
     onClose,
     lesson,
     occurrenceDate,
+    onSaved,
   }: {
     isOpen: boolean
     onClose: () => void
     lesson: ILesson | null
     occurrenceDate: string | null
+    onSaved?: (results: AttendanceResult[]) => void
   }) => {
     const store = useStore()
     const [roster, setRoster] = useState<LessonRosterClient[]>([])
@@ -42,40 +51,74 @@ export const AttendanceModal = observer(
     const [reloadToken, setReloadToken] = useState(0)
     const [attendance, setAttendance] = useState<AttendanceMap>({})
     const [initialAttendance, setInitialAttendance] = useState<AttendanceMap>({})
-    const [pendingAttempt, setPendingAttempt] = useState<{
-      lessonId: string
-      date: string
-      requestId: string
-      attendanceList: { clientId: string; status: AttendanceStatus }[]
-    } | null>(null)
+    const [pendingAttempt, setPendingAttempt] = useState<AttendanceAttempt | null>(null)
     const [saving, setSaving] = useState(false)
+    const savingRef = useRef(false)
+    const loadedDraftKeyRef = useRef<string | null>(null)
+    const [slowSave, setSlowSave] = useState(false)
     const lessonId = lesson?.id ?? null
     const lessonDate = occurrenceDate
+    const userId = store.authStore.user?.id
+    const sessionVersion = store.authStore.sessionVersion
+    const sameSession = () => store.authStore.user?.id === userId && store.authStore.sessionVersion === sessionVersion
+    const draftKey = JSON.stringify([store.authStore.user?.id, store.authStore.sessionVersion, lessonId, lessonDate])
+
+    const remember = (marks: AttendanceMap, attempt = pendingAttempt) => {
+      rememberAttendanceDraft(draftKey, { attendance: marks, initialAttendance, pendingAttempt: attempt })
+    }
+
+    useEffect(() => {
+      if (!saving) return
+      const timer = setTimeout(() => setSlowSave(true), 8_000)
+      return () => clearTimeout(timer)
+    }, [saving])
 
     useEffect(() => {
       if (!isOpen || !lessonId || !lessonDate) return
       const controller = new AbortController()
       setLoading(true)
       setLoadError('')
-      setRoster([])
+      const draft = getAttendanceDraft(draftKey)
+      setPendingAttempt(draft?.pendingAttempt || null)
+      if (loadedDraftKeyRef.current !== draftKey)
+        setSaveError(
+          draft?.pendingAttempt
+            ? 'Предыдущее сохранение не подтверждено. Повтор отправит тот же запрос, без нового списания.'
+            : '',
+        )
+      loadedDraftKeyRef.current = draftKey
       void apiClient
         .getLessonRoster(lessonId, lessonDate, controller.signal)
         .then((result) => {
-          if (controller.signal.aborted) return
+          if (controller.signal.aborted || !sameSession()) return
           setRoster(result.clients)
-          if (pendingAttempt?.lessonId === lessonId && pendingAttempt.date === lessonDate) return
-
           const initialMarks: AttendanceMap = {}
           result.clients.forEach((client) => {
             initialMarks[client.id] = client.mark
           })
-          setPendingAttempt(null)
-          setSaveError('')
-          setAttendance(initialMarks)
+          const nextMarks = { ...initialMarks }
+          const restored = getAttendanceDraft(draftKey)
+          if (restored) {
+            Object.keys(initialMarks).forEach((id) => {
+              if (
+                restored.attendance[id] !== undefined &&
+                (restored.pendingAttempt || restored.attendance[id] !== restored.initialAttendance[id])
+              )
+                nextMarks[id] = restored.attendance[id]
+            })
+          }
+          setPendingAttempt(restored?.pendingAttempt || null)
+          setAttendance(nextMarks)
           setInitialAttendance(initialMarks)
+          rememberAttendanceDraft(draftKey, {
+            attendance: nextMarks,
+            initialAttendance: initialMarks,
+            pendingAttempt: restored?.pendingAttempt || null,
+          })
         })
         .catch((error) => {
-          if (!controller.signal.aborted) {
+          if (!controller.signal.aborted && sameSession()) {
+            if (error instanceof ApiError && error.status === 401) store.authStore.expireSession()
             setLoadError(error instanceof Error ? error.message : 'Не удалось загрузить учеников')
           }
         })
@@ -85,48 +128,52 @@ export const AttendanceModal = observer(
       return () => controller.abort()
       // Unsaved marks must survive an unrelated client-list refresh.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isOpen, lessonDate, lessonId, reloadToken])
+    }, [isOpen, lessonDate, lessonId, reloadToken, draftKey])
 
-    const changedEntries = useMemo(
-      () =>
-        Object.entries(attendance).filter(
-          (entry): entry is [string, AttendanceStatus] => entry[1] !== null && entry[1] !== initialAttendance[entry[0]],
-        ),
-      [attendance, initialAttendance],
+    const { changedEntries, attendedCount, absentCount, unmarkedCount } = useMemo(
+      () => summarizeAttendance(roster, attendance, initialAttendance),
+      [attendance, initialAttendance, roster],
     )
-    const attendedCount = roster.filter((client) => attendance[client.id] === 'attended').length
-    const absentCount = roster.filter((client) => attendance[client.id] === 'absent').length
-    const unmarkedCount = Math.max(0, roster.length - attendedCount - absentCount)
 
     if (!lesson) return null
 
     const handleToggle = (clientId: string, status: AttendanceStatus) => {
       if (pendingAttempt) return
-      setAttendance((current) => ({
-        ...current,
-        [clientId]: current[clientId] === status && initialAttendance[clientId] !== status ? null : status,
-      }))
+      const next = {
+        ...attendance,
+        [clientId]: attendance[clientId] === status && initialAttendance[clientId] !== status ? null : status,
+      }
+      setAttendance(next)
+      remember(next)
     }
 
     const markEveryonePresent = () => {
       if (pendingAttempt) return
-      setAttendance((current) => {
-        const next = { ...current }
-        roster.forEach((client) => {
-          if (client.remainingLessons > 0 || initialAttendance[client.id] === 'attended') next[client.id] = 'attended'
-        })
-        return next
+      const next = { ...attendance }
+      roster.forEach((client) => {
+        if (client.remainingLessons > 0 || initialAttendance[client.id] === 'attended') next[client.id] = 'attended'
       })
+      setAttendance(next)
+      remember(next)
     }
 
     const handleSaveAll = async () => {
+      if (savingRef.current) return
       if (!pendingAttempt && changedEntries.length === 0) return
+      if (!navigator.onLine) {
+        setSaveError(
+          'Нет соединения. Выбранные отметки сохранены в этом открытом приложении, но ещё не отправлены в таблицу.',
+        )
+        return
+      }
       if (!lessonDate || loading || loadError) {
         setSaveError('Не удалось определить дату или загрузить список занятия')
         return
       }
 
       setSaveError('')
+      savingRef.current = true
+      setSlowSave(false)
       setSaving(true)
       try {
         const attempt = pendingAttempt || {
@@ -136,18 +183,42 @@ export const AttendanceModal = observer(
           attendanceList: changedEntries.map(([clientId, status]) => ({ clientId, status })),
         }
         setPendingAttempt(attempt)
-        await store.clientStore.markBulkAttendance(
+        remember(attendance, attempt)
+        const result = await store.clientStore.markBulkAttendance(
           attempt.attendanceList,
           attempt.lessonId,
           attempt.date,
           attempt.requestId,
         )
+        if (!sameSession()) return
         setPendingAttempt(null)
+        forgetAttendanceDraft(draftKey)
+        // A UI callback failure cannot undo a confirmed write or make it look
+        // unsaved. Keep this outside the request's failure/retry semantics.
+        try {
+          onSaved?.(result.results)
+        } catch {
+          store.setError('Отметки сохранены. Не удалось обновить экран — обновите данные вручную.')
+        }
         onClose()
       } catch (error) {
-        setSaveError(error instanceof Error ? error.message : 'Ошибка при сохранении посещаемости')
-        setReloadToken((value) => value + 1)
+        if (!sameSession()) return
+        if (isDefiniteAttendanceRejection(error)) {
+          setPendingAttempt(null)
+          remember(attendance, null)
+          setSaveError(error instanceof Error ? error.message : 'Сервер отклонил отметки. Проверьте данные.')
+          // Business conflicts need fresh data; a timeout/503 does not.
+          // Avoid an automatic extra request to an already failing service.
+          if (!(error instanceof ApiError && error.status === 401)) setReloadToken((value) => value + 1)
+        } else {
+          setSaveError(
+            'Сохранение не подтверждено. Выбранные отметки сохранены в этом открытом приложении. Повторите тот же запрос после восстановления связи.',
+          )
+        }
+        if (error instanceof ApiError && error.status === 401) store.authStore.expireSession()
       } finally {
+        savingRef.current = false
+        setSlowSave(false)
         setSaving(false)
       }
     }
@@ -156,7 +227,7 @@ export const AttendanceModal = observer(
       <Dialog
         open={isOpen}
         onOpenChange={(open) => {
-          if (!open && !saving) onClose()
+          if (!open && !savingRef.current) onClose()
         }}
       >
         <DialogContent className="max-h-[92vh] max-w-[720px] overflow-hidden rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
@@ -235,7 +306,10 @@ export const AttendanceModal = observer(
                     variant="outline"
                     size="sm"
                     disabled={saving || Boolean(pendingAttempt)}
-                    onClick={() => setAttendance({ ...initialAttendance })}
+                    onClick={() => {
+                      setAttendance({ ...initialAttendance })
+                      forgetAttendanceDraft(draftKey)
+                    }}
                     className="rounded-xl bg-white"
                   >
                     <RotateCcw className="mr-1.5 size-3.5" /> Сбросить
@@ -351,9 +425,18 @@ export const AttendanceModal = observer(
                 className="h-11 rounded-xl bg-cyan-600 px-5 font-semibold hover:bg-cyan-700"
               >
                 {saving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Save className="mr-2 size-4" />}
-                {saving ? 'Сохраняем…' : `Сохранить${changedEntries.length ? ` · ${changedEntries.length}` : ''}`}
+                {saving
+                  ? 'Сохраняем…'
+                  : pendingAttempt
+                    ? 'Повторить сохранение'
+                    : `Сохранить${changedEntries.length ? ` · ${changedEntries.length}` : ''}`}
               </Button>
             </div>
+            {slowSave && (
+              <p role="status" className="text-sm text-slate-600">
+                Google отвечает дольше обычного. Ждём подтверждения; повторно нажимать кнопку не нужно.
+              </p>
+            )}
           </div>
         </DialogContent>
       </Dialog>

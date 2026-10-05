@@ -85,13 +85,16 @@ function ledgerRow({
 function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
   const state = { held: false, acquisitions: 0, events: [], writes: [], formats: [], driveFiles: [] }
   const sheets = new Map()
+  let nextSheetId = 1
 
   const makeSheet = (name, initialRows = []) => {
+    const sheetId = nextSheetId++
     const data = initialRows.map((row) => row.slice())
     const assertLocked = () => assert.equal(state.held, true, name + ' accessed outside the mutation lock')
     return {
       rows: data,
       getName: () => name,
+      getSheetId: () => sheetId,
       getLastColumn: () => (data[0] ? data[0].length : 0),
       getLastRow: () => data.length,
       getMaxRows: () => Math.max(1000, data.length),
@@ -173,6 +176,7 @@ function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
     LockService: { getScriptLock: () => lock },
     SpreadsheetApp: {
       getActiveSpreadsheet: () => ({
+        getId: () => 'test-spreadsheet',
         getSheetByName: (name) => sheets.get(name) || null,
         insertSheet: (name) => {
           if (sheets.has(name)) throw new Error('Sheet already exists: ' + name)
@@ -232,6 +236,7 @@ function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
   }
   vm.createContext(context)
   vm.runInContext(gas, context)
+  const canonicalRequireServerAuth = context.requireServerAuth
   context.requireServerAuth = () => ({ id: 'admin-1', username: 'admin', role: 'admin', branchId: null })
   context.verifySignedEnvelope = () => state.envelope
 
@@ -243,8 +248,126 @@ function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
     return JSON.parse(response.value)
   }
 
-  return { request, state, sheets, cacheValues, properties, context }
+  return { request, state, sheets, cacheValues, properties, context, canonicalRequireServerAuth }
 }
+
+const REGISTRATION_HEADERS = ['id', 'username', 'password', 'role', 'branchId', 'status', 'disabledAt', 'disabledBy']
+const REGISTRATION_HASH = 'scrypt$16384$8$1$' + 'a'.repeat(22) + '$' + 'b'.repeat(86)
+const registrationPayload = (changes = {}) => ({
+  username: 'new.coach',
+  passwordHash: REGISTRATION_HASH,
+  requestId: 'register-1',
+  ...changes,
+})
+
+test('public registration creates only a pending unscoped coach under the shared mutation lock', () => {
+  const harness = createHarness({ Users: [REGISTRATION_HEADERS] })
+  harness.context.requireServerAuth = () => assert.fail('a public pending registration does not require a session')
+  const result = harness.request(
+    'registerCoach',
+    registrationPayload({ role: '1', branchId: 'other-branch', status: 'Активен', disabledBy: 'forged' }),
+  )
+  assert.deepEqual(result, { status: 'success', pending: true })
+  const rows = harness.sheets.get('Users').rows
+  assert.equal(rows.length, 2)
+  assert(rows[1][0])
+  assert.deepEqual(rows[1].slice(1), ['new.coach', REGISTRATION_HASH, '2', '', 'Ожидает подтверждения', '', ''])
+  assert.equal(harness.state.acquisitions, 1)
+  assert.equal(harness.state.held, false)
+  assert.equal(harness.state.writes.length, 1)
+})
+
+test('repeated or case-equivalent registration never changes an existing account including an administrator', () => {
+  for (const role of ['1', '2']) {
+    const existing = ['existing', 'NeW.Coach', 'original-hash', role, 'branch-1', 'Активен', '', '']
+    const harness = createHarness({ Users: [REGISTRATION_HEADERS, existing] })
+    assert.deepEqual(harness.request('registerCoach', registrationPayload()), { status: 'success', pending: true })
+    assert.deepEqual(harness.sheets.get('Users').rows, [REGISTRATION_HEADERS, existing])
+    assert.equal(harness.state.writes.length, 0)
+  }
+})
+
+test('registration retry after an append committed but its acknowledgement was lost creates no duplicate', () => {
+  const harness = createHarness({ Users: [REGISTRATION_HEADERS] })
+  const sheet = harness.sheets.get('Users')
+  const append = sheet.appendRow
+  sheet.appendRow = (row) => {
+    append(row)
+    throw new Error('lost response after append')
+  }
+  assert.equal(harness.request('registerCoach', registrationPayload()).status, 'error')
+  sheet.appendRow = append
+  const differentlySaltedHash = REGISTRATION_HASH.replace(/b/g, 'c')
+  assert.deepEqual(harness.request('registerCoach', registrationPayload({ passwordHash: differentlySaltedHash })), {
+    status: 'success',
+    pending: true,
+  })
+  assert.equal(sheet.rows.length, 2)
+  assert.equal(sheet.rows[1][2], REGISTRATION_HASH)
+})
+
+test('pending coaches cannot authorize, even with forged active role or assigned-branch session claims', () => {
+  const harness = createHarness({ Users: [REGISTRATION_HEADERS] }, { allowUnlockedReads: true })
+  harness.request('registerCoach', registrationPayload())
+  const id = harness.sheets.get('Users').rows[1][0]
+  for (const action of ['getBootstrapData', 'getCurrentUser', 'recordBulkAttendance']) {
+    assert.throws(
+      () =>
+        harness.canonicalRequireServerAuth({
+          action,
+          auth: { id, username: 'new.coach', role: 'admin', branchId: 'branch-1' },
+        }),
+      /Unauthorized/,
+    )
+  }
+})
+
+test('an administrator must assign a real branch before approving a self-registered coach', () => {
+  const harness = createHarness({
+    Users: [REGISTRATION_HEADERS],
+    Филиалы: [
+      ['id', 'name'],
+      ['branch-1', 'Pool'],
+    ],
+  })
+  harness.request('registerCoach', registrationPayload())
+  const row = harness.sheets.get('Users').rows[1]
+  const userId = row[0]
+  assert.equal(harness.request('activateUser', { userId, requestId: 'approve-before-branch' }).code, 'FORBIDDEN')
+  assert.equal(row[5], 'Ожидает подтверждения')
+  assert.equal(
+    harness.request('assignUserBranch', { userId, branchId: 'missing', requestId: 'invalid-branch' }).code,
+    'NOT_FOUND',
+  )
+  assert.equal(
+    harness.request('assignUserBranch', { userId, branchId: 'branch-1', requestId: 'assign-branch' }).success,
+    true,
+  )
+  assert.equal(harness.sheets.get('Users').rows[1][5], 'Ожидает подтверждения')
+  assert.equal(harness.request('activateUser', { userId, requestId: 'approve' }).success, true)
+  assert.deepEqual(harness.sheets.get('Users').rows[1].slice(2, 6), [REGISTRATION_HASH, '2', 'branch-1', 'Активен'])
+})
+
+test('registration rejects malformed credentials, missing schema and unsigned GAS requests without writes', () => {
+  for (const changes of [
+    { username: 'bad<script>' },
+    { username: 'ab' },
+    { passwordHash: 'plain-password' },
+    { requestId: '' },
+  ]) {
+    const harness = createHarness({ Users: [REGISTRATION_HEADERS] })
+    assert.equal(harness.request('registerCoach', registrationPayload(changes)).status, 'error')
+    assert.equal(harness.state.writes.length, 0)
+  }
+  const missingUsers = createHarness({})
+  assert.equal(missingUsers.request('registerCoach', registrationPayload()).code, 'SCHEMA')
+  assert.equal(missingUsers.sheets.size, 0)
+  const unsigned = createHarness({ Users: [REGISTRATION_HEADERS] })
+  unsigned.context.verifySignedEnvelope = () => unsigned.context.rejectUnauthorized('signature.hmac')
+  assert.equal(unsigned.request('registerCoach', registrationPayload()).code, 'UNAUTHORIZED')
+  assert.equal(unsigned.state.writes.length, 0)
+  assert.equal(unsigned.state.acquisitions, 0)
+})
 
 test('schema migration is repeatable and preserves historical lesson balances', () => {
   const harness = createHarness({
@@ -485,12 +608,510 @@ test('attendance writes only changed cells and creates a ledger movement', () =>
     clientWrites.every((write) => [2, 4].includes(write.row) && [4, 6, 7].includes(write.column) && write.width === 1),
   )
   const ledger = harness.sheets.get('Журнал занятий').rows
-  assert.equal(ledger.length, 8)
+  assert.equal(ledger.length, 9)
   const added = ledger[7]
   assert.equal(added[LEDGER_HEADERS.indexOf('type')], 'attendance')
   assert.equal(added[LEDGER_HEADERS.indexOf('lessonsDelta')], -1)
   assert.equal(added[LEDGER_HEADERS.indexOf('balanceAfter')], 2)
   assert.equal(added[LEDGER_HEADERS.indexOf('recordedBy')], 'admin')
+  assert.equal(ledger[8][LEDGER_HEADERS.indexOf('type')], 'attendance_confirmation')
+  assert.equal(ledger[8][LEDGER_HEADERS.indexOf('lessonsDelta')], 0)
+})
+
+function resilienceAttendanceHarness(options = {}) {
+  const headers = [
+    'id',
+    'branchId',
+    'assignedLessonIds',
+    'remainingLessons',
+    'totalLessons',
+    'attendanceHistory',
+    'status',
+    'paid',
+    'purchasedAt',
+    'receiptUrl',
+    'paymentBalance',
+  ]
+  return createHarness(
+    {
+      Клиенты: [headers, ['client-1', 'branch-1', 'lesson-1', 2, 2, '[]', 'Активен', true, '2026-10-01', '', 0]],
+      Платежи: [PAYMENT_HEADERS],
+      'Журнал занятий': [
+        LEDGER_HEADERS,
+        ledgerRow({
+          clientId: 'client-1',
+          lessonsDelta: 2,
+          totalLessonsDelta: 2,
+          balanceAfter: 2,
+          totalLessonsAfter: 2,
+        }),
+      ],
+      Расписание: [
+        ['id', 'branchId', 'date', 'dayOfWeek', 'time', 'category', 'isRecurring'],
+        ['lesson-1', 'branch-1', '2026-10-04', 'Вс', '17:00', 'плавание', false],
+      ],
+    },
+    options,
+  )
+}
+
+test('coach bootstrap skips coach sheet reads without dropping canonical branch checks', () => {
+  const harness = createHarness(
+    {
+      Филиалы: [
+        ['id', 'name'],
+        ['branch-1', 'Pool'],
+        ['branch-2', 'Other'],
+      ],
+      Расписание: [
+        ['id', 'title', 'branchId'],
+        ['lesson-1', 'Swimming', 'branch-1'],
+        ['other', 'Other', 'branch-2'],
+      ],
+      // No coach sheet: the coach workflow must not depend on it.
+    },
+    { allowUnlockedReads: true },
+  )
+  harness.context.requireServerAuth = () => ({ id: 'coach-1', username: 'coach', role: 'coach', branchId: 'branch-1' })
+  const result = harness.request('getBootstrapData', { includeCoaches: false, branchId: 'branch-2' })
+  assert.deepEqual(result.coaches, [])
+  assert.deepEqual(
+    result.branches.map((row) => row.id),
+    ['branch-1'],
+  )
+  assert.deepEqual(
+    result.lessons.map((row) => row.id),
+    ['lesson-1'],
+  )
+  assert.deepEqual(
+    harness.state.events.filter((event) => event.startsWith('read:')),
+    ['read:Филиалы', 'read:Расписание'],
+  )
+  assert.equal(harness.request('getBootstrapData', { includeCoaches: 'false' }).code, 'VALIDATION')
+})
+
+test('session and bootstrap each check Users and a mutation rejects a newly disabled account', () => {
+  const harness = createHarness(
+    {
+      Users: [
+        ['id', 'username', 'password', 'role', 'branchId', 'status', 'disabledAt', 'disabledBy'],
+        ['coach-1', 'coach', 'hash', '2', 'branch-1', 'Активен', '', ''],
+      ],
+    },
+    { allowUnlockedReads: true },
+  )
+  vm.runInContext(gas, harness.context) // Restore the real auth implementation rather than the transaction stub.
+  const auth = { id: 'coach-1', username: 'coach', role: 'coach', branchId: 'branch-1' }
+  const probe = harness.context.requireServerAuth({ action: 'getCurrentUser', auth })
+  const bootstrap = harness.context.requireServerAuth({ action: 'getBootstrapData', auth })
+  assert.equal(bootstrap.id, probe.id)
+  assert.equal(harness.state.events.filter((event) => event === 'read:Users').length, 2)
+  harness.sheets.get('Users').rows[1][5] = 'Отключен'
+  assert.throws(
+    () => harness.context.requireServerAuth({ action: 'recordBulkAttendance', auth }),
+    (error) => error.apiCode === 'UNAUTHORIZED',
+  )
+  assert.equal(harness.state.events.filter((event) => event === 'read:Users').length, 3)
+})
+
+test('opening roster reads each sheet once and retains all pupils', () => {
+  const harness = resilienceAttendanceHarness({ allowUnlockedReads: true })
+  const clients = harness.sheets.get('Клиенты')
+  clients.rows[0].push('childName', 'parentName', 'category')
+  clients.rows[1].push('Child', 'Parent', 'плавание')
+  const result = harness.context.getLessonRoster(
+    harness.context.SpreadsheetApp.getActiveSpreadsheet(),
+    { lessonId: 'lesson-1', date: '2026-10-04' },
+    { role: 'admin' },
+  )
+  assert.equal(result.clients.length, 1)
+  assert.deepEqual(
+    harness.state.events.filter((event) => event.startsWith('read:')),
+    ['read:Расписание', 'read:Клиенты'],
+  )
+})
+
+test('a 100-pupil attendance chunk partitions a large ledger once and batches writes', () => {
+  const harness = resilienceAttendanceHarness()
+  const clients = harness.sheets.get('Клиенты')
+  const ledger = harness.sheets.get('Журнал занятий')
+  for (let i = 2; i <= 2000; i++) {
+    clients.rows.push([`client-${i}`, 'branch-1', 'lesson-1', 2, 2, '[]', 'Активен', true, '2026-10-01', '', 0])
+    ledger.rows.push(
+      ledgerRow({
+        clientId: `client-${i}`,
+        lessonsDelta: 2,
+        totalLessonsDelta: 2,
+        balanceAfter: 2,
+        totalLessonsAfter: 2,
+      }),
+    )
+  }
+  const stateForClient = harness.context.calculateLessonLedgerState
+  const checkPayments = harness.context.reconcilePaymentsWithLedger
+  let examinedLedgerRows = 0
+  harness.context.calculateLessonLedgerState = (parsed, id) => {
+    assert.equal(parsed.rows.length, 1, 'do not rescan unrelated clients')
+    examinedLedgerRows += parsed.rows.length
+    return stateForClient(parsed, id)
+  }
+  harness.context.reconcilePaymentsWithLedger = (payments, parsed, id) => {
+    assert.equal(parsed.rows.length, 1)
+    examinedLedgerRows += parsed.rows.length
+    return checkPayments(payments, parsed, id)
+  }
+  const result = harness.request('recordBulkAttendance', {
+    requestId: 'large-group',
+    attendance: Array.from({ length: 100 }, (_, i) => ({
+      clientId: `client-${i + 1}`,
+      lessonId: 'lesson-1',
+      date: '2026-10-04',
+      status: 'attended',
+    })),
+  })
+  assert.equal(result.success, true)
+  assert.equal(result.results.length, 100)
+  assert.equal(examinedLedgerRows, 200) // One ledger calculation and payment check per client.
+  assert.deepEqual(
+    harness.state.events.filter((event) => event.startsWith('read:')),
+    ['read:Расписание', 'read:Клиенты', 'read:Журнал занятий', 'read:Платежи'],
+  )
+  assert.equal(harness.state.writes.length, 4) // Three contiguous client columns + one ledger range.
+  assert.equal(clients.rows[100][3], 1)
+  assert.equal(clients.rows[101][3], 2)
+  assert.equal(ledger.rows.length, 2101)
+})
+
+test('partitioned accounting preserves physical audit row numbers and handles special IDs', () => {
+  const harness = resilienceAttendanceHarness()
+  const parsed = {
+    headers: LEDGER_HEADERS,
+    rows: [ledgerRow({ clientId: 'other' }), ledgerRow({ clientId: '__proto__', balanceBefore: 7, balanceAfter: 0 })],
+  }
+  const grouped = harness.context.accountingRowsByClient(parsed)
+  assert.equal(grouped['__proto__'].rows.length, 1)
+  const selected = Object.create(null)
+  selected['__proto__'] = true
+  const limited = harness.context.accountingRowsByClient(parsed, selected)
+  assert.equal(limited.other, undefined, 'index memory only contains the selected pupils')
+  assert.equal(limited['__proto__'].sourceRowIndices[0], 1)
+  const full = harness.context.calculateLessonLedgerState(parsed, '__proto__')
+  const partitioned = harness.context.calculateLessonLedgerState(grouped['__proto__'], '__proto__')
+  assert.equal(JSON.stringify(partitioned), JSON.stringify(full))
+  assert.match(partitioned.issues[0], /Строка журнала 3/)
+})
+
+test('duplicate items within a chunk use the staged persistent request index without double spending', () => {
+  const harness = resilienceAttendanceHarness()
+  const item = { clientId: 'client-1', lessonId: 'lesson-1', date: '2026-10-04', status: 'attended' }
+  const result = harness.request('recordBulkAttendance', { requestId: 'duplicate-chunk', attendance: [item, item] })
+  assert.equal(result.success, true)
+  assert.equal(result.results[1].duplicate, true)
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 1)
+  assert.equal(harness.sheets.get('Журнал занятий').rows.length, 3)
+})
+
+test('attendance rolls back a failure between client-column writes', () => {
+  const harness = resilienceAttendanceHarness()
+  const sheet = harness.sheets.get('Клиенты')
+  const before = sheet.rows[1].slice()
+  const getRange = sheet.getRange
+  let failOnce = true
+  sheet.getRange = (...args) => {
+    const range = getRange(...args)
+    const setValues = range.setValues
+    range.setValues = (values) => {
+      if (args[0] === 2 && args[1] === 6 && failOnce) {
+        failOnce = false
+        throw new Error('simulated write failure')
+      }
+      setValues(values)
+    }
+    return range
+  }
+  const result = harness.request('recordAttendance', {
+    clientId: 'client-1',
+    lessonId: 'lesson-1',
+    date: '2026-10-04',
+    status: 'attended',
+    requestId: 'failed-column',
+  })
+  assert.equal(result.status, 'error')
+  assert.deepEqual(sheet.rows[1], before)
+  assert.equal(harness.sheets.get('Журнал занятий').rows.length, 2)
+  assert.equal(harness.state.held, false)
+})
+
+test('a ledger write that commits then throws retains planned rows for rollback', () => {
+  const harness = resilienceAttendanceHarness()
+  const clients = harness.sheets.get('Клиенты')
+  const before = clients.rows[1].slice()
+  const ledger = harness.sheets.get('Журнал занятий')
+  const getRange = ledger.getRange
+  ledger.getRange = (...args) => {
+    const range = getRange(...args)
+    const setValues = range.setValues
+    range.setValues = (values) => {
+      setValues(values)
+      throw new Error('simulated lost acknowledgement')
+    }
+    return range
+  }
+  const result = harness.request('recordAttendance', {
+    clientId: 'client-1',
+    lessonId: 'lesson-1',
+    date: '2026-10-04',
+    status: 'attended',
+    requestId: 'failed-ledger',
+  })
+  assert.equal(result.status, 'error')
+  assert.deepEqual(clients.rows[1], before)
+  assert.equal(ledger.rows.length, 2)
+  assert.equal(harness.state.held, false)
+})
+
+function atomicAttendanceHarness({ failBefore = false, loseAcknowledgement = false } = {}) {
+  const harness = resilienceAttendanceHarness()
+  harness.properties.set('ATTENDANCE_ATOMIC_WRITES', 'true')
+  const batches = []
+  harness.atomicBatches = batches
+  harness.context.Sheets = {
+    Spreadsheets: {
+      batchUpdate(body, spreadsheetId) {
+        assert.equal(harness.state.held, true)
+        assert.equal(spreadsheetId, 'test-spreadsheet')
+        batches.push(body)
+        if (failBefore) throw new Error('simulated API rejection')
+        const staged = new Map(
+          [...harness.sheets.values()].map((sheet) => [sheet, sheet.rows.map((row) => row.slice())]),
+        )
+        const decode = (cell) => {
+          assert.deepEqual(Object.keys(cell), ['userEnteredValue'])
+          const value = cell.userEnteredValue
+          assert.equal(Object.keys(value).length, 1)
+          assert.equal('formulaValue' in value, false)
+          return Object.values(value)[0]
+        }
+        // The fake API stages every request before committing any sheet.
+        for (const request of body.requests) {
+          const operation = request.updateCells || request.appendCells
+          assert.equal(operation.fields, 'userEnteredValue')
+          const id = operation.range?.sheetId ?? operation.sheetId
+          const sheet = [...harness.sheets.values()].find((item) => item.getSheetId() === id)
+          assert.ok(sheet)
+          const rows = staged.get(sheet)
+          if (request.updateCells) {
+            const range = operation.range
+            assert.equal(range.endColumnIndex - range.startColumnIndex, 1)
+            assert.equal(range.endRowIndex - range.startRowIndex, operation.rows.length)
+            operation.rows.forEach((row, offset) => {
+              assert.ok(rows[range.startRowIndex + offset])
+              rows[range.startRowIndex + offset][range.startColumnIndex] = decode(row.values[0])
+            })
+          } else {
+            rows.push(...operation.rows.map((row) => row.values.map(decode)))
+          }
+        }
+        for (const [sheet, rows] of staged) sheet.rows.splice(0, sheet.rows.length, ...rows)
+        harness.state.writes.push({ atomic: true })
+        if (loseAcknowledgement) {
+          loseAcknowledgement = false
+          throw new Error('simulated lost API acknowledgement')
+        }
+        return { spreadsheetId }
+      },
+    },
+  }
+  return harness
+}
+
+const atomicMark = (requestId, status = 'attended') => ({
+  clientId: 'client-1',
+  lessonId: 'lesson-1',
+  date: '2026-10-04',
+  status,
+  requestId,
+})
+
+test('atomic attendance commits changed cells and ledger in one API call and returns balances', () => {
+  const harness = atomicAttendanceHarness()
+  const before = harness.sheets.get('Клиенты').rows[1].slice()
+  const response = harness.request('recordAttendance', atomicMark('atomic-save'))
+  assert.equal(response.success, true)
+  assert.deepEqual(response.results[0].client, { remainingLessons: 1, totalLessons: 2, status: 'Активен' })
+  assert.equal(harness.atomicBatches.length, 1)
+  assert.equal(harness.state.writes.length, 1)
+  const after = harness.sheets.get('Клиенты').rows[1]
+  assert.deepEqual(after.slice(0, 3), before.slice(0, 3))
+  assert.deepEqual(after.slice(7), before.slice(7))
+  assert.equal(harness.sheets.get('Журнал занятий').rows.length, 3)
+  const repeat = harness.request('recordAttendance', atomicMark('atomic-save'))
+  assert.equal(repeat.results[0].duplicate, true)
+  assert.equal(repeat.results[0].client.remainingLessons, 1)
+  assert.equal(harness.atomicBatches.length, 1, 'a duplicate issues no new commit')
+})
+
+test('atomic API rejection leaves both sheets unchanged and never uses the legacy writer', () => {
+  const harness = atomicAttendanceHarness({ failBefore: true })
+  const before = JSON.stringify([...harness.sheets].map(([name, sheet]) => [name, sheet.rows]))
+  const response = harness.request('recordAttendance', atomicMark('atomic-rejected'))
+  assert.equal(response.code, 'SCHEMA')
+  assert.equal(JSON.stringify([...harness.sheets].map(([name, sheet]) => [name, sheet.rows])), before)
+  assert.equal(harness.state.writes.length, 0)
+  assert.equal(harness.atomicBatches.length, 1)
+  assert.equal(harness.state.held, false)
+})
+
+test('a lost atomic acknowledgement preserves committed data and retry never spends twice', () => {
+  const harness = atomicAttendanceHarness({ loseAcknowledgement: true })
+  assert.equal(harness.request('recordAttendance', atomicMark('lost-ack')).code, 'SCHEMA')
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 1)
+  assert.equal(harness.sheets.get('Журнал занятий').rows.length, 3)
+  const retried = harness.request('recordAttendance', atomicMark('lost-ack'))
+  assert.equal(retried.success, true)
+  assert.equal(retried.results[0].duplicate, true)
+  assert.equal(retried.results[0].client.remainingLessons, 1)
+  assert.equal(harness.atomicBatches.length, 1)
+  assert.equal(harness.state.held, false)
+})
+
+test('an empty atomic API reply is not reported as success and retry recognizes the committed marker', () => {
+  const harness = atomicAttendanceHarness()
+  const commit = harness.context.Sheets.Spreadsheets.batchUpdate
+  harness.context.Sheets.Spreadsheets.batchUpdate = (...args) => {
+    commit(...args)
+    return undefined
+  }
+  assert.equal(harness.request('recordAttendance', atomicMark('empty-api-reply')).code, 'SCHEMA')
+  const retried = harness.request('recordAttendance', atomicMark('empty-api-reply'))
+  assert.equal(retried.success, true)
+  assert.equal(retried.results[0].duplicate, true)
+  assert.equal(retried.results[0].client.remainingLessons, 1)
+  assert.equal(harness.atomicBatches.length, 1)
+})
+
+test('atomic attendance batches 100 pupils and preserves unrelated cells', () => {
+  const harness = atomicAttendanceHarness()
+  const clients = harness.sheets.get('Клиенты')
+  const ledger = harness.sheets.get('Журнал занятий')
+  for (let index = 2; index <= 100; index++) {
+    clients.rows.push([`client-${index}`, 'branch-1', 'lesson-1', 2, 2, '[]', 'Активен', true, '2026-10-01', '', 0])
+    ledger.rows.push(
+      ledgerRow({
+        clientId: `client-${index}`,
+        lessonsDelta: 2,
+        totalLessonsDelta: 2,
+        balanceAfter: 2,
+        totalLessonsAfter: 2,
+      }),
+    )
+  }
+  const result = harness.request('recordBulkAttendance', {
+    requestId: 'atomic-100',
+    attendance: Array.from({ length: 100 }, (_, index) => ({
+      ...atomicMark('unused'),
+      clientId: `client-${index + 1}`,
+    })),
+  })
+  assert.equal(result.success, true)
+  assert.equal(result.results.length, 100)
+  assert.ok(result.results.every((item) => item.client.remainingLessons === 1))
+  assert.equal(harness.atomicBatches.length, 1)
+  assert.equal(harness.atomicBatches[0].requests.length, 4, 'three changed-column ranges and one journal append')
+  assert.ok(clients.rows.slice(1).every((row) => row[2] === 'lesson-1' && row[4] === 2 && row[7] === true))
+  assert.equal(ledger.rows.length, 201)
+})
+
+test('atomic mode without the Advanced Sheets service fails before touching any row', () => {
+  const harness = resilienceAttendanceHarness()
+  harness.properties.set('ATTENDANCE_ATOMIC_WRITES', 'true')
+  const response = harness.request('recordAttendance', atomicMark('missing-service'))
+  assert.equal(response.code, 'SCHEMA')
+  assert.equal(harness.state.writes.length, 0)
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 2)
+})
+
+test('atomic group validation rejects an invalid pupil before issuing any API call', () => {
+  const harness = atomicAttendanceHarness()
+  const response = harness.request('recordBulkAttendance', {
+    requestId: 'invalid-group',
+    attendance: [atomicMark('unused'), { ...atomicMark('unused'), clientId: 'missing' }],
+  })
+  assert.equal(response.success, false)
+  assert.equal(harness.atomicBatches.length, 0)
+  assert.equal(harness.state.writes.length, 0)
+})
+
+test('attendance retry returns current balances after a later correction, even while response cache is warm', () => {
+  for (const harness of [resilienceAttendanceHarness(), atomicAttendanceHarness()]) {
+    const first = harness.request('recordAttendance', atomicMark('original'))
+    assert.equal(first.results[0].client.remainingLessons, 1)
+    assert.equal(harness.request('recordAttendance', atomicMark('correction', 'absent')).success, true)
+    const writes = harness.state.writes.length
+    const retry = harness.request('recordAttendance', atomicMark('original'))
+    assert.equal(retry.results[0].duplicate, true)
+    assert.deepEqual(retry.results[0].client, { remainingLessons: 2, totalLessons: 2, status: 'Активен' })
+    assert.equal(harness.state.writes.length, writes)
+  }
+})
+
+test('expired attendance retries never undo a later correction, including absence requests', () => {
+  const harness = resilienceAttendanceHarness()
+  const mark = (status, requestId) =>
+    harness.request('recordAttendance', {
+      clientId: 'client-1',
+      lessonId: 'lesson-1',
+      date: '2026-10-04',
+      status,
+      requestId,
+    })
+  assert.equal(mark('absent', 'absent-first').success, true)
+  assert.equal(mark('attended', 'attended-next').success, true)
+  harness.cacheValues.clear()
+  assert.equal(mark('absent', 'absent-first').results[0].duplicate, true)
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 1)
+  assert.equal(JSON.parse(harness.sheets.get('Клиенты').rows[1][5])[0].status, 'attended')
+  assert.equal(mark('absent', 'absent-correction').success, true)
+  harness.cacheValues.clear()
+  const writes = harness.state.writes.length
+  assert.equal(mark('attended', 'attended-next').results[0].duplicate, true)
+  assert.equal(harness.state.writes.length, writes)
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 2)
+  assert.equal(JSON.parse(harness.sheets.get('Клиенты').rows[1][5])[0].status, 'absent')
+  harness.cacheValues.clear()
+  assert.equal(mark('attended', 'absent-first').code, 'CONFLICT')
+})
+
+test('blank purchasedAt does not auto-accept changes to an already journalled balance', () => {
+  const harness = resilienceAttendanceHarness()
+  const clients = harness.sheets.get('Клиенты')
+  clients.rows[1][8] = ''
+  clients.rows[1][3] = 3
+  clients.rows[1][4] = 4
+  const result = harness.request('recordAttendance', {
+    clientId: 'client-1',
+    lessonId: 'lesson-1',
+    date: '2026-10-04',
+    status: 'attended',
+    requestId: 'manual-change',
+  })
+  assert.equal(result.code, 'CONFLICT')
+  assert.equal(harness.state.writes.length, 0)
+  assert.equal(harness.sheets.get('Журнал занятий').rows.length, 2)
+})
+
+test('coach attendance still rejects a lesson from another branch without writing anything', () => {
+  const harness = resilienceAttendanceHarness()
+  harness.context.requireServerAuth = () => ({ id: 'coach-1', username: 'coach', role: 'coach', branchId: 'branch-2' })
+  const result = harness.request('recordAttendance', {
+    clientId: 'client-1',
+    lessonId: 'lesson-1',
+    date: '2026-10-04',
+    status: 'attended',
+    requestId: 'wrong-branch',
+  })
+  assert.equal(result.code, 'FORBIDDEN')
+  assert.equal(harness.state.writes.length, 0)
 })
 
 test('first attendance on a legacy card establishes its opening ledger balance without changing it first', () => {

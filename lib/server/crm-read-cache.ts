@@ -9,7 +9,6 @@ export const CACHEABLE_CRM_READ_ACTIONS = new Set([
   'getFinanceSummary',
   'getSubscriptionsPage',
   'searchClientOptions',
-  'getLessonRoster',
 ])
 
 export const MUTATING_CRM_ACTIONS = new Set([
@@ -143,6 +142,7 @@ export function createCrmReadCache(options: CacheOptions = {}) {
     invalidate(): void {
       generation += 1
       entries.clear()
+      inFlight.clear()
     },
 
     size(): number {

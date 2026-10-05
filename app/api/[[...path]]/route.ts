@@ -3,12 +3,15 @@ import { isActiveAuthUser } from '@/lib/server/auth-user'
 import { callGas, GasError } from '@/lib/server/gas'
 import { codeForHttpStatus, type PublicApiErrorCode } from '@/lib/server/api-errors'
 import { dispatchCrmAction, UPLOAD_ACTIONS } from '@/lib/server/crm-router'
-import { CACHEABLE_CRM_READ_ACTIONS, crmReadCache, MUTATING_CRM_ACTIONS } from '@/lib/server/crm-read-cache'
 import { serverLog } from '@/lib/server/logger'
 import { PolicyError } from '@/lib/server/policy'
 import { rejectCrossOrigin } from '@/lib/server/request'
-import { getLoginRateLimiter, LoginRateLimitUnavailableError } from '@/lib/server/login-rate-limit'
-import { hashPassword, isScryptPasswordHash, verifyPassword } from '@/lib/server/passwords'
+import {
+  getLoginRateLimiter,
+  getRegistrationRateLimiter,
+  LoginRateLimitUnavailableError,
+} from '@/lib/server/login-rate-limit'
+import { assertPasswordPolicy, hashPassword, isScryptPasswordHash, verifyPassword } from '@/lib/server/passwords'
 import { clearSession, createSession, getSession, SessionError } from '@/lib/server/session'
 
 export const runtime = 'nodejs'
@@ -139,6 +142,45 @@ async function handleLogout(): Promise<Response> {
   return jsonResponse({ status: 'success' })
 }
 
+async function handleRegister(request: NextRequest): Promise<Response> {
+  const body = await readJson(request, MAX_AUTH_BYTES)
+  const username = requiredText(body.username, 64).toLowerCase()
+  if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(username)) {
+    throw new RouteError(
+      'Логин: 3–64 латинских буквы, цифры, точка, дефис или подчёркивание; начните с буквы или цифры',
+      400,
+    )
+  }
+  const password = requiredText(body.password, 200, false)
+  const requestId = requiredText(body.requestId, 150)
+  try {
+    assertPasswordPolicy(password)
+  } catch {
+    throw new RouteError('Пароль должен содержать от 8 до 200 символов', 400)
+  }
+  if (!(await getRegistrationRateLimiter().check(clientIp(request), username))) {
+    return jsonResponse(
+      {
+        status: 'error',
+        code: 'RATE_LIMITED',
+        message: 'Слишком много попыток регистрации. Повторите через 15 минут.',
+      },
+      429,
+      { 'Retry-After': '900' },
+    )
+  }
+  // Ignore ALL browser-supplied roles, branches, statuses and password hashes.
+  // No session is issued, even when the browser already has an admin cookie.
+  const result = (await callGas({
+    action: 'registerCoach',
+    payload: { username, passwordHash: await hashPassword(password), requestId },
+  })) as JsonRecord | null
+  if (!result || result.status !== 'success' || result.pending !== true) {
+    throw new RouteError('Не удалось подтвердить регистрацию. Повторите тот же запрос.', 503)
+  }
+  return jsonResponse({ status: 'success', pending: true })
+}
+
 async function handleSession(): Promise<Response> {
   const user = await getSession({ revalidate: true })
   if (!user) {
@@ -168,19 +210,10 @@ async function handleCrm(request: NextRequest): Promise<Response> {
   }
 
   const startedAt = performance.now()
-  if (CACHEABLE_CRM_READ_ACTIONS.has(action)) {
-    const cached = await crmReadCache.getOrLoad(action, payload, user, () =>
-      dispatchCrmAction({ action, payload, user }),
-    )
-    const duration = Math.max(0, Math.round(performance.now() - startedAt))
-    return jsonResponse(cached.value, 200, {
-      'X-CRM-Cache': cached.status,
-      'Server-Timing': `crm;dur=${duration}`,
-    })
-  }
-
+  // Every request reaches authoritative GAS authorization. Do not serve private
+  // results from a process-local cache: another worker cannot invalidate it.
+  // GAS still caches reference data AFTER checking the current Users row.
   const result = await dispatchCrmAction({ action, payload, user })
-  if (MUTATING_CRM_ACTIONS.has(action)) crmReadCache.invalidate()
   return jsonResponse(result, 200, {
     'X-CRM-Cache': 'BYPASS',
     'Server-Timing': `crm;dur=${Math.max(0, Math.round(performance.now() - startedAt))}`,
@@ -234,6 +267,7 @@ const ROUTES: RouteDefinition[] = [
     handle: handleReceipt,
   },
   { name: 'auth.login', method: 'POST', match: exactRoute('auth', 'login'), handle: handleLogin },
+  { name: 'auth.register', method: 'POST', match: exactRoute('auth', 'register'), handle: handleRegister },
   { name: 'auth.logout', method: 'POST', match: exactRoute('auth', 'logout'), handle: handleLogout },
   { name: 'crm', method: 'POST', match: exactRoute('crm'), handle: handleCrm },
 ]
@@ -241,7 +275,11 @@ const ROUTES: RouteDefinition[] = [
 function errorResponse(error: unknown, method: HttpMethod, route: string): NextResponse {
   if (error instanceof LoginRateLimitUnavailableError) {
     serverLog('warn', 'api.request.failed', { method, route, code: 'SERVICE_UNAVAILABLE', status: 503 })
-    return jsonError('Вход временно недоступен', 503, 'SERVICE_UNAVAILABLE')
+    return jsonError(
+      route === 'auth.register' ? 'Регистрация временно недоступна' : 'Вход временно недоступен',
+      503,
+      'SERVICE_UNAVAILABLE',
+    )
   }
   if (error instanceof GasError) {
     serverLog('warn', 'api.request.failed', { method, route, code: error.code, status: error.status })

@@ -163,6 +163,7 @@ export const ClientsView = observer(() => {
   const [reloadVersion, setReloadVersion] = useState(0)
   const clientRequestVersion = useRef(0)
   const [search, setSearch] = useState('')
+  const searchQuery = search.trim()
   const [statusFilter, setStatusFilter] = useState<'all' | 'Активен' | 'Пауза' | 'Архив'>('all')
   const [sortConfig, setSortConfig] = useState<{ key: 'childName' | 'paidAmount'; dir: 'asc' | 'desc' }>({
     key: 'childName',
@@ -245,7 +246,7 @@ export const ClientsView = observer(() => {
             CLIENT_PAGE_SIZE,
             controller.signal,
             branchId,
-            search.trim() || undefined,
+            searchQuery || undefined,
             statusFilter === 'all' ? undefined : statusFilter,
             sortConfig.key,
             sortConfig.dir,
@@ -268,13 +269,13 @@ export const ClientsView = observer(() => {
             if (!controller.signal.aborted && requestVersion === clientRequestVersion.current) setIsListLoading(false)
           })
       },
-      search.trim() ? 250 : 0,
+      searchQuery ? 250 : 0,
     )
     return () => {
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [branchId, reloadVersion, search, sortConfig, statusFilter])
+  }, [branchId, reloadVersion, searchQuery, sortConfig, statusFilter])
 
   const loadNextPage = async () => {
     if (isListLoading || !hasMore) return
@@ -306,6 +307,7 @@ export const ClientsView = observer(() => {
   }
 
   const selectedClient = selectedClientId ? clients.find((client) => client.id === selectedClientId) || null : null
+  const selectedAccountingClientId = selectedClient?.id ?? null
   const canDeleteSelected = Boolean(
     selectedClient &&
     !historyLoading &&
@@ -319,7 +321,7 @@ export const ClientsView = observer(() => {
   )
 
   useEffect(() => {
-    if (!selectedClient || !store.authStore.isAdmin) {
+    if (!selectedAccountingClientId || !store.authStore.isAdmin) {
       setPaymentHistory([])
       setLessonLedger([])
       setLedgerAudit(null)
@@ -329,7 +331,10 @@ export const ClientsView = observer(() => {
     let cancelled = false
     setHistoryLoading(true)
     setLedgerAuditChecked(false)
-    void Promise.all([apiClient.getClientHistory(selectedClient.id), apiClient.auditLessonLedger(selectedClient.id)])
+    void Promise.all([
+      apiClient.getClientHistory(selectedAccountingClientId),
+      apiClient.auditLessonLedger(selectedAccountingClientId),
+    ])
       .then(([history, audit]) => {
         if (cancelled) return
         setPaymentHistory(history.payments)
@@ -350,7 +355,9 @@ export const ClientsView = observer(() => {
     return () => {
       cancelled = true
     }
-  }, [selectedClient, store.authStore.isAdmin])
+    // Refreshing the list creates new objects, not a new selected pupil.
+    // Successful accounting writes explicitly refresh history/audit below.
+  }, [selectedAccountingClientId, store.authStore.isAdmin])
 
   const openPayment = () => {
     if (!selectedClient) return

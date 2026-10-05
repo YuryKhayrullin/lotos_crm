@@ -103,7 +103,7 @@ test('GAS canonicalizes Users data instead of rejecting stale session claims', (
   assert.match(gas, /id: auth.id/)
 })
 
-test('GAS caches read auth and bypasses cache for mutations', () => {
+test('GAS reads current permissions for reads, writes and sessions despite a populated cache', () => {
   const rows = [
     ['id', 'username', 'password', 'role', 'branchId', 'status', 'disabledAt', 'disabledBy'],
     ['user-1', 'Administrator', 'hash', '1', 'branch-1', 'Активен', '', ''],
@@ -141,29 +141,47 @@ test('GAS caches read auth and bypasses cache for mutations', () => {
   const claims = { id: 'user-1', username: 'Administrator', role: 'admin', branchId: 'branch-1' }
   context.requireServerAuth({ action: 'getClients', auth: claims })
   context.requireServerAuth({ action: 'getClients', auth: claims })
-  assert.equal(sheetReads, 1)
+  assert.equal(sheetReads, 2)
+
+  cacheValues.set(context.authUserCacheKey('user-1'), JSON.stringify(claims))
 
   rows[1][3] = '2'
   rows[1][4] = 'branch-2'
-  const cachedRead = context.requireServerAuth({ action: 'getClients', auth: claims })
-  assert.equal(cachedRead.role, 'admin')
-  assert.equal(cachedRead.branchId, 'branch-1')
-  assert.equal(sheetReads, 1)
+  const currentRead = context.requireServerAuth({ action: 'getClients', auth: claims })
+  assert.equal(currentRead.role, 'coach')
+  assert.equal(currentRead.branchId, 'branch-2')
+  assert.equal(sheetReads, 3)
 
   const freshMutation = context.requireServerAuth({ action: 'updateClient', auth: claims })
   assert.equal(freshMutation.role, 'coach')
   assert.equal(freshMutation.branchId, 'branch-2')
-  assert.equal(sheetReads, 2)
-  assert.equal(cacheValues.size, 0)
+  assert.equal(sheetReads, 4)
 
   const freshSession = context.requireServerAuth({ action: 'getCurrentUser', auth: claims })
   assert.equal(freshSession.role, 'coach')
-  assert.equal(sheetReads, 3)
-  assert(cacheValues.size === 0)
+  assert.equal(sheetReads, 5)
+  const bootstrapAuth = context.requireServerAuth({ action: 'getBootstrapData', auth: claims })
+  assert.equal(bootstrapAuth.role, 'coach')
+  assert.equal(bootstrapAuth.branchId, 'branch-2')
+  assert.equal(sheetReads, 6, 'bootstrap must also verify current permissions')
+  context.requireServerAuth({ action: 'getCurrentUser', auth: claims })
+  assert.equal(sheetReads, 7)
+
+  rows[1][5] = 'Отключен'
+  for (const action of ['getClients', 'getBootstrapData', 'recordBulkAttendance', 'getCurrentUser']) {
+    assert.throws(() => context.requireServerAuth({ action, auth: claims }), /Unauthorized/)
+  }
 
   const authIndex = gas.indexOf('auth = requireServerAuth(body)')
   const cachedResponseIndex = gas.indexOf('if (cachedMutationResponse) {')
   assert(authIndex >= 0 && authIndex < cachedResponseIndex)
+})
+
+test('BFF cannot serve process-local private snapshots without reaching GAS', () => {
+  const handler = bff.slice(bff.indexOf('async function handleCrm('), bff.indexOf('async function handleReceipt('))
+  assert.match(handler, /await getSession\(\)/)
+  assert.match(handler, /await dispatchCrmAction\(\{ action, payload, user \}\)/)
+  assert.doesNotMatch(handler, /getOrLoad|crmReadCache|revalidate:\s*true/)
 })
 
 test('attendance contract contains lock, idempotency and correction handling', () => {
@@ -205,8 +223,12 @@ test('session is signed and HttpOnly without browser storage', () => {
   assert.doesNotMatch(session, /localStorage|sessionStorage/)
 })
 
-test('public registration is absent and a disabled account is rejected even with a valid old session', () => {
-  assert.doesNotMatch(bff, /auth', 'register|auth\/register|handleRegister/)
+test('public coach registration cannot bootstrap admins and disabled accounts reject valid old sessions', () => {
+  assert.match(bff, /auth', 'register/)
+  assert.match(bff, /payload: \{ username, passwordHash: await hashPassword\(password\), requestId \}/)
+  assert.match(gas, /function registerPendingCoachUser/)
+  assert.match(gas, /if \(header === 'status'\) return 'Ожидает подтверждения'/)
+  assert.match(gas, /if \(header === 'role'\) return '2'/)
   assert.doesNotMatch(gas, /body\.action === 'register'/)
   assert.match(gas, /function setupInitialAdmin\(\)/)
   assert.match(gas, /BOOTSTRAP_ADMIN_USERNAME/)

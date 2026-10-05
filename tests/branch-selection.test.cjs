@@ -20,7 +20,7 @@ test('branch selection changes scope before forcing shared data to reload', () =
 })
 
 test('header selector and branch side sheet use the same reload path', () => {
-  const page = fs.readFileSync(path.join(__dirname, '..', 'app', 'page.tsx'), 'utf8')
+  const page = fs.readFileSync(path.join(__dirname, '..', 'components', 'AdminWorkspace.tsx'), 'utf8')
   assert.match(page, /onValueChange=\{\(value\) => reloadForBranch\(/)
   assert.match(page, /onClick=\{\(\) => reloadForBranch\(''\)\}/)
   assert.match(page, /onClick=\{\(\) => reloadForBranch\(String\(branch\.id\)\)\}/)

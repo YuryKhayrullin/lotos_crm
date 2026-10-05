@@ -10,13 +10,18 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText
 
-function apiWithFetch(fetch) {
+function apiWithFetch(fetch, timers = {}) {
   const exports = {}
   const context = {
     exports,
     fetch,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    ...timers,
     console: { log() {} },
     require: (name) => {
+      if (name === './attendance-recovery') return require('../.test-dist/attendance-recovery.js')
       if (name === './dev-log') return { devLog() {} }
       assert.equal(name, './normalizers')
       return { normalizeClient: (value) => value, normalizeLesson: (value) => value }
@@ -26,6 +31,36 @@ function apiWithFetch(fetch) {
   vm.runInContext(compiled, context)
   return exports.apiClient
 }
+
+test('registration uses its public auth endpoint with one stable explicit attempt ID', async () => {
+  const requests = []
+  const api = apiWithFetch(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body), credentials: options.credentials })
+    if (requests.length === 1) throw new Error('network lost')
+    return { ok: true, status: 200, json: async () => ({ status: 'success', pending: true }) }
+  })
+  await assert.rejects(api.register('new.coach', 'strong-password', 'registration-1'), /Сервис не ответил/)
+  await api.register('new.coach', 'strong-password', 'registration-1')
+  assert.deepEqual(requests[0], {
+    url: '/api/auth/register',
+    body: { username: 'new.coach', password: 'strong-password', requestId: 'registration-1' },
+    credentials: 'same-origin',
+  })
+  assert.deepEqual(requests[1], requests[0])
+})
+
+test('registration requires an explicit pending-account acknowledgement', async () => {
+  for (const data of [
+    null,
+    {},
+    { status: 'success' },
+    { status: 'success', pending: false },
+    { status: 'error', pending: true },
+  ]) {
+    const api = apiWithFetch(async () => ({ ok: true, status: 200, json: async () => data }))
+    await assert.rejects(api.register('new.coach', 'strong-password', 'registration-1'))
+  }
+})
 
 test('attendance batches more than 100 marks and reuses stable chunk IDs on retry', async () => {
   const requests = []
@@ -58,10 +93,7 @@ test('attendance batches more than 100 marks and reuses stable chunk IDs on retr
     status: 'attended',
   }))
 
-  await assert.rejects(
-    api.recordBulkAttendance(marks, 'lesson-1', '2026-10-02', 'attempt'),
-    /temporary network failure/,
-  )
+  await assert.rejects(api.recordBulkAttendance(marks, 'lesson-1', '2026-10-02', 'attempt'), /Сервис не ответил/)
   const retried = await api.recordBulkAttendance(marks, 'lesson-1', '2026-10-02', 'attempt')
   assert.equal(retried.success, true)
   assert.equal(retried.results.length, 101)
@@ -77,6 +109,37 @@ test('attendance batches more than 100 marks and reuses stable chunk IDs on retr
   assert.equal(saved.size, 101)
 })
 
+test('confirmed saves expose server balances and tolerate absent or malformed optional snapshots', async () => {
+  for (const client of [
+    { remainingLessons: 1, totalLessons: 2, status: 'Активен' },
+    undefined,
+    { remainingLessons: -1, totalLessons: 2, status: 'Активен' },
+    { remainingLessons: 3, totalLessons: 2, status: 'Активен' },
+    { remainingLessons: '1', totalLessons: 2, status: 'Активен' },
+    { remainingLessons: 1, totalLessons: 2, status: 'invalid' },
+  ]) {
+    let calls = 0
+    const api = apiWithFetch(async () => {
+      calls++
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, results: [{ clientId: 'a', success: true, client }] }),
+      }
+    })
+    const saved = await api.recordBulkAttendance(
+      [{ clientId: 'a', status: 'attended' }],
+      'lesson',
+      '2026-10-04',
+      'save',
+    )
+    assert.equal(saved.success, true)
+    assert.equal(calls, 1)
+    const expected = client?.remainingLessons === 1 && client?.status === 'Активен' ? client : undefined
+    assert.deepEqual(JSON.parse(JSON.stringify(saved.results[0].client ?? null)), expected ?? null)
+  }
+})
+
 test('duplicate reads share one request and React cleanup does not abort it', async () => {
   let calls = 0
   let release
@@ -85,7 +148,7 @@ test('duplicate reads share one request and React cleanup does not abort it', as
   })
   const fetch = async (_url, options) => {
     calls += 1
-    assert.equal(options.signal, undefined)
+    assert.equal(options.signal.aborted, false)
     await gate
     return {
       ok: true,
@@ -104,4 +167,155 @@ test('duplicate reads share one request and React cleanup does not abort it', as
   assert.deepEqual(await first, [{ id: 'client-1' }])
   assert.deepEqual(await second, [{ id: 'client-1' }])
   assert.equal(calls, 1)
+})
+
+test('a truncated attendance acknowledgement is not reported as saved', async () => {
+  const api = apiWithFetch(async () => ({ ok: true, status: 200, json: async () => ({ success: true, results: [] }) }))
+  await assert.rejects(
+    api.recordBulkAttendance([{ clientId: 'child-1', status: 'attended' }], 'lesson-1', '2026-10-04', 'request'),
+    (error) => error.code === 'INVALID_RESPONSE' && error.status === 502,
+  )
+})
+
+test('coach bootstrap sends opt-out flag and old-GAS fallback reads only branches and lessons', async () => {
+  const actions = []
+  const api = apiWithFetch(async (_url, options) => {
+    const { action, payload } = JSON.parse(options.body)
+    actions.push([action, payload.sheet])
+    if (action === 'getBootstrapData') {
+      assert.equal(payload.includeCoaches, false)
+      return { ok: false, status: 404, json: async () => ({ status: 'error', code: 'NOT_FOUND' }) }
+    }
+    assert.notEqual(payload.sheet, 'Тренеры')
+    return { ok: true, status: 200, json: async () => [{ id: 'row-1' }] }
+  })
+  const result = await api.fetchBootstrapData(undefined, undefined, false)
+  assert.equal(result.coaches.length, 0)
+  assert.equal(actions.length, 3) // One compatibility probe + two reads, never a coach-sheet request.
+})
+
+test('attendance acknowledgements reject duplicate, foreign and unsuccessful client results', async () => {
+  for (const results of [
+    [
+      { clientId: 'a', success: true },
+      { clientId: 'a', success: true },
+    ],
+    [
+      { clientId: 'a', success: true },
+      { clientId: 'other', success: true },
+    ],
+    [
+      { clientId: 'a', success: true },
+      { clientId: 'b', success: false },
+    ],
+  ]) {
+    const api = apiWithFetch(async () => ({ ok: true, status: 200, json: async () => ({ success: true, results }) }))
+    await assert.rejects(
+      api.recordBulkAttendance(
+        [
+          { clientId: 'a', status: 'attended' },
+          { clientId: 'b', status: 'absent' },
+        ],
+        'lesson',
+        '2026-10-04',
+        'request',
+      ),
+      (error) => error.code === 'INVALID_RESPONSE',
+    )
+  }
+})
+
+test('a hanging save times out without automatic resend or false success', async () => {
+  let expire
+  let calls = 0
+  let cleared = false
+  const api = apiWithFetch(
+    (_url, options) => {
+      calls++
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true })
+      })
+    },
+    {
+      setTimeout: (callback, milliseconds) => {
+        assert.equal(milliseconds, 45_000)
+        expire = callback
+        return 1
+      },
+      clearTimeout: () => {
+        cleared = true
+      },
+    },
+  )
+  const saving = api.recordBulkAttendance(
+    [{ clientId: 'child-1', status: 'attended' }],
+    'lesson-1',
+    '2026-10-04',
+    'same-attempt',
+  )
+  expire()
+  await assert.rejects(saving, (error) => error.status === 503)
+  assert.equal(calls, 1)
+  assert.equal(cleared, true)
+})
+
+test('roster with invalid marks or missing data is rejected before rendering', async () => {
+  const api = apiWithFetch(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ lessonId: 'lesson-1', date: '2026-10-04', clients: [null] }),
+  }))
+  await assert.rejects(api.getLessonRoster('lesson-1', '2026-10-04'), (error) => error.code === 'INVALID_RESPONSE')
+})
+
+test('session service failure is not treated as logged out; only 401 expires it', async () => {
+  const offline = apiWithFetch(async () => ({ ok: false, status: 503, json: async () => ({ message: 'unavailable' }) }))
+  await assert.rejects(offline.session(), (error) => error.status === 503)
+  const expired = apiWithFetch(async () => ({ ok: false, status: 401, json: async () => ({}) }))
+  assert.deepEqual(JSON.parse(JSON.stringify(await expired.session())), { authenticated: false, user: null })
+})
+
+test('fresh reads do not join pre-mutation or previous-session requests', async () => {
+  let reads = 0
+  let release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const api = apiWithFetch(async (_url, options) => {
+    const { action } = JSON.parse(options.body)
+    if (action === 'getSheet') {
+      const read = ++reads
+      if (read === 1) await gate
+      return { ok: true, status: 200, json: async () => [{ id: `client-${read}` }] }
+    }
+    return { ok: true, status: 200, json: async () => ({ success: true }) }
+  })
+  const before = api.fetchClients()
+  await api.updateClient('child-1', { status: 'Пауза' })
+  const after = await api.fetchClients()
+  assert.equal(after[0].id, 'client-2')
+  api.clearPrivateState()
+  assert.equal((await api.fetchClients())[0].id, 'client-3')
+  release()
+  await before
+})
+
+test('failure of a later chunk retains unknown outcome even on a business rejection', async () => {
+  const api = apiWithFetch(async (_url, options) => {
+    const { payload } = JSON.parse(options.body)
+    if (payload.requestId === 'attempt:1') return { ok: false, status: 409, json: async () => ({ code: 'CONFLICT' }) }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        results: payload.attendance.map((item) => ({ clientId: item.clientId, success: true })),
+      }),
+    }
+  })
+  const marks = Array.from({ length: 101 }, (_, i) => ({ clientId: `child-${i}`, status: 'attended' }))
+  await assert.rejects(
+    api.recordBulkAttendance(marks, 'lesson-1', '2026-10-04', 'attempt'),
+    (error) => error.status === 409 && error.attendanceOutcomeUnknown === true,
+  )
 })

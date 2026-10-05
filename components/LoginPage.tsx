@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { observer } from 'mobx-react-lite'
 import { getStore } from '@/store/RootStore'
 import { Button } from '@/components/ui/button'
@@ -53,7 +54,11 @@ export const LoginPage = observer(() => {
             {store.authStore.isLoading ? <Loader2 className="animate-spin" /> : 'Войти'}
           </Button>
           <p className="rounded-xl bg-cyan-50 px-3 py-2 text-center text-xs text-cyan-800">
-            Первый аккаунт администратора создаётся через защищённую процедуру настройки системы.
+            Новый тренер?{' '}
+            <Link href="/register" prefetch={false} className="font-semibold underline underline-offset-2">
+              Зарегистрироваться
+            </Link>
+            . Доступ к филиалу подтверждает администратор.
           </p>
         </CardContent>
       </Card>

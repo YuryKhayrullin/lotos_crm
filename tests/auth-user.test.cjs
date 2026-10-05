@@ -14,6 +14,7 @@ const candidate = {
 test('only an active, complete user can pass the BFF login gate', () => {
   assert.equal(isActiveAuthUser(candidate), true)
   assert.equal(isActiveAuthUser({ ...candidate, status: 'Отключен' }), false)
+  assert.equal(isActiveAuthUser({ ...candidate, status: 'Ожидает подтверждения' }), false)
   assert.equal(isActiveAuthUser({ ...candidate, passwordHash: undefined }), false)
   assert.equal(isActiveAuthUser({ ...candidate, role: 'viewer' }), false)
 })

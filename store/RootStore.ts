@@ -22,6 +22,8 @@ const RootStoreModel = types
     loginOpen: types.optional(types.boolean, false),
     attachCoachId: types.optional(types.string, ''),
     isLoading: types.optional(types.boolean, true),
+    hasLoadedData: types.optional(types.boolean, false),
+    requiresAccessRefresh: types.optional(types.boolean, false),
     error: types.maybeNull(types.string),
   })
   .views((self) => ({
@@ -45,6 +47,7 @@ const RootStoreModel = types
   .actions((self) => {
     let activeInitializeController: AbortController | null = null
     let initializedForUser: string | null = null
+    let dataForUser: string | null = null
     let initializingForUser: string | null = null
     const closeBranchMenu = () => {
       self.branchMenuOpen = false
@@ -119,10 +122,21 @@ const RootStoreModel = types
         const userId = self.authStore.user?.id
           ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
           : null
+        if (!userId) return
+        if (self.authStore.isCoach && initializingForUser === userId) return
         if (!force && ((initializedForUser === userId && self.branches.length > 0) || initializingForUser === userId))
           return
+        if (dataForUser !== userId) {
+          self.branches.clear()
+          self.coaches.clear()
+          self.lessons.clear()
+          self.selectedBranchId = null
+          self.hasLoadedData = false
+          dataForUser = userId
+        }
         activeInitializeController?.abort()
         const controller = new AbortController()
+        const sameSession = () => `${String(self.authStore.user?.id)}:${self.authStore.sessionVersion}` === userId
         activeInitializeController = controller
         initializingForUser = userId
         self.isLoading = true
@@ -130,17 +144,23 @@ const RootStoreModel = types
           // Only shared reference data belongs in the global bootstrap. Client
           // pages, reports and option search have independent server queries.
           const branchId = self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined
-          // Warm the first visible admin reads while the single bootstrap GAS
-          // call is already in flight. The BFF coalesces an early click with
-          // these requests and keeps the completed result private to this user.
-          if (self.authStore.isAdmin) {
-            void apiClient
-              .fetchClientsPage(1, 100, controller.signal, branchId, undefined, undefined, 'childName', 'asc')
-              .catch(() => undefined)
-            void apiClient.getDashboardSummary(controller.signal, branchId).catch(() => undefined)
+          // Screens fetch their own visible data. Speculative reads here
+          // contend with bootstrap/attendance for GAS and can outlive a tab.
+          const { branches, coaches, lessons } = yield apiClient.fetchBootstrapData(
+            controller.signal,
+            branchId,
+            !self.authStore.isCoach,
+          )
+          if (controller.signal.aborted || !sameSession()) return
+
+          if (
+            self.authStore.isCoach &&
+            (!self.authStore.user?.branchId ||
+              !branches.some((branch: IBranch) => String(branch.id) === String(self.authStore.user?.branchId)) ||
+              lessons.some((lesson: ILesson) => String(lesson.branchId) !== String(self.authStore.user?.branchId)))
+          ) {
+            throw new ApiError(403, { message: 'Не удалось подтвердить ваш филиал. Повторите проверку доступа.' })
           }
-          const { branches, coaches, lessons } = yield apiClient.fetchBootstrapData(controller.signal, branchId)
-          if (controller.signal.aborted) return
 
           self.branches.replace(branches)
           self.coaches.replace(coaches)
@@ -157,18 +177,26 @@ const RootStoreModel = types
           }
 
           initializedForUser = userId
+          self.hasLoadedData = true
+          self.requiresAccessRefresh = false
+          self.error = null
           self.isLoading = false
         } catch (error: any) {
-          if (error?.name === 'AbortError') return
+          if (controller.signal.aborted || !sameSession() || error?.name === 'AbortError') return
           if (error instanceof ApiError && (error.status === 401 || error.code === 'UNAUTHORIZED')) {
-            yield self.authStore.logout()
+            self.authStore.expireSession()
             self.error = null
             return
           }
           self.error = error instanceof ApiError ? error.message : 'Ошибка загрузки данных'
+          if (error instanceof ApiError && error.status === 403) {
+            self.hasLoadedData = false
+            self.requiresAccessRefresh = true
+          }
           self.isLoading = false
         } finally {
           if (activeInitializeController === controller) {
+            self.isLoading = false
             activeInitializeController = null
             if (initializingForUser === userId) initializingForUser = null
           }

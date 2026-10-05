@@ -21,6 +21,7 @@ export const ClientStore = types.model('ClientStore', {}).actions(() => ({
       const details = failures.map((item: { message?: string }) => item.message || 'неизвестная ошибка').join('; ')
       throw new Error(details ? `Не все отметки сохранены: ${details}` : 'Не все отметки сохранены')
     }
+    return result
   }),
 }))
 

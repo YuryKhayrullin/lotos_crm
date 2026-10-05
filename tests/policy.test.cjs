@@ -41,4 +41,7 @@ test('coach is restricted to the assigned branch', () => {
 
 test('unknown actions are rejected', () => {
   assert.throws(() => assertActionAllowed('dropDatabase', admin), /Недопустимое действие/)
+  // Registration must pass only through its rate-limited public auth route.
+  assert.throws(() => assertActionAllowed('registerCoach', admin), /Недопустимое действие/)
+  assert.throws(() => assertActionAllowed('registerCoach', coach), /Недопустимое действие/)
 })

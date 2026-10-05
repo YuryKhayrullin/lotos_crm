@@ -34,17 +34,22 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
   const [formError, setFormError] = useState('')
   const [clientOptions, setClientOptions] = useState<ClientOption[]>([])
   const [clientsLoading, setClientsLoading] = useState(false)
+  const [clientSearchRequested, setClientSearchRequested] = useState(false)
+  const [clientSearchVersion, setClientSearchVersion] = useState(0)
+  const [clientOptionsError, setClientOptionsError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const selectedClient = clientOptions.find((client) => client.id === formData.clientId)
   const availableCoaches = store.coaches.filter((coach) => String(coach.branchId) === formData.branchId)
 
   useEffect(() => {
-    if (!isOpen || !formData.branchId) {
+    if (!isOpen || !formData.branchId || !clientSearchRequested) {
       setClientOptions([])
       setClientsLoading(false)
       return
     }
     const controller = new AbortController()
+    setClientOptions([])
+    setClientOptionsError('')
     setClientsLoading(true)
     void apiClient
       .searchClientOptions('', controller.signal, formData.branchId, 500, formData.category)
@@ -52,7 +57,10 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
         if (!controller.signal.aborted) setClientOptions(options)
       })
       .catch(() => {
-        if (!controller.signal.aborted) setClientOptions([])
+        if (!controller.signal.aborted) {
+          setClientOptions([])
+          setClientOptionsError('Не удалось загрузить клиентов. Закройте и откройте список для повторной попытки.')
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setClientsLoading(false)
@@ -60,7 +68,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     return () => {
       controller.abort()
     }
-  }, [formData.branchId, formData.category, isOpen])
+  }, [formData.branchId, formData.category, isOpen, clientSearchRequested, clientSearchVersion])
 
   const handleSubmit = async () => {
     if (isSubmitting) return
@@ -193,6 +201,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
             onValueChange={(val) => {
               if (val === 'плавание' || val === 'синхронное плавание') {
                 setFormData({ ...formData, category: val, clientId: '' })
+                setClientOptions([])
               }
             }}
           >
@@ -236,12 +245,17 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
             <Select
               value={formData.clientId || '__none__'}
               disabled={isSubmitting}
+              onOpenChange={(open) => {
+                if (!open) return
+                setClientSearchRequested(true)
+                if (clientOptionsError) setClientSearchVersion((version) => version + 1)
+              }}
               onValueChange={(val) => {
                 const clientId = val === '__none__' ? '' : (val ?? '')
                 setFormData({ ...formData, clientId })
               }}
             >
-              <SelectTrigger className="h-11 w-full rounded-xl bg-white" disabled={clientsLoading}>
+              <SelectTrigger className="h-11 w-full rounded-xl bg-white">
                 <SelectValue placeholder={clientsLoading ? 'Загружаем клиентов…' : 'Выберите клиента'}>
                   {selectedClient
                     ? `${selectedClient.childName}${selectedClient.parentName ? ` · ${selectedClient.parentName}` : ''}`
@@ -250,6 +264,16 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
               </SelectTrigger>
               <SelectContent className="rounded-xl bg-white">
                 <SelectItem value="__none__">Без привязки к клиенту</SelectItem>
+                {clientsLoading && (
+                  <p role="status" className="px-3 py-2 text-sm text-slate-500">
+                    Загружаем клиентов…
+                  </p>
+                )}
+                {clientOptionsError && (
+                  <p role="alert" className="px-3 py-2 text-sm text-rose-700">
+                    {clientOptionsError}
+                  </p>
+                )}
                 {clientOptions.map((client) => (
                   <SelectItem key={client.id} value={client.id}>
                     {client.childName}
@@ -270,7 +294,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
                 <span className="shrink-0 text-slate-600">Осталось: {selectedClient.remainingLessons}</span>
               </div>
             )}
-            {!clientsLoading && clientOptions.length === 0 && (
+            {clientSearchRequested && !clientOptionsError && !clientsLoading && clientOptions.length === 0 && (
               <span className="text-xs font-normal text-slate-500">
                 В этом филиале нет активных клиентов для выбранного вида занятия
               </span>

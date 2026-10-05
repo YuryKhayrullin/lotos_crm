@@ -46,6 +46,8 @@ function getGasConfig(): { url: string; hmacSecret: string } {
 }
 
 export async function callGas(request: GasRequest): Promise<unknown> {
+  const startedAt = performance.now()
+  let succeeded = false
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), GAS_TIMEOUT_MS)
 
@@ -88,6 +90,7 @@ export async function callGas(request: GasRequest): Promise<unknown> {
       }
       throw new GasError(rawCode, statusForGasErrorCode(rawCode), messageForGasErrorCode(rawCode), response.status)
     }
+    succeeded = true
     return data
   } catch (error) {
     if (error instanceof GasError) {
@@ -119,5 +122,10 @@ export async function callGas(request: GasRequest): Promise<unknown> {
     throw connectionError
   } finally {
     clearTimeout(timeout)
+    serverLog('info', 'gas.request.completed', {
+      action: request.action,
+      success: succeeded,
+      durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    })
   }
 }

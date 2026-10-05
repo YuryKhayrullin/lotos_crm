@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { observer } from 'mobx-react-lite'
 import { useStore } from '@/store/StoreProvider'
 import { apiClient, type ClientsPage } from '@/lib/api-client'
@@ -20,36 +20,48 @@ export const SubscriptionsView = observer(() => {
   const store = useStore()
   const [page, setPage] = useState<ClientsPage>({ items: [], total: 0, page: 1, pageSize: PAGE_SIZE, hasMore: false })
   const [query, setQuery] = useState('')
+  const queryText = query.trim()
+  const requestVersion = useRef(0)
+  const paginationPending = useRef(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
   const branchId = store.selectedBranchId || undefined
 
   useEffect(() => {
     const controller = new AbortController()
-    const timer = window.setTimeout(() => {
-      setIsLoading(true)
-      setError('')
-      void apiClient
-        .getSubscriptionsPage(1, PAGE_SIZE, controller.signal, branchId, query.trim() || undefined)
-        .then((nextPage) => {
-          if (!controller.signal.aborted) setPage(nextPage)
-        })
-        .catch((requestError) => {
-          if (!controller.signal.aborted)
-            setError(requestError instanceof Error ? requestError.message : 'Не удалось загрузить абонементы')
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setIsLoading(false)
-        })
-    }, 250)
+    const requestGate = requestVersion
+    const version = ++requestGate.current
+    paginationPending.current = false
+    setIsLoading(true)
+    setError('')
+    const timer = window.setTimeout(
+      () => {
+        void apiClient
+          .getSubscriptionsPage(1, PAGE_SIZE, controller.signal, branchId, queryText || undefined)
+          .then((nextPage) => {
+            if (!controller.signal.aborted && version === requestVersion.current) setPage(nextPage)
+          })
+          .catch((requestError) => {
+            if (!controller.signal.aborted && version === requestVersion.current)
+              setError(requestError instanceof Error ? requestError.message : 'Не удалось загрузить абонементы')
+          })
+          .finally(() => {
+            if (!controller.signal.aborted && version === requestVersion.current) setIsLoading(false)
+          })
+      },
+      queryText ? 250 : 0,
+    )
     return () => {
       window.clearTimeout(timer)
       controller.abort()
+      requestGate.current++
     }
-  }, [branchId, query])
+  }, [branchId, queryText])
 
   const loadNextPage = async () => {
-    if (isLoading || !page.hasMore) return
+    if (isLoading || paginationPending.current || !page.hasMore) return
+    const version = requestVersion.current
+    paginationPending.current = true
     setIsLoading(true)
     setError('')
     try {
@@ -58,13 +70,18 @@ export const SubscriptionsView = observer(() => {
         PAGE_SIZE,
         undefined,
         branchId,
-        query.trim() || undefined,
+        queryText || undefined,
       )
+      if (version !== requestVersion.current) return
       setPage((current) => ({ ...nextPage, items: [...current.items, ...nextPage.items] }))
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Не удалось загрузить абонементы')
+      if (version === requestVersion.current)
+        setError(requestError instanceof Error ? requestError.message : 'Не удалось загрузить абонементы')
     } finally {
-      setIsLoading(false)
+      if (version === requestVersion.current) {
+        paginationPending.current = false
+        setIsLoading(false)
+      }
     }
   }
 
