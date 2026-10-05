@@ -82,6 +82,8 @@ function componentHarness(file, exportName, apiClient) {
       if (name === '@/lib/formatters') return require('../.test-dist/formatters.js')
       if (name === '@/lib/api-client')
         return { apiClient, createRequestId: () => 'registration-attempt', ApiError: Error }
+      if (name === '@/lib/utils/date' && file === 'components/CoachDashboard.tsx')
+        return require('../.test-dist/utils/date-core.js')
       if (name === '@/lib/utils/date')
         return { isValidDateOnly: () => true, parseTimeToHHMM: (value) => value, isLessonOnDay: () => true }
       if (name.startsWith('@/components/') || name === 'lucide-react') return elements
@@ -480,6 +482,90 @@ test('account data from a previous session is ignored after switching users', as
 const settle = async () => {
   for (let i = 0; i < 8; i++) await Promise.resolve()
 }
+
+const dashboardHarness = (lessons, now = new Date(2026, 9, 5, 12)) => {
+  const opened = []
+  let navigations = 0
+  const harness = componentHarness('components/CoachDashboard.tsx', 'CoachDashboard', {})
+  const props = {
+    lessons,
+    now,
+    branchName: 'Бассейн',
+    onSchedule: () => navigations++,
+    onOpenLesson: (lesson, date) =>
+      opened.push([lesson.id, require('../.test-dist/utils/date-core.js').toLocalDateOnly(date)]),
+  }
+  return { render: () => harness.render(props), opened, navigations: () => navigations }
+}
+const lessonButtons = (tree) =>
+  nodes(tree).filter((node) => String(node.props['aria-label'] || '').startsWith('Отметить посещаемость:'))
+
+test('coach dashboard empty day provides useful navigation without fake saved marks or network calls', () => {
+  const dashboard = dashboardHarness([])
+  const tree = dashboard.render()
+  assert.match(textContent(tree), /На сегодня занятий нет/)
+  assert.match(textContent(tree), /Нет в ближайшие 14 дней/)
+  assert.doesNotMatch(textContent(tree), /учеников пришло|100%|успешно сохранено/i)
+  const calendar = nodes(tree).filter((node) => typeof node.props['aria-pressed'] === 'boolean')
+  assert.equal(calendar.length, 7)
+  assert.equal(calendar.filter((node) => node.props['aria-pressed']).length, 1)
+  nodes(tree)
+    .find((node) => node.type === 'button' && textContent(node) === 'Открыть расписание')
+    .props.onClick()
+  assert.equal(dashboard.navigations(), 1)
+})
+
+test('coach calendar opens the selected dated occurrence, sorts lessons and returns to today', () => {
+  const dashboard = dashboardHarness([
+    { id: 'late', title: 'Вечер', date: '2026-10-06', time: '18:00', dayOfWeek: 'Вт' },
+    { id: 'early', title: 'Утро', date: '2026-10-06', time: '09:00', dayOfWeek: 'Вт' },
+  ])
+  nodes(dashboard.render())
+    .find((node) => node.props['aria-label'] === 'вторник, 6 октября')
+    .props.onClick()
+  const buttons = lessonButtons(dashboard.render())
+  assert.equal(buttons.length, 2)
+  assert.match(buttons[0].props['aria-label'], /Утро/)
+  buttons[0].props.onClick()
+  assert.deepEqual(dashboard.opened, [['early', '2026-10-06']])
+  nodes(dashboard.render())
+    .find((node) => node.type === 'button' && textContent(node) === 'Сегодня')
+    .props.onClick()
+  assert.match(textContent(dashboard.render()), /На сегодня занятий нет/)
+})
+
+test('coach calendar crosses year boundaries without losing the actual lesson date', () => {
+  const dashboard = dashboardHarness(
+    [{ id: 'new-year', title: 'Первое занятие', date: '2027-01-04', time: '17:00', dayOfWeek: 'Пн' }],
+    new Date(2026, 11, 31, 12),
+  )
+  nodes(dashboard.render())
+    .find((node) => node.props['aria-label'] === 'Следующая неделя')
+    .props.onClick()
+  lessonButtons(dashboard.render())[0].props.onClick()
+  assert.deepEqual(dashboard.opened, [['new-year', '2027-01-04']])
+  nodes(dashboard.render())
+    .find((node) => node.props['aria-label'] === 'Предыдущая неделя')
+    .props.onClick()
+  assert.equal(lessonButtons(dashboard.render()).length, 0)
+})
+
+test('nearest lesson skips past or malformed times and recurring lessons respect their start date', () => {
+  const dashboard = dashboardHarness([
+    { id: 'past', title: 'Прошло', date: '2026-10-05', time: '09:00', dayOfWeek: 'Пн' },
+    { id: 'bad-time', title: 'Без времени', date: '2026-10-06', time: 'invalid', dayOfWeek: 'Вт' },
+    { id: 'recurring', title: 'Повторяется', date: '2026-10-13', time: '18:00', dayOfWeek: 'Вт', isRecurring: true },
+  ])
+  nodes(dashboard.render())
+    .find((node) => node.props['aria-label'] === 'среда, 7 октября')
+    .props.onClick()
+  const nearest = nodes(dashboard.render()).find(
+    (node) => node.type === 'button' && textContent(node).startsWith('Ближайшее:'),
+  )
+  assert.match(textContent(nearest), /Повторяется/)
+  nearest.props.onClick()
+  assert.deepEqual(dashboard.opened, [['recurring', '2026-10-13']])
+})
 
 const registrationFields = (tree) => nodes(tree).filter((node) => node.type === 'Input')
 const registrationForm = (tree) => nodes(tree).find((node) => node.type === 'form')
