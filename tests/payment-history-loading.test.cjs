@@ -1,0 +1,15 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+
+test('payment history uses one combined request, reports failures and never fabricates legacy payments', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../components/ClientsView.tsx'), 'utf8')
+  const effect = source.slice(source.indexOf('let cancelled = false'), source.indexOf('const openPayment'))
+  assert.doesNotMatch(effect, /Promise\.all/)
+  assert.match(effect, /void apiClient\s*\.getClientAccounting/)
+  assert.doesNotMatch(effect, /apiClient\.auditLessonLedger/)
+  assert.match(effect, /setHistoryError\('Не удалось загрузить историю платежей/)
+  assert.match(source, /historyError && paymentHistory.length === 0 \? \(/)
+  assert.match(source, /запись платежа в истории отсутствует/)
+})

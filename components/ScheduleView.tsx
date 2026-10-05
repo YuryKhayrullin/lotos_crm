@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, Fragment } from 'react'
 import dynamic from 'next/dynamic'
 import { observer } from 'mobx-react-lite'
 import { getStore } from '@/store/RootStore'
@@ -18,15 +18,22 @@ import {
   RotateCcw,
   Users,
 } from 'lucide-react'
-import { parseTimeToHHMM, cleanDate, isLessonInWeek, isLessonOnDay, lessonOccurrenceDate } from '@/lib/utils/date'
+import {
+  parseTimeToHHMM,
+  cleanDate,
+  isLessonInWeek,
+  isLessonOnDay,
+  lessonOccurrenceDate,
+  lessonTemporalStatus,
+} from '@/lib/utils/date'
 import { RoleGuard } from './RoleGuard'
 
 const store = getStore()
 const CreateLessonModal = dynamic(() => import('./CreateLessonModal').then((module) => module.CreateLessonModal))
 
 // Обновленная функция с учетом смещения
-const getStartOfWeek = (offset: number) => {
-  const d = new Date()
+const getStartOfWeek = (offset: number, today: string) => {
+  const d = new Date(today)
   const day = d.getDay()
   const diff = d.getDate() - day + (day === 0 ? -6 : 1) + offset * 7
   const start = new Date(d.setDate(diff))
@@ -46,8 +53,19 @@ const isToday = (date: Date) => {
 export const ScheduleView = observer(() => {
   const [weekOffset, setWeekOffset] = useState(0)
   const [isCreateLessonOpen, setIsCreateLessonOpen] = useState(false)
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const refresh = () => setNow(new Date())
+    const timer = window.setInterval(refresh, 30_000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
+  const todayKey = now.toDateString()
 
-  const startOfWeek = useMemo(() => getStartOfWeek(weekOffset), [weekOffset])
+  const startOfWeek = useMemo(() => getStartOfWeek(weekOffset, todayKey), [weekOffset, todayKey])
   const endOfWeek = useMemo(() => {
     const end = new Date(startOfWeek)
     end.setDate(startOfWeek.getDate() + 6)
@@ -89,6 +107,28 @@ export const ScheduleView = observer(() => {
     }
   }, [sortedBranchLessons, viewMode, startOfWeek, endOfWeek, selectedDayData])
 
+  const statusLabels = {
+    ongoing: 'Идёт сейчас',
+    upcoming: 'Предстоящие',
+    completed: 'Завершённые',
+    unknown: 'Время требует проверки',
+  }
+  const statusOrder = { ongoing: 0, upcoming: 1, completed: 2, unknown: 3 }
+  const displayedLessons = lessons
+    .map((lesson) => {
+      const occurrenceDate = lessonOccurrenceDate(lesson, startOfWeek)
+      return {
+        lesson,
+        occurrenceDate,
+        status: lessonTemporalStatus(occurrenceDate, parseTimeToHHMM(lesson.time), lesson.duration, now),
+      }
+    })
+    .sort(
+      (left, right) =>
+        statusOrder[left.status] - statusOrder[right.status] ||
+        `${left.occurrenceDate} ${left.lesson.time}`.localeCompare(`${right.occurrenceDate} ${right.lesson.time}`),
+    )
+
   const branch = store.currentBranch
   const selectedDateLabel = selectedDayData
     ? selectedDayData.fullDate.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })
@@ -98,8 +138,8 @@ export const ScheduleView = observer(() => {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="overflow-hidden rounded-3xl border border-cyan-100 bg-white shadow-sm">
-        <div className="flex flex-col gap-5 bg-gradient-to-br from-cyan-50 via-white to-sky-50/70 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+      <div className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white">
+        <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
           <div className="flex min-w-0 items-center gap-4">
             <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-600 text-white shadow-lg shadow-cyan-200">
               <CalendarDays className="size-6" />
@@ -107,10 +147,10 @@ export const ScheduleView = observer(() => {
             <div className="min-w-0">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-cyan-700">Расписание</p>
               <h2 className="truncate text-2xl font-bold tracking-tight text-slate-950">
-                {branch ? branch.name : 'Выберите филиал'}
+                {branch ? branch.name : 'Все филиалы'}
               </h2>
               <p className="mt-1 text-sm text-slate-500">
-                {viewMode === 'день' ? selectedDateLabel : `${lessons.length} занятий на неделе`}
+                {viewMode === 'день' ? selectedDateLabel : `Всего занятий на неделе: ${lessons.length}`}
               </p>
             </div>
           </div>
@@ -228,60 +268,86 @@ export const ScheduleView = observer(() => {
             </RoleGuard>
           </Card>
         ) : (
-          lessons.map((lesson) => {
-            const occurrenceDate = lessonOccurrenceDate(lesson, startOfWeek)
+          displayedLessons.map(({ lesson, occurrenceDate, status }, index) => {
             const maxCap = lesson.maxCapacity || 10
 
             return (
-              <Card
-                key={lesson.id}
-                className="group cursor-pointer overflow-hidden rounded-2xl border-slate-100 shadow-sm transition-all hover:-translate-y-0.5 hover:border-cyan-200 hover:shadow-md"
-                onClick={() => {
-                  setSelectedOccurrenceDate(occurrenceDate)
-                  setSelectedLesson({ ...lesson })
-                }}
-              >
-                <CardContent className="flex items-center justify-between gap-4 p-4 sm:p-5">
-                  <div className="flex min-w-0 items-center gap-3 sm:gap-4">
-                    <div
-                      className={`h-16 w-1.5 shrink-0 rounded-full transition-colors ${
-                        lesson.category === 'синхронное плавание'
-                          ? 'bg-pink-400 group-hover:bg-pink-500'
-                          : 'bg-cyan-500 group-hover:bg-cyan-600'
-                      }`}
-                    />
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <p className="text-xl font-extrabold tabular-nums text-cyan-950">
-                          {parseTimeToHHMM(lesson.time)}
-                        </p>
-                        <p className="text-xs font-semibold text-cyan-700">{cleanDate(occurrenceDate)}</p>
-                      </div>
-                      <p className="mt-1 truncate font-semibold text-slate-900">{lesson.title}</p>
-                      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
-                        <span className="inline-flex items-center gap-1">
-                          <Users className="size-3.5" /> {lesson.coachName || 'Тренер не назначен'}
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                          <MapPin className="size-3.5" /> {lesson.pool || 'Бассейн'}
-                        </span>
-                        <span className="inline-flex items-center gap-1">
-                          <Clock3 className="size-3.5" /> {lesson.duration || '1 час'}
-                        </span>
+              <Fragment key={lesson.id}>
+                {(index === 0 || displayedLessons[index - 1].status !== status) && (
+                  <h3 className="mt-2 flex items-center gap-2 text-sm font-semibold text-slate-600">
+                    {statusLabels[status]}
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs">
+                      {displayedLessons.filter((entry) => entry.status === status).length}
+                    </span>
+                  </h3>
+                )}
+                <Card
+                  key={lesson.id}
+                  className="group cursor-pointer overflow-hidden rounded-3xl border border-slate-200/80 bg-white ring-0 shadow-none transition-all hover:border-cyan-200 hover:shadow-md"
+                  onClick={() => {
+                    setSelectedOccurrenceDate(occurrenceDate)
+                    setSelectedLesson({ ...lesson })
+                  }}
+                >
+                  <CardContent className="flex items-center justify-between gap-4 p-4 sm:p-5">
+                    <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+                      <div
+                        className={`h-16 w-1.5 shrink-0 rounded-full transition-colors ${
+                          lesson.category === 'синхронное плавание'
+                            ? 'bg-pink-400 group-hover:bg-pink-500'
+                            : 'bg-cyan-500 group-hover:bg-cyan-600'
+                        }`}
+                      />
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <Badge
+                            className={
+                              status === 'completed'
+                                ? 'bg-slate-100 text-slate-600'
+                                : status === 'ongoing'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-cyan-50 text-cyan-700'
+                            }
+                          >
+                            {status === 'completed'
+                              ? 'Завершено'
+                              : status === 'ongoing'
+                                ? 'Идёт сейчас'
+                                : status === 'upcoming'
+                                  ? 'Запланировано'
+                                  : 'Проверьте время'}
+                          </Badge>
+                          <p className="text-xl font-extrabold tabular-nums text-cyan-950">
+                            {parseTimeToHHMM(lesson.time)}
+                          </p>
+                          <p className="text-xs font-semibold text-cyan-700">{cleanDate(occurrenceDate)}</p>
+                        </div>
+                        <p className="mt-1 truncate font-semibold text-slate-900">{lesson.title}</p>
+                        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+                          <span className="inline-flex items-center gap-1">
+                            <Users className="size-3.5" /> {lesson.coachName || 'Тренер не назначен'}
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <MapPin className="size-3.5" /> {lesson.pool || 'Бассейн'}
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <Clock3 className="size-3.5" /> {lesson.duration || '1 час'}
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="flex shrink-0 items-center gap-2 sm:gap-4">
-                    <Badge className="rounded-xl bg-cyan-50 px-2.5 py-1 text-xs font-bold text-cyan-700 sm:text-sm">
-                      До {maxCap}
-                    </Badge>
-                    <div className="px-1 text-xl font-bold text-slate-300 transition-colors group-hover:text-cyan-600 sm:px-2">
-                      ›
+                    <div className="flex shrink-0 items-center gap-2 sm:gap-4">
+                      <Badge className="rounded-xl bg-cyan-50 px-2.5 py-1 text-xs font-bold text-cyan-700 sm:text-sm">
+                        До {maxCap}
+                      </Badge>
+                      <div className="px-1 text-xl font-bold text-slate-300 transition-colors group-hover:text-cyan-600 sm:px-2">
+                        ›
+                      </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
+                  </CardContent>
+                </Card>
+              </Fragment>
             )
           })
         )}

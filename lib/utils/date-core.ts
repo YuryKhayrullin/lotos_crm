@@ -86,3 +86,23 @@ export const cleanDate = (dateString: string | null | undefined): string => {
   const date = parseDateOnly(str)
   return !date ? 'Дата не задана' : date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })
 }
+
+export type LessonTemporalStatus = 'upcoming' | 'ongoing' | 'completed' | 'unknown'
+
+export const lessonTemporalStatus = (
+  date: string | null,
+  time: string,
+  duration: string,
+  now: Date,
+): LessonTemporalStatus => {
+  const start = date ? parseDateOnly(date) : null
+  const clock = /^(\d{2}):(\d{2})$/.exec(time)
+  if (!start || !clock || Number(clock[1]) > 23 || Number(clock[2]) > 59) return 'unknown'
+  start.setHours(Number(clock[1]), Number(clock[2]))
+  if (now.getTime() < start.getTime()) return 'upcoming'
+  const hours = duration.match(/(\d+(?:[.,]\d+)?)\s*(?:час|ч\b)/i)
+  const minutes = duration.match(/(\d+)\s*мин/i)
+  const length = (hours ? Number(hours[1].replace(',', '.')) * 60 : 0) + (minutes ? Number(minutes[1]) : 0)
+  if (!length || !Number.isFinite(length)) return 'unknown'
+  return now.getTime() < start.getTime() + length * 60_000 ? 'ongoing' : 'completed'
+}

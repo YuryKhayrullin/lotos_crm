@@ -74,6 +74,33 @@ const bootstrap = () => ({
   lessons: [{ id: 'lesson-1', branchId: 'branch-1', title: 'Swimming', time: '17:00' }],
 })
 
+test('admin bootstrap hydrates account cards together with profiles before opening the workspace', async () => {
+  const { applySnapshot, getSnapshot } = require('mobx-state-tree')
+  const root = rootStoreWith({ clearPrivateState() {}, fetchBootstrapData: async () => ({ ...bootstrap(), coachAccounts: [{ id: 'anna', username: 'anna', role: 'coach', branchId: 'branch-1', status: 'Активен', disabledAt: null, disabledBy: null }] }) })
+  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin', username: 'admin', role: 'admin', branchId: null } })
+  await root.initialize()
+  assert.equal(root.hasLoadedCoachAccounts, true)
+  assert.equal(root.currentCoachAccounts[0].username, 'anna')
+  assert.equal(root.isLoading, false)
+})
+
+test('trainer display snapshots are admin-only and cannot carry over to another session', () => {
+  const { applySnapshot, getSnapshot } = require('mobx-state-tree')
+  const root = rootStoreWith({ clearPrivateState() {} })
+  const account = { id: 'anna', username: 'anna', role: 'coach', branchId: 'branch-1', status: 'Активен', disabledAt: null, disabledBy: null }
+  root.rememberCoachAccounts([account])
+  assert.equal(root.currentCoachAccounts.length, 0, 'coach sessions cannot retain admin account lists')
+  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin', username: 'admin', role: 'admin', branchId: null } })
+  root.rememberCoachAccounts([account])
+  assert.equal(root.currentCoachAccounts.length, 1)
+  assert.equal(root.hasLoadedCoachAccounts, true)
+  root.authStore.expireSession()
+  assert.equal(root.currentCoachAccounts.length, 0)
+  assert.equal(root.hasLoadedCoachAccounts, false)
+  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin-2', username: 'admin-2', role: 'admin', branchId: null } })
+  assert.equal(root.currentCoachAccounts.length, 0, 'the new administrator must obtain a fresh server snapshot')
+})
+
 test('coach bootstrap has no admin prefetch, retains last good schedule on outage, and supports retry', async () => {
   let fail = false
   let calls = 0

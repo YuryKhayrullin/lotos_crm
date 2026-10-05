@@ -32,6 +32,111 @@ function apiWithFetch(fetch, timers = {}) {
   return exports.apiClient
 }
 
+const accountingSnapshot = {
+  remainingLessons: 4,
+  totalLessons: 4,
+  paidAmount: 5500,
+  paymentBalance: 0,
+  category: 'плавание',
+  lessonsPerWeek: 1,
+  status: 'Активен',
+}
+test('combined accounting sends includeAudit and normally performs one request', async () => {
+  const requests = []
+  const api = apiWithFetch(async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        payments: [{ id: 'payment-1' }],
+        ledger: [{ id: 'ledger-1' }],
+        client: accountingSnapshot,
+        audit: { success: true, checked: 1, discrepancies: [] },
+      }),
+    }
+  })
+  const result = await api.getClientAccounting('client-1')
+  assert.deepEqual(requests, [{ action: 'getClientHistory', payload: { clientId: 'client-1', includeAudit: true } }])
+  assert.equal(result.payments.length, 1)
+  assert.equal(result.client.remainingLessons, 4)
+  assert.equal(result.audit.success, true)
+})
+
+test('explicit audit failure retains history with no second GAS call; old GAS alone uses compatibility fallback', async () => {
+  for (const oldGas of [false, true]) {
+    const actions = []
+    const api = apiWithFetch(async (_url, options) => {
+      const { action } = JSON.parse(options.body)
+      actions.push(action)
+      if (action === 'auditLessonLedger') throw new Error('audit offline')
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          payments: [{ id: 'payment-1' }],
+          ledger: [],
+          ...(oldGas ? {} : { audit: null, auditError: { code: 'SCHEMA', message: 'Сверка недоступна' } }),
+        }),
+      }
+    })
+    const result = await api.getClientAccounting('client-1')
+    assert.equal(result.payments.length, 1)
+    assert.equal(result.audit, null)
+    assert(result.auditError.message)
+    assert.deepEqual(actions, oldGas ? ['getClientHistory', 'auditLessonLedger'] : ['getClientHistory'])
+  }
+})
+
+test('invalid accounting history is a load failure, not an empty payment history', async () => {
+  for (const response of [
+    { success: true },
+    { success: true, payments: null, ledger: [] },
+    { success: true, payments: [{ amount: 5500 }], ledger: [] },
+    { success: true, payments: [{ id: 'same' }, { id: 'same' }], ledger: [] },
+  ]) {
+    const api = apiWithFetch(async () => ({ ok: true, status: 200, json: async () => response }))
+    await assert.rejects(api.getClientAccounting('client-1'), (error) => error.code === 'INVALID_RESPONSE')
+  }
+})
+
+test('payment acknowledgement validates authoritative counters and preserves the explicit retry ID', async () => {
+  for (const client of [
+    accountingSnapshot,
+    { ...accountingSnapshot, remainingLessons: NaN },
+    { ...accountingSnapshot, totalLessons: -1 },
+  ]) {
+    const requests = []
+    const api = apiWithFetch(async (_url, options) => {
+      requests.push(JSON.parse(options.body))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          payment: { id: 'payment-1', clientId: 'client-1', requestId: 'retry-1' },
+          client,
+          ledgerEntry: { id: 'ledger-1', paymentId: 'payment-1' },
+          audit: { success: true, checked: 1, discrepancies: [] },
+        }),
+      }
+    })
+    if (client === accountingSnapshot) {
+      const result = await api.recordPayment('client-1', 5500, 'плавание', 1, '', 'retry-1')
+      assert.equal(result.ledgerEntry.id, 'ledger-1')
+      assert.equal(result.client.remainingLessons, 4)
+    } else {
+      await assert.rejects(
+        api.recordPayment('client-1', 5500, 'плавание', 1, '', 'retry-1'),
+        (error) => error.code === 'INVALID_RESPONSE',
+      )
+    }
+    assert.equal(requests[0].payload.requestId, 'retry-1')
+  }
+})
+
 test('registration uses its public auth endpoint with one stable explicit attempt ID', async () => {
   const requests = []
   const api = apiWithFetch(async (url, options) => {

@@ -87,7 +87,7 @@ export const SubscriptionsView = observer(() => {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-3 bg-white p-6 rounded-2xl shadow-sm border border-slate-100 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 bg-white p-6 rounded-3xl border border-slate-200/80 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Абонементы</h2>
           <p className="mt-1 text-sm text-slate-500">Найдено: {page.total}</p>
@@ -105,7 +105,7 @@ export const SubscriptionsView = observer(() => {
           Не удалось загрузить абонементы
         </p>
       )}
-      <Card className="rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+      <Card className="rounded-3xl border border-slate-200/80 bg-white ring-0 shadow-none overflow-hidden">
         <CardContent className="p-0">
           <Table>
             <TableHeader>

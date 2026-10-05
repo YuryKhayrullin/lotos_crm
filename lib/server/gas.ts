@@ -61,6 +61,7 @@ export async function callGas(request: GasRequest): Promise<unknown> {
       auth: request.auth ?? null,
       timestamp,
       nonce,
+      diagnostics: process.env.NODE_ENV === 'development',
     }
     const signedEnvelope = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64url')
     const signature = createHmac('sha256', hmacSecret).update(signedEnvelope).digest('hex')
@@ -81,6 +82,31 @@ export async function callGas(request: GasRequest): Promise<unknown> {
       data = JSON.parse(text)
     } catch {
       throw new GasError('SERVICE_UNAVAILABLE', 503, 'Сервис данных временно недоступен', response.status)
+    }
+
+    if (data && typeof data === 'object' && (data as Record<string, unknown>).gasDiagnosticsVersion === 1) {
+      const diagnostic = data as Record<string, unknown>
+      if (process.env.NODE_ENV === 'development') {
+        const processingMs = diagnostic.processingMs
+        if (typeof processingMs === 'number' && Number.isFinite(processingMs) && processingMs >= 0)
+          serverLog('info', 'gas.processing', { action: request.action, durationMs: processingMs })
+        if (Array.isArray(diagnostic.timings)) {
+          for (const timing of diagnostic.timings.slice(0, 30)) {
+            if (!timing || typeof timing !== 'object') continue
+            const { stage, durationMs } = timing
+            if (
+              typeof stage === 'string' &&
+              /^[a-z._]{1,80}$/.test(stage) &&
+              typeof durationMs === 'number' &&
+              Number.isFinite(durationMs) &&
+              durationMs >= 0
+            )
+              serverLog('info', 'gas.stage', { action: request.action, stage, durationMs })
+          }
+        }
+      }
+      // Operational diagnostics stay on the server, never in browser responses.
+      data = diagnostic.response
     }
 
     if (data && typeof data === 'object' && (data as Record<string, unknown>).status === 'error') {

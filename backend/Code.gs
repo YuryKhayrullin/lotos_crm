@@ -1,10 +1,19 @@
 var ACTIVE_IDEMPOTENCY_KEY = ''
 var ACTIVE_IDEMPOTENCY_FINGERPRINT = ''
 var ACTIVE_MUTATION_LOCK = false
+var ACTIVE_USERS_SNAPSHOT = null
+var ACTIVE_DIAGNOSTICS = false
+var ACTIVE_TIMINGS = []
+var ACTIVE_REQUEST_STARTED_AT = 0
 var AUTH_USER_CACHE_TTL_SECONDS = 60
 var API_ERROR_CODES = ['UNAUTHORIZED', 'FORBIDDEN', 'VALIDATION', 'NOT_FOUND', 'CONFLICT', 'BUSY', 'SCHEMA']
 
 function diagnosticLog(event, details) {
+  if (ACTIVE_DIAGNOSTICS && ACTIVE_TIMINGS.length < 30 && details) {
+    var duration = details.durationMs === undefined ? details.waitMs : details.durationMs
+    if (typeof duration === 'number' && isFinite(duration) && duration >= 0)
+      ACTIVE_TIMINGS.push({ stage: String(event), durationMs: duration })
+  }
   try {
     Logger.log('[lotos-gas] ' + event + ' ' + JSON.stringify(details || {}))
   } catch (loggingError) {}
@@ -92,7 +101,13 @@ function createResponse(data) {
       } catch (cacheError) {}
     }
   }
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON)
+  var output = ACTIVE_DIAGNOSTICS ? {
+    gasDiagnosticsVersion: 1,
+    response: data,
+    timings: ACTIVE_TIMINGS,
+    processingMs: Math.max(0, new Date().getTime() - ACTIVE_REQUEST_STARTED_AT),
+  } : data
+  return ContentService.createTextOutput(JSON.stringify(output)).setMimeType(ContentService.MimeType.JSON)
 }
 
 function options() {
@@ -287,6 +302,7 @@ function isMutatingAction(action) {
       'linkCoachUser',
       'createClient',
       'createLesson',
+      'createLessonWithClients',
       'createBranch',
       'createCoach',
       'updateClient',
@@ -505,7 +521,17 @@ function validateRequest(body) {
     if (body.birthDate !== undefined && String(body.birthDate).trim() && !isValidBirthDate(body.birthDate)) {
       throw new Error('Некорректная дата рождения')
     }
-  } else if (body.action === 'createLesson') {
+  } else if (body.action === 'createLesson' || body.action === 'createLessonWithClients') {
+    if (body.action === 'createLessonWithClients' && !Array.isArray(body.clientIds)) throw new Error('Не указан список клиентов')
+    if (body.clientIds !== undefined) {
+      if (!Array.isArray(body.clientIds) || body.clientIds.length > 100) throw new Error('Некорректный список клиентов: максимум 100')
+      var uniqueClientIds = Object.create(null)
+      body.clientIds.forEach(function (id) {
+        if (typeof id !== 'string' || !id.trim() || id.length > 100 || uniqueClientIds[id]) throw new Error('Некорректный список клиентов')
+        uniqueClientIds[id] = true
+      })
+      if (body.clientId) throw new Error('Передайте только один список клиентов')
+    }
     requireText(body, 'branchId', 100)
     requireText(body, 'date', 40)
     requireText(body, 'time', 40)
@@ -599,6 +625,8 @@ function validateRequest(body) {
     requireText(body, 'date', 40)
   } else if (body.action === 'getClientHistory') {
     requireText(body, 'clientId', 100)
+    if (body.includeAudit !== undefined && typeof body.includeAudit !== 'boolean')
+      throw new Error('Некорректный параметр includeAudit')
   } else if (body.action === 'uploadReceipt') {
     requireText(body, 'clientId', 100)
     if (body.lessonsCount !== undefined)
@@ -635,6 +663,7 @@ function isKnownAction(action) {
       'assignClientLesson',
       'createClient',
       'createLesson',
+      'createLessonWithClients',
       'createBranch',
       'createCoach',
       'updateClient',
@@ -855,7 +884,7 @@ function getOrCreatePaymentsSheet(ss) {
 
 function ensureLessonScheduleColumns(sheet) {
   var headers = getHeaders(sheet)
-  ;['date', 'dayOfWeek', 'time', 'category', 'isRecurring'].forEach(function (header) {
+  ;['date', 'dayOfWeek', 'time', 'category', 'isRecurring', 'clientIds'].forEach(function (header) {
     if (headers.indexOf(header) === -1) {
       sheet.getRange(1, sheet.getLastColumn() + 1).setValue(header)
       headers = getHeaders(sheet)
@@ -934,14 +963,21 @@ function requireLessonLedgerHeaders(headers) {
   return headers
 }
 
-function lessonLedgerRow(headers, entry) {
+function literalSheetText(value) {
+  return String(value === undefined || value === null ? '' : value).trim()
+}
+
+function lessonLedgerRow(headers, entry, literalStrings) {
+  // The Sheets API uses stringValue, so formula escaping would store a real
+  // apostrophe. SpreadsheetApp callers still need safeValue's escaping.
+  var textValue = literalStrings ? literalSheetText : safeValue
   return headers.map(function (header) {
     if (header === 'id') return nextId()
-    if (header === 'requestId') return safeValue(entry.requestId)
-    if (header === 'clientId') return safeValue(entry.clientId)
-    if (header === 'branchId') return safeValue(entry.branchId)
-    if (header === 'paymentId') return safeValue(entry.paymentId || '')
-    if (header === 'type') return safeValue(entry.type)
+    if (header === 'requestId') return textValue(entry.requestId)
+    if (header === 'clientId') return textValue(entry.clientId)
+    if (header === 'branchId') return textValue(entry.branchId)
+    if (header === 'paymentId') return textValue(entry.paymentId || '')
+    if (header === 'type') return textValue(entry.type)
     if (header === 'lessonsDelta') return Number(entry.lessonsDelta || 0)
     if (header === 'totalLessonsDelta') return Number(entry.totalLessonsDelta || 0)
     if (header === 'balanceBefore') return Number(entry.balanceBefore || 0)
@@ -949,10 +985,10 @@ function lessonLedgerRow(headers, entry) {
     if (header === 'totalLessonsBefore') return Number(entry.totalLessonsBefore || 0)
     if (header === 'totalLessonsAfter') return Number(entry.totalLessonsAfter || 0)
     if (header === 'createdAt') return entry.createdAt || new Date().toISOString()
-    if (header === 'recordedBy') return safeValue(entry.recordedBy || '')
-    if (header === 'comment') return safeValue(entry.comment || '')
-    if (header === 'reason') return safeValue(entry.reason || '')
-    if (header === 'requestFingerprint') return safeValue(entry.requestFingerprint || '')
+    if (header === 'recordedBy') return textValue(entry.recordedBy || '')
+    if (header === 'comment') return textValue(entry.comment || '')
+    if (header === 'reason') return textValue(entry.reason || '')
+    if (header === 'requestFingerprint') return textValue(entry.requestFingerprint || '')
     return ''
   })
 }
@@ -1206,6 +1242,7 @@ function requireServerAuth(body) {
   // Read Users once per signed call, including reads and idempotent retries.
   var usersSheet = requireExistingSheet(SpreadsheetApp.getActiveSpreadsheet(), 'Users')
   var usersData = usersSheet.getDataRange().getValues()
+  ACTIVE_USERS_SNAPSHOT = usersData
   if (!usersData.length) throw new Error('Users schema is invalid')
 
   var usersHeaders = requireUsersAccessHeaders(usersData[0]).map(function (header) {
@@ -1264,10 +1301,28 @@ function requireServerAuth(body) {
   return canonicalUser
 }
 
+function coachAccountSummaries(ss) {
+  // Request-local authorization snapshot, never a cached permission decision.
+  var data = ACTIVE_USERS_SNAPSHOT || requireExistingSheet(ss, 'Users').getDataRange().getValues()
+  var headers = requireUsersAccessHeaders(data[0] || [])
+  return data.slice(1).map(function (row) {
+    return {
+      id: String(row[headers.indexOf('id')] || ''),
+      username: String(row[headers.indexOf('username')] || ''),
+      role: normalizeRole(row[headers.indexOf('role')]),
+      branchId: String(row[headers.indexOf('branchId')] || '') || null,
+      status: String(row[headers.indexOf('status')] || ''),
+      disabledAt: String(row[headers.indexOf('disabledAt')] || '') || null,
+      disabledBy: String(row[headers.indexOf('disabledBy')] || '') || null,
+    }
+  }).filter(function (user) { return user.id && user.role === 'coach' })
+}
+
 function isAdminAction(action) {
   return (
     [
       'getUsers',
+      'createLessonWithClients',
       'assignUserBranch',
       'deactivateUser',
       'activateUser',
@@ -1348,13 +1403,16 @@ function invalidateReadCache() {
 function objectsForAuth(sheet, auth, requestedBranchId, cacheVersion) {
   var branchKey = auth.role === 'coach' ? String(auth.branchId || '') : String(requestedBranchId || 'all')
   var cacheKey =
-    'crm:' + String(cacheVersion || readCacheVersion()) + ':' + sheet.getName() + ':' + auth.role + ':' + branchKey
+    'crm-v2:' + String(cacheVersion || readCacheVersion()) + ':' + sheet.getName() + ':' + auth.role + ':' + branchKey
   var cache = CacheService.getScriptCache()
   try {
     var cached = cache.get(cacheKey)
     if (cached) return JSON.parse(cached)
   } catch (error) {}
   var parsed = sheetObjects(sheet)
+  var scheduleTimeZone = sheet.getName() === 'Расписание'
+    ? SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone()
+    : null
   var branchIdx = parsed.headers.indexOf('branchId')
   var branchId = auth.role === 'coach' ? auth.branchId : requestedBranchId || ''
   var idIdx = parsed.headers.indexOf('id')
@@ -1369,7 +1427,17 @@ function objectsForAuth(sheet, auth, requestedBranchId, cacheVersion) {
     .map(function (row) {
       var obj = {}
       parsed.headers.forEach(function (header, index) {
-        if (header) obj[header] = row[index]
+        if (!header) return
+        var value = row[index]
+        // A Sheets calendar date is midnight in the spreadsheet timezone,
+        // not a UTC date. JSON Date serialization otherwise shifts Moscow
+        // Monday to Sunday. Formatting a column as text does not convert
+        // existing Date cells, so normalize them at the API boundary.
+        if (scheduleTimeZone && (header === 'date' || header === 'time') &&
+            Object.prototype.toString.call(value) === '[object Date]') {
+          value = Utilities.formatDate(value, scheduleTimeZone, header === 'date' ? 'yyyy-MM-dd' : 'HH:mm')
+        }
+        obj[header] = value
       })
       return obj
     })
@@ -1713,6 +1781,8 @@ function getLessonRoster(ss, body, auth) {
   var statusIdx = headers.indexOf('status'),
     remainingIdx = headers.indexOf('remainingLessons')
   var historyIdx = headers.indexOf('attendanceHistory')
+  var enrolledIdx = lesson.headers.indexOf('clientIds')
+  var enrolledIds = enrolledIdx === -1 ? [] : String(occurrence.row[enrolledIdx] || '').split(',').filter(Boolean)
   if ([idIdx, branchIdx, nameIdx, categoryIdx, remainingIdx, historyIdx].indexOf(-1) !== -1) {
     throw new Error('Схема клиентов не обновлена. Запустите setupSchema()')
   }
@@ -1720,6 +1790,7 @@ function getLessonRoster(ss, body, auth) {
     .slice(1)
     .filter(function (row) {
       if (String(row[branchIdx] || '') !== occurrence.branchId) return false
+      if (enrolledIds.length && enrolledIds.indexOf(String(row[idIdx])) === -1) return false
       if (lessonCategory && normalizedClientCategory(row[categoryIdx]) !== lessonCategory) return false
       if (statusIdx !== -1 && String(row[statusIdx] || '') === 'Архив') return false
       return true
@@ -1965,7 +2036,7 @@ function writeAttendanceChanges(batch, dirtyRows) {
 function attendanceApiCell(value) {
   var entered = {}
   if (typeof value === 'number') {
-    if (!isFinite(value)) throw new Error('Некорректное число в записи посещения')
+    if (!isFinite(value)) throw new Error('Некорректное число в записи')
     entered.numberValue = value
   } else if (typeof value === 'boolean') entered.boolValue = value
   // stringValue is literal, never interpreted as a spreadsheet formula.
@@ -1973,14 +2044,79 @@ function attendanceApiCell(value) {
   return { userEnteredValue: entered }
 }
 
-function writeAttendanceAtomic(ss, batch, dirtyRows, ledgerSheet, ledgerHeaders, entries) {
-  // Enable only after adding the Advanced Google Sheets service to this GAS
-  // project and testing on a copy. Missing configuration fails BEFORE writes.
+function requireAtomicSheetsService() {
   if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || !Sheets.Spreadsheets.batchUpdate) {
     var unavailable = new Error('Схема атомарной записи не настроена')
     unavailable.apiCode = 'SCHEMA'
     throw unavailable
   }
+}
+
+// Run manually from the Apps Script editor before publishing. Read-only:
+// checks the enabled service, authorization and target spreadsheet access.
+function verifyAtomicAccounting() {
+  requireAtomicSheetsService()
+  var id = SpreadsheetApp.getActiveSpreadsheet().getId()
+  var metadata = Sheets.Spreadsheets.get(id, { fields: 'spreadsheetId' })
+  if (!metadata || String(metadata.spreadsheetId || '') !== String(id))
+    throw new Error('Схема атомарной записи не настроена')
+  return 'Atomic accounting is ready'
+}
+
+function atomicAppendRowsRequest(sheet, rows) {
+  return {
+    appendCells: {
+      sheetId: sheet.getSheetId(),
+      rows: rows.map(function (row) { return { values: row.map(attendanceApiCell) } }),
+      fields: 'userEnteredValue',
+    },
+  }
+}
+
+function atomicChangedRowRequests(sheet, sheetRow, beforeRow, afterRow) {
+  var indices = changedColumnIndexes(beforeRow, afterRow)
+  var requests = []
+  for (var start = 0; start < indices.length;) {
+    var end = start + 1
+    while (end < indices.length && indices[end] === indices[end - 1] + 1) end++
+    var firstColumn = indices[start]
+    var endColumn = indices[end - 1] + 1
+    requests.push({
+      updateCells: {
+        range: {
+          sheetId: sheet.getSheetId(),
+          startRowIndex: sheetRow - 1, endRowIndex: sheetRow,
+          startColumnIndex: firstColumn, endColumnIndex: endColumn,
+        },
+        rows: [{ values: afterRow.slice(firstColumn, endColumn).map(attendanceApiCell) }],
+        fields: 'userEnteredValue',
+      },
+    })
+    start = end
+  }
+  return requests
+}
+
+function commitAtomicSheetRequests(ss, requests, diagnosticStage) {
+  requireAtomicSheetsService()
+  if (!requests.length) return
+  // Never compensate or fall back after an API error: the commit may already
+  // have succeeded. A retry must recognize its durable marker under the lock.
+  try {
+    var spreadsheetId = ss.getId()
+    var acknowledgement = Sheets.Spreadsheets.batchUpdate({ requests: requests }, spreadsheetId)
+    if (!acknowledgement || String(acknowledgement.spreadsheetId || '') !== String(spreadsheetId))
+      throw new Error('Запись не подтверждена')
+  } catch (error) {
+    diagnosticLog(diagnosticStage + '.atomic_commit_unconfirmed', {})
+    var unconfirmed = new Error('Сервис данных временно недоступен')
+    unconfirmed.apiCode = 'SCHEMA'
+    throw unconfirmed
+  }
+}
+
+function writeAttendanceAtomic(ss, batch, dirtyRows, ledgerSheet, ledgerHeaders, entries) {
+  requireAtomicSheetsService()
   var clientSheetId = batch.sheet.getSheetId()
   var requests = attendanceChangedRanges(batch, dirtyRows).map(function (range) {
     return {
@@ -2009,22 +2145,7 @@ function writeAttendanceAtomic(ss, batch, dirtyRows, ledgerSheet, ledgerHeaders,
       },
     })
   }
-  if (!requests.length) return
-  // ONE atomic commit across both sheets. Never fall back or roll back after
-  // an API error: a lost acknowledgement may mean the commit already happened.
-  // A retry under the same lock recognizes the durable ledger request marker.
-  try {
-    var spreadsheetId = ss.getId()
-    var acknowledgement = Sheets.Spreadsheets.batchUpdate({ requests: requests }, spreadsheetId)
-    if (!acknowledgement || String(acknowledgement.spreadsheetId || '') !== String(spreadsheetId)) {
-      throw new Error('Запись не подтверждена')
-    }
-  } catch (error) {
-    diagnosticLog('attendance.atomic_commit_unconfirmed', {})
-    var unconfirmed = new Error('Сервис данных временно недоступен')
-    unconfirmed.apiCode = 'SCHEMA'
-    throw unconfirmed
-  }
+  commitAtomicSheetRequests(ss, requests, 'attendance')
 }
 
 function sheetContext(ss, name) {
@@ -2051,15 +2172,17 @@ function appendObject(context, body) {
   return result
 }
 
-function appendClientObject(context, body) {
+function prepareClientRow(headers, body, clientId, literalStrings) {
   var frequency = Number(body.lessonsPerWeek === undefined ? 1 : body.lessonsPerWeek)
   if ([1, 2, 3].indexOf(frequency) === -1) throw new Error('Некорректная нагрузка')
   var paidAmount = body.paidAmount === undefined || body.paidAmount === '' ? 0 : Number(body.paidAmount)
   if (!isFinite(paidAmount) || paidAmount < 0) throw new Error('Некорректная сумма оплаты')
   var category = body.category || 'плавание'
   var totalLessons = 0
-  var row = context.headers.map(function (header) {
-    if (header === 'id') return nextId()
+  var textValue = literalStrings ? literalSheetText : safeValue
+  return headers.map(function (header) {
+    if (header === 'id') return clientId || nextId()
+    if (header === 'category') return textValue(category)
     if (header === 'lessonsPerWeek') return frequency
     if (header === 'paidAmount') return paidAmount
     if (header === 'totalLessons') return totalLessons
@@ -2071,8 +2194,12 @@ function appendClientObject(context, body) {
     if (header === 'attendanceHistory') return '[]'
     if (header === 'status') return 'Активен'
     var value = Array.isArray(body[header]) && header === 'assignedLessonIds' ? body[header].join(',') : body[header]
-    return safeValue(value === undefined ? '' : value)
+    return textValue(value === undefined ? '' : value)
   })
+}
+
+function appendClientObject(context, body) {
+  var row = prepareClientRow(context.headers, body)
   context.sheet.appendRow(row)
   var result = {}
   context.headers.forEach(function (header, index) {
@@ -2205,6 +2332,7 @@ function assignClientLesson(ss, body, auth, knownLesson) {
 }
 
 function createLessonWithOptionalClient(ss, body, auth) {
+  if (body.clientIds !== undefined) return createLessonWithClients(ss, body, auth)
   var lessonContext = sheetContext(ss, 'Расписание')
   ;['date', 'dayOfWeek', 'time', 'category', 'isRecurring'].forEach(function (header) {
     if (lessonContext.headers.indexOf(header) === -1)
@@ -2245,13 +2373,78 @@ function createLessonWithOptionalClient(ss, body, auth) {
   }
 }
 
-function clientHasRelatedRows(sheet, clientId) {
+function createLessonWithClients(ss, body, auth) {
+  var startedAt = new Date().getTime()
+  var ids = body.clientIds || []
+  if (ids.length && (!auth || auth.role !== 'admin')) throw new Error('Недостаточно прав')
+  var clients = ids.length ? sheetContext(ss, 'Клиенты') : null
+  var planned = []
+  if (clients) {
+    var assignedIdx = clients.headers.indexOf('assignedLessonIds')
+    var legacyIdx = clients.headers.indexOf('assignedLessonId')
+    if (assignedIdx === -1) throw new Error('Схема клиентов не обновлена. Запустите setupSchema()')
+    ids.forEach(function (id) {
+      var index = findRowById(clients.data, clients.idIdx, id)
+      if (index === -1) throw new Error('Клиент не найден')
+      var row = clients.data[index]
+      if (String(row[clients.headers.indexOf('branchId')] || '') !== String(body.branchId)) throw new Error('Клиент и занятие должны принадлежать одному филиалу')
+      if (String(row[clients.headers.indexOf('status')] || '') === 'Архив') throw new Error('Клиент в архиве')
+      var categoryIdx = clients.headers.indexOf('category')
+      if (categoryIdx !== -1 && body.category && normalizedClientCategory(row[categoryIdx]) !== normalizedClientCategory(body.category)) throw new Error('Категория клиента не совпадает с занятием')
+      planned.push({ index: index, before: row.slice(), after: row.slice() })
+    })
+  }
+  var lessons = sheetContext(ss, 'Расписание')
+  if (ids.length && lessons.headers.indexOf('clientIds') === -1) throw new Error('Схема расписания не обновлена. Запустите setupSchema(): clientIds')
+  ;['date', 'dayOfWeek', 'time', 'category', 'isRecurring'].forEach(function (header) {
+    if (lessons.headers.indexOf(header) === -1) throw new Error('Схема расписания не обновлена. Запустите setupSchema(): ' + header)
+  })
+  diagnosticLog('lesson.snapshot_validated', { durationMs: new Date().getTime() - startedAt, clients: ids.length })
+  var lessonRow = lessons.sheet.getLastRow() + 1
+  var created = null
+  var audit = null
+  try {
+    var writeStartedAt = new Date().getTime()
+    created = appendObject(lessons, body)
+    planned.forEach(function (change) {
+      var previous = String(change.before[assignedIdx] || (legacyIdx !== -1 ? change.before[legacyIdx] : '') || '')
+      var assigned = previous.split(',').map(function (id) { return id.trim() }).filter(Boolean)
+      if (assigned.indexOf(String(created.id)) === -1) assigned.push(String(created.id))
+      change.after[assignedIdx] = assigned.join(',')
+      if (legacyIdx !== -1) change.after[legacyIdx] = assigned[0] || ''
+      writeChangedRowCells(clients.sheet, change.index + 1, change.before, change.after)
+    })
+    diagnosticLog('lesson.enrollments_written', { durationMs: new Date().getTime() - writeStartedAt, clients: ids.length })
+    var auditStartedAt = new Date().getTime()
+    if (ids.length) audit = auditAdminMutation(ss, body, auth, 'Расписание', String(created.id), String(body.branchId), ['clientAssignments'])
+    diagnosticLog('lesson.audit_written', { durationMs: new Date().getTime() - auditStartedAt })
+    created.clientsAssigned = ids.length
+    return created
+  } catch (error) {
+    var rollbackFailed = false
+    planned.forEach(function (change) {
+      try { writeChangedRowCells(clients.sheet, change.index + 1, change.after, change.before) } catch (rollbackError) { rollbackFailed = true }
+    })
+    try { if (lessons.sheet.getLastRow() >= lessonRow) lessons.sheet.deleteRow(lessonRow) } catch (rollbackError) { rollbackFailed = true }
+    if (audit) { try { audit.sheet.deleteRow(audit.rowIndex) } catch (rollbackError) { rollbackFailed = true } }
+    if (rollbackFailed) diagnosticLog('lesson.assignment_rollback_failed', {})
+    throw error
+  }
+}
+
+function clientHasRelatedRows(sheet, clientId, ignoreCreationMarkers) {
   if (!sheet) return false
   var parsed = sheetObjects(sheet)
   var clientIdIdx = parsed.headers.indexOf('clientId')
   if (clientIdIdx === -1) return false
   return parsed.rows.some(function (row) {
-    return String(row[clientIdIdx] || '') === String(clientId)
+    if (String(row[clientIdIdx] || '') !== String(clientId)) return false
+    // A zero-credit creation marker is not payment or attendance history.
+    // Retain it on deletion so a late retry cannot resurrect the empty card.
+    if (ignoreCreationMarkers && String(row[parsed.headers.indexOf('type')]) === 'client_creation' &&
+        Number(row[parsed.headers.indexOf('lessonsDelta')]) === 0 &&
+        Number(row[parsed.headers.indexOf('totalLessonsDelta')]) === 0) return false
+    return true
   })
 }
 
@@ -2259,7 +2452,7 @@ function assertClientCanBeDeleted(ss, context, rowIndex) {
   var row = context.data[rowIndex]
   var clientId = String(row[context.idIdx] || '')
   var hasPayments = clientHasRelatedRows(ss.getSheetByName('Платежи'), clientId)
-  var hasLedger = clientHasRelatedRows(ss.getSheetByName('Журнал занятий'), clientId)
+  var hasLedger = clientHasRelatedRows(ss.getSheetByName('Журнал занятий'), clientId, true)
   var hasAttendanceRows = clientHasRelatedRows(ss.getSheetByName('Посещения'), clientId)
   var historyIdx = context.headers.indexOf('attendanceHistory')
   var hasLegacyAttendance = historyIdx !== -1 && parseHistory(row[historyIdx]).length > 0
@@ -2887,24 +3080,26 @@ function prepareLegacyLedgerBaseline(ledger, payments, clientRow, clientHeaders,
 function ledgerRequestRow(ledger, requestId) {
   var requestIdx = ledger.headers.indexOf('requestId')
   for (var i = 0; i < ledger.rows.length; i++) {
-    if (String(ledger.rows[i][requestIdx] || '') === String(requestId)) return { row: ledger.rows[i], index: i }
+    if (String(ledger.rows[i][requestIdx] || '') === literalSheetText(requestId) ||
+        String(ledger.rows[i][requestIdx] || '') === safeValue(requestId))
+      return { row: ledger.rows[i], index: i }
   }
   return null
 }
 
 function recordAdjustment(ss, body, auth) {
   var clientContext = sheetContext(ss, 'Клиенты')
-  requireClientSubscriptionColumns(clientContext.sheet)
+  requireClientSubscriptionHeaders(clientContext.headers)
   var rowIndex = findRowById(clientContext.data, clientContext.idIdx, body.clientId)
   if (rowIndex === -1) throw new Error('Клиент не найден')
   var branchIdx = clientContext.headers.indexOf('branchId')
   var branchId = String(clientContext.data[rowIndex][branchIdx] || '')
   if (!branchMatches(auth, branchId)) throw new Error('Доступ к филиалу запрещен')
   var ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
-  requireLessonLedgerColumns(ledgerSheet)
   var paymentSheet = requireExistingSheet(ss, 'Платежи')
   var ledger = sheetObjects(ledgerSheet),
     payments = sheetObjects(paymentSheet)
+  requireLessonLedgerHeaders(ledger.headers)
   var fingerprint = sha256(
     JSON.stringify({
       actorId: String(auth.id),
@@ -2935,89 +3130,115 @@ function recordAdjustment(ss, body, auth) {
   if (statusIdx !== -1 && String(row[statusIdx] || '') !== 'Архив')
     row[statusIdx] = nextRemaining > 0 ? 'Активен' : 'Пауза'
   var originalRow = clientContext.data[rowIndex].slice()
-  var appendedLedgerRow = -1
-  try {
-    writeChangedRowCells(clientContext.sheet, rowIndex + 1, originalRow, row)
-    appendedLedgerRow = appendLessonLedgerEntry(ledgerSheet, {
-      requestId: body.requestId,
-      clientId: body.clientId,
-      branchId: branchId,
-      type: 'adjustment',
-      lessonsDelta: delta,
-      totalLessonsDelta: delta,
-      balanceBefore: Number(originalRow[remainingIdx] || 0),
-      balanceAfter: nextRemaining,
-      totalLessonsBefore: Number(originalRow[totalIdx] || 0),
-      totalLessonsAfter: nextTotal,
-      recordedBy: auth.username,
-      comment: String(body.comment || ''),
-      reason: String(body.reason),
-      requestFingerprint: fingerprint,
-    }).rowIndex
-  } catch (error) {
-    try {
-      writeChangedRowCells(clientContext.sheet, rowIndex + 1, row, originalRow)
-      if (appendedLedgerRow !== -1 && ledgerSheet.getLastRow() >= appendedLedgerRow)
-        ledgerSheet.deleteRow(appendedLedgerRow)
-    } catch (rollbackError) {}
-    throw error
-  }
+  var plannedLedgerRow = lessonLedgerRow(ledger.headers, {
+    requestId: body.requestId,
+    clientId: body.clientId,
+    branchId: branchId,
+    type: 'adjustment',
+    lessonsDelta: delta,
+    totalLessonsDelta: delta,
+    balanceBefore: Number(originalRow[remainingIdx] || 0),
+    balanceAfter: nextRemaining,
+    totalLessonsBefore: Number(originalRow[totalIdx] || 0),
+    totalLessonsAfter: nextTotal,
+    recordedBy: auth.username,
+    comment: String(body.comment || ''),
+    reason: String(body.reason),
+    requestFingerprint: fingerprint,
+  }, true)
+  var requests = atomicChangedRowRequests(clientContext.sheet, rowIndex + 1, originalRow, row)
+  requests.push(atomicAppendRowsRequest(ledgerSheet, [plannedLedgerRow]))
+  commitAtomicSheetRequests(ss, requests, 'adjustment')
   return { success: true, client: { remainingLessons: nextRemaining, totalLessons: nextTotal, status: row[statusIdx] } }
+}
+
+function clientLedgerDiscrepancy(row, headers, ledger, payments, clientId) {
+  var reconciliation = clientLedgerReconciliation(row, headers, ledger, payments, clientId)
+  if (reconciliation.isConsistent) return null
+  return {
+    clientId: clientId,
+    childName: String(row[headers.indexOf('childName')] || ''),
+    branchId: String(row[headers.indexOf('branchId')] || ''),
+    current: {
+      remainingLessons: reconciliation.currentRemainingLessons,
+      totalLessons: reconciliation.currentTotalLessons,
+    },
+    calculated: {
+      remainingLessons: reconciliation.calculatedRemainingLessons,
+      totalLessons: reconciliation.calculatedTotalLessons,
+    },
+    ledgerIssues: reconciliation.ledgerIssues,
+    paymentIssues: reconciliation.paymentIssues,
+    missingPaymentIds: reconciliation.missingPayments.map(function (payment) { return payment.id }),
+    repairable: reconciliation.ledgerIssues.length === 0 && reconciliation.paymentIssues.length === 0,
+  }
+}
+
+function clientAccountingSnapshot(row, headers) {
+  return {
+    remainingLessons: Number(row[headers.indexOf('remainingLessons')] || 0),
+    totalLessons: Number(row[headers.indexOf('totalLessons')] || 0),
+    paidAmount: Number(row[headers.indexOf('paidAmount')] || 0),
+    paymentBalance: Number(row[headers.indexOf('paymentBalance')] || 0),
+    category: normalizedClientCategory(row[headers.indexOf('category')]),
+    lessonsPerWeek: Number(row[headers.indexOf('lessonsPerWeek')] || 1),
+    status: String(row[headers.indexOf('status')] || ''),
+  }
+}
+
+function accountingRowObject(headers, row) {
+  var object = {}
+  headers.forEach(function (header, index) {
+    if (header) object[header] = row[index]
+  })
+  return object
 }
 
 function auditLessonLedger(ss, body, auth) {
   var clientContext = sheetContext(ss, 'Клиенты')
-  requireClientSubscriptionColumns(clientContext.sheet)
+  requireClientSubscriptionHeaders(clientContext.headers)
   var ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
-  requireLessonLedgerColumns(ledgerSheet)
   var paymentSheet = requireExistingSheet(ss, 'Платежи')
   var ledger = sheetObjects(ledgerSheet),
     payments = sheetObjects(paymentSheet)
-  var branchIdx = clientContext.headers.indexOf('branchId'),
-    nameIdx = clientContext.headers.indexOf('childName')
+  requireLessonLedgerHeaders(ledger.headers)
+  var branchIdx = clientContext.headers.indexOf('branchId')
+  // Partition once instead of rescanning both complete journals per client.
+  var selectedClients = null
+  if (body.clientId) {
+    selectedClients = Object.create(null)
+    selectedClients[String(body.clientId)] = true
+  }
+  var ledgerByClient = accountingRowsByClient(ledger, selectedClients)
+  var paymentsByClient = accountingRowsByClient(payments, selectedClients)
   var discrepancies = []
   clientContext.data.slice(1).forEach(function (row) {
     var clientId = String(row[clientContext.idIdx] || '')
     if (!clientId || (body.clientId && clientId !== String(body.clientId))) return
     if (!branchMatches(auth, row[branchIdx])) return
-    var reconciliation = clientLedgerReconciliation(row, clientContext.headers, ledger, payments, clientId)
-    if (reconciliation.isConsistent) return
-    discrepancies.push({
-      clientId: clientId,
-      childName: String(row[nameIdx] || ''),
-      branchId: String(row[branchIdx] || ''),
-      current: {
-        remainingLessons: reconciliation.currentRemainingLessons,
-        totalLessons: reconciliation.currentTotalLessons,
-      },
-      calculated: {
-        remainingLessons: reconciliation.calculatedRemainingLessons,
-        totalLessons: reconciliation.calculatedTotalLessons,
-      },
-      ledgerIssues: reconciliation.ledgerIssues,
-      paymentIssues: reconciliation.paymentIssues,
-      missingPaymentIds: reconciliation.missingPayments.map(function (payment) {
-        return payment.id
-      }),
-      repairable: reconciliation.ledgerIssues.length === 0 && reconciliation.paymentIssues.length === 0,
-    })
+    var discrepancy = clientLedgerDiscrepancy(
+      row, clientContext.headers,
+      accountingClientRows(ledgerByClient, ledger.headers, clientId),
+      accountingClientRows(paymentsByClient, payments.headers, clientId), clientId,
+    )
+    if (discrepancy) discrepancies.push(discrepancy)
   })
   return { success: true, checked: body.clientId ? 1 : clientContext.data.length - 1, discrepancies: discrepancies }
 }
 
 function repairLessonLedger(ss, body, auth) {
   var clientContext = sheetContext(ss, 'Клиенты')
-  requireClientSubscriptionColumns(clientContext.sheet)
+  requireClientSubscriptionHeaders(clientContext.headers)
   var rowIndex = findRowById(clientContext.data, clientContext.idIdx, body.clientId)
   if (rowIndex === -1) throw new Error('Клиент не найден')
   var branchIdx = clientContext.headers.indexOf('branchId')
   var branchId = String(clientContext.data[rowIndex][branchIdx] || '')
   if (!branchMatches(auth, branchId)) throw new Error('Доступ к филиалу запрещен')
   var ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
-  requireLessonLedgerColumns(ledgerSheet)
   var paymentSheet = requireExistingSheet(ss, 'Платежи')
   var ledger = sheetObjects(ledgerSheet),
     payments = sheetObjects(paymentSheet)
+  requireLessonLedgerHeaders(ledger.headers)
   var fingerprint = sha256(
     JSON.stringify({
       actorId: String(auth.id),
@@ -3047,256 +3268,231 @@ function repairLessonLedger(ss, body, auth) {
   }
   var runningBalance = reconciliation.calculatedRemainingLessons
   var runningTotal = reconciliation.calculatedTotalLessons
-  var appendedLedgerRows = []
+  var plannedLedgerRows = []
+  reconciliation.missingPayments.forEach(function (payment) {
+    runningBalance += payment.lessonsAdded
+    runningTotal += payment.lessonsAdded
+    plannedLedgerRows.push(lessonLedgerRow(ledger.headers, {
+      requestId: String(body.requestId) + ':payment:' + payment.id,
+      clientId: body.clientId, branchId: branchId, paymentId: payment.id,
+      type: 'purchase_repair', lessonsDelta: payment.lessonsAdded, totalLessonsDelta: payment.lessonsAdded,
+      balanceBefore: runningBalance - payment.lessonsAdded, balanceAfter: runningBalance,
+      totalLessonsBefore: runningTotal - payment.lessonsAdded, totalLessonsAfter: runningTotal,
+      recordedBy: auth.username, comment: 'Восстановлена связь с подтверждённым платежом',
+      reason: String(body.reason), requestFingerprint: fingerprint,
+    }, true))
+  })
+  // Always append the confirmation marker, even if restored payments made
+  // the figures equal. Every repair entry and the status change commit together.
+  plannedLedgerRows.push(lessonLedgerRow(ledger.headers, {
+    requestId: body.requestId, clientId: body.clientId, branchId: branchId, type: 'audit_repair',
+    lessonsDelta: reconciliation.currentRemainingLessons - runningBalance,
+    totalLessonsDelta: reconciliation.currentTotalLessons - runningTotal,
+    balanceBefore: runningBalance, balanceAfter: reconciliation.currentRemainingLessons,
+    totalLessonsBefore: runningTotal, totalLessonsAfter: reconciliation.currentTotalLessons,
+    recordedBy: auth.username, comment: 'Подтверждённое исправление по аудиту',
+    reason: String(body.reason), requestFingerprint: fingerprint,
+  }, true))
   var statusIdx = clientContext.headers.indexOf('status')
-  var originalStatus = statusIdx === -1 ? undefined : row[statusIdx]
-  try {
-    reconciliation.missingPayments.forEach(function (payment) {
-      runningBalance += payment.lessonsAdded
-      runningTotal += payment.lessonsAdded
-      appendedLedgerRows.push(
-        appendLessonLedgerEntry(ledgerSheet, {
-          requestId: String(body.requestId) + ':payment:' + payment.id,
-          clientId: body.clientId,
-          branchId: branchId,
-          paymentId: payment.id,
-          type: 'purchase_repair',
-          lessonsDelta: payment.lessonsAdded,
-          totalLessonsDelta: payment.lessonsAdded,
-          balanceBefore: runningBalance - payment.lessonsAdded,
-          balanceAfter: runningBalance,
-          totalLessonsBefore: runningTotal - payment.lessonsAdded,
-          totalLessonsAfter: runningTotal,
-          recordedBy: auth.username,
-          comment: 'Восстановлена связь с подтверждённым платежом',
-          reason: String(body.reason),
-          requestFingerprint: fingerprint,
-        }).rowIndex,
-      )
-    })
-    var balanceDelta = reconciliation.currentRemainingLessons - runningBalance
-    var totalDelta = reconciliation.currentTotalLessons - runningTotal
-    // Always append a confirmation marker with the requestId, even if restoring
-    // missing payment links already made the figures equal.
-    appendedLedgerRows.push(
-      appendLessonLedgerEntry(ledgerSheet, {
-        requestId: body.requestId,
-        clientId: body.clientId,
-        branchId: branchId,
-        type: 'audit_repair',
-        lessonsDelta: balanceDelta,
-        totalLessonsDelta: totalDelta,
-        balanceBefore: runningBalance,
-        balanceAfter: reconciliation.currentRemainingLessons,
-        totalLessonsBefore: runningTotal,
-        totalLessonsAfter: reconciliation.currentTotalLessons,
-        recordedBy: auth.username,
-        comment: 'Подтверждённое исправление по аудиту',
-        reason: String(body.reason),
-        requestFingerprint: fingerprint,
-      }).rowIndex,
-    )
-    if (statusIdx !== -1 && String(row[statusIdx] || '') !== 'Архив') {
-      row[statusIdx] = reconciliation.currentRemainingLessons > 0 ? 'Активен' : 'Пауза'
-      clientContext.sheet.getRange(rowIndex + 1, statusIdx + 1).setValue(row[statusIdx])
-    }
-  } catch (error) {
-    try {
-      if (statusIdx !== -1 && originalStatus !== undefined)
-        clientContext.sheet.getRange(rowIndex + 1, statusIdx + 1).setValue(originalStatus)
-      appendedLedgerRows
-        .sort(function (left, right) {
-          return right - left
-        })
-        .forEach(function (rowIndex) {
-          if (ledgerSheet.getLastRow() >= rowIndex) ledgerSheet.deleteRow(rowIndex)
-        })
-    } catch (rollbackError) {}
-    throw error
-  }
+  if (statusIdx !== -1 && String(row[statusIdx] || '') !== 'Архив')
+    row[statusIdx] = reconciliation.currentRemainingLessons > 0 ? 'Активен' : 'Пауза'
+  var requests = atomicChangedRowRequests(
+    clientContext.sheet, rowIndex + 1, clientContext.data[rowIndex], row,
+  )
+  requests.push(atomicAppendRowsRequest(ledgerSheet, plannedLedgerRows))
+  commitAtomicSheetRequests(ss, requests, 'ledger_repair')
   return { success: true, repaired: true }
 }
 
-function recordPayment(ss, body, auth) {
-  var clientContext
-  var clientRowIndex = -1
-  var previousRow
-  var paymentSheet
-  var ledgerSheet
-  var paymentRowIndex = -1
-  var ledgerRowIndex = -1
-  try {
-    var clientSheet = ss.getSheetByName('Клиенты')
-    if (!clientSheet) throw new Error('Лист клиентов не найден')
-    requireClientSubscriptionColumns(clientSheet)
-    clientContext = sheetContext(ss, 'Клиенты')
-    clientRowIndex = findRowById(clientContext.data, clientContext.idIdx, body.clientId)
-    if (clientRowIndex === -1) throw new Error('Клиент не найден')
-    var branchIdx = clientContext.headers.indexOf('branchId')
-    var clientBranch = branchIdx === -1 ? '' : clientContext.data[clientRowIndex][branchIdx]
-    if (!branchMatches(auth, clientBranch)) throw new Error('Доступ к филиалу запрещен')
+function requirePaymentHeaders(headers) {
+  ;['id', 'requestId', 'clientId', 'branchId', 'amount', 'category', 'lessonsPerWeek',
+    'packagePrice', 'packageLessons', 'packagesCount', 'lessonsAdded', 'paidAt',
+    'recordedBy', 'comment', 'requestFingerprint'].forEach(function (header) {
+    if (headers.indexOf(header) === -1)
+      throw new Error('Схема платежей не обновлена. Запустите setupSchema(): ' + header)
+  })
+}
 
-    var row = clientContext.data[clientRowIndex].slice()
-    previousRow = row.slice()
-    var categoryIdx = clientContext.headers.indexOf('category')
-    var frequencyIdx = clientContext.headers.indexOf('lessonsPerWeek')
-    var amountIdx = clientContext.headers.indexOf('paidAmount')
-    var totalIdx = clientContext.headers.indexOf('totalLessons')
-    var remainingIdx = clientContext.headers.indexOf('remainingLessons')
-    var paidIdx = clientContext.headers.indexOf('paid')
-    var balanceIdx = clientContext.headers.indexOf('paymentBalance')
-    var statusIdx = clientContext.headers.indexOf('status')
-    var category = body.category || String(row[categoryIdx] || 'плавание')
-    var frequency = body.lessonsPerWeek === undefined ? Number(row[frequencyIdx] || 1) : Number(body.lessonsPerWeek)
-    var amount = Number(body.amount)
-    var calculation = paymentCalculation(category, frequency, amount, row[balanceIdx] || 0)
+function requirePaymentClientHeaders(headers) {
+  requireClientSubscriptionHeaders(headers)
+  ;['id', 'branchId', 'category', 'lessonsPerWeek', 'paidAmount'].forEach(function (header) {
+    if (headers.indexOf(header) === -1)
+      throw new Error('Схема клиентов не обновлена. Запустите setupSchema(): ' + header)
+  })
+}
 
-    paymentSheet = requireExistingSheet(ss, 'Платежи')
-    ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
-    requireLessonLedgerColumns(ledgerSheet)
-    var paymentHeaders = getHeaders(paymentSheet)
-    var fingerprintIdx = paymentHeaders.indexOf('requestFingerprint')
-    if (fingerprintIdx === -1) throw new Error('Схема платежей не обновлена. Запустите setupSchema()')
-    var paymentFingerprint = sha256(
-      JSON.stringify({
-        actorId: String(auth.id),
-        clientId: String(body.clientId),
-        amount: amount,
-        category: category,
-        lessonsPerWeek: frequency,
-        comment: String(body.comment || ''),
-      }),
-    )
-    var paymentRows = paymentSheet.getDataRange().getValues()
-    var paymentRequestIdx = paymentHeaders.indexOf('requestId')
-    var paymentLedger = sheetObjects(ledgerSheet)
-    assertClientLedgerReconciled(row, clientContext.headers, paymentLedger, sheetObjects(paymentSheet), body.clientId)
-    var existingPaymentIndex = paymentRows.findIndex(function (paymentRow, index) {
-      return index > 0 && String(paymentRow[paymentRequestIdx]) === safeValue(body.requestId)
-    })
-    if (existingPaymentIndex !== -1) {
-      var existingPayment = paymentRows[existingPaymentIndex]
-      if (String(existingPayment[fingerprintIdx]) !== paymentFingerprint)
-        throw new Error('Этот requestId уже использован с другими данными')
-      var existingId = String(existingPayment[paymentHeaders.indexOf('id')])
-      var ledgerParsed = sheetObjects(ledgerSheet)
-      var ledgerPaymentIdx = ledgerParsed.headers.indexOf('paymentId')
-      if (
-        !ledgerParsed.rows.some(function (ledgerRow) {
-          return String(ledgerRow[ledgerPaymentIdx]) === existingId
-        })
-      ) {
-        throw new Error('Платёж требует сверки с журналом занятий')
-      }
-      return {
-        success: true,
-        duplicate: true,
-        payment: {
-          id: existingId,
-          clientId: String(body.clientId),
-          amount: amount,
-          category: category,
-          lessonsPerWeek: frequency,
-          lessonsAdded: Number(existingPayment[paymentHeaders.indexOf('lessonsAdded')] || 0),
-          paidAt: existingPayment[paymentHeaders.indexOf('paidAt')],
-        },
-        client: {
-          totalLessons: Number(row[totalIdx] || 0),
-          remainingLessons: Number(row[remainingIdx] || 0),
-          paidAmount: Number(row[amountIdx] || 0),
-          paymentBalance: Number(row[balanceIdx] || 0),
-          category: category,
-          lessonsPerWeek: frequency,
-          status: String(row[statusIdx] || ''),
-        },
-      }
-    }
-    if (calculation.packages <= 0) throw new Error('Суммы недостаточно для полного абонемента')
-    var paymentId = nextId()
-    var now = new Date().toISOString()
-    if (categoryIdx !== -1) row[categoryIdx] = category
-    if (frequencyIdx !== -1) row[frequencyIdx] = frequency
-    if (amountIdx !== -1) row[amountIdx] = Number(row[amountIdx] || 0) + amount
-    if (totalIdx !== -1) row[totalIdx] = Number(row[totalIdx] || 0) + calculation.lessonsAdded
-    if (remainingIdx !== -1) row[remainingIdx] = Number(row[remainingIdx] || 0) + calculation.lessonsAdded
-    if (paidIdx !== -1) row[paidIdx] = true
-    if (balanceIdx !== -1) row[balanceIdx] = calculation.balance
-    // An archived card is historical data. A late payment may be recorded,
-    // but it must never reactivate the client and undo a concurrent archive.
-    if (statusIdx !== -1 && String(row[statusIdx] || '') !== 'Архив') row[statusIdx] = 'Активен'
+function paymentRequestFingerprint(body, auth, category, frequency) {
+  return sha256(JSON.stringify({
+    actorId: String(auth.id), clientId: String(body.clientId),
+    amount: Number(body.amount), category: category, lessonsPerWeek: frequency,
+    comment: String(body.comment || ''),
+  }))
+}
 
-    paymentRowIndex = paymentSheet.getLastRow() + 1
-    ledgerRowIndex = ledgerSheet.getLastRow() + 1
-    writeChangedRowCells(clientContext.sheet, clientRowIndex + 1, previousRow, row)
-    paymentSheet.appendRow([
-      paymentId,
-      safeValue(body.requestId),
-      safeValue(body.clientId),
-      safeValue(clientBranch),
-      amount,
-      safeValue(category),
-      frequency,
-      calculation.price,
-      calculation.packageLessons,
-      calculation.packages,
-      calculation.lessonsAdded,
-      now,
-      safeValue(auth.username),
-      safeValue(body.comment || ''),
-      paymentFingerprint,
-    ])
-    appendLessonLedgerEntry(ledgerSheet, {
-      requestId: body.requestId,
-      clientId: body.clientId,
-      branchId: clientBranch,
-      paymentId: paymentId,
-      type: 'purchase',
-      lessonsDelta: calculation.lessonsAdded,
-      totalLessonsDelta: calculation.lessonsAdded,
-      balanceBefore: previousRow[remainingIdx],
-      balanceAfter: row[remainingIdx],
-      totalLessonsBefore: previousRow[totalIdx],
-      totalLessonsAfter: row[totalIdx],
-      createdAt: now,
-      recordedBy: auth.username,
-      comment: String(body.comment || ''),
-      reason: 'Подтверждённый платёж',
-      requestFingerprint: paymentFingerprint,
-    })
-    return {
-      success: true,
-      payment: {
-        id: paymentId,
-        clientId: String(body.clientId),
-        amount: amount,
-        category: category,
-        lessonsPerWeek: frequency,
-        packagePrice: calculation.price,
-        packageLessons: calculation.packageLessons,
-        packagesCount: calculation.packages,
-        lessonsAdded: calculation.lessonsAdded,
-        paidAt: now,
-        comment: String(body.comment || ''),
-      },
-      client: {
-        totalLessons: Number(row[totalIdx] || 0),
-        remainingLessons: Number(row[remainingIdx] || 0),
-        paidAmount: Number(row[amountIdx] || 0),
-        paymentBalance: calculation.balance,
-        category: category,
-        lessonsPerWeek: frequency,
-        status: String(row[statusIdx] || ''),
-      },
-    }
-  } catch (error) {
-    try {
-      if (clientContext && clientRowIndex !== -1 && previousRow)
-        writeChangedRowCells(clientContext.sheet, clientRowIndex + 1, row, previousRow)
-      if (paymentSheet && paymentRowIndex >= paymentSheet.getLastRow()) paymentSheet.deleteRow(paymentRowIndex)
-      if (ledgerSheet && ledgerRowIndex >= ledgerSheet.getLastRow()) ledgerSheet.deleteRow(ledgerRowIndex)
-    } catch (rollbackError) {}
-    throw error
+// Pure preparation: validate everything before submitting ONE cross-sheet batch.
+function preparePaymentMutation(headers, beforeRow, body, auth, paymentHeaders, ledgerHeaders) {
+  requirePaymentClientHeaders(headers)
+  requirePaymentHeaders(paymentHeaders)
+  requireLessonLedgerHeaders(ledgerHeaders)
+  var row = beforeRow.slice()
+  var category = body.category || normalizedClientCategory(row[headers.indexOf('category')])
+  var frequency = body.lessonsPerWeek === undefined
+    ? Number(row[headers.indexOf('lessonsPerWeek')] || 1) : Number(body.lessonsPerWeek)
+  var amount = Number(body.amount)
+  if (!isFinite(amount) || amount <= 0) throw new Error('Некорректная сумма оплаты')
+  var calculation = paymentCalculation(category, frequency, amount, row[headers.indexOf('paymentBalance')] || 0)
+  if (calculation.packages <= 0) throw new Error('Суммы недостаточно для полного абонемента')
+  var paymentId = nextId()
+  var now = new Date().toISOString()
+  var fingerprint = paymentRequestFingerprint(body, auth, category, frequency)
+  var remainingIdx = headers.indexOf('remainingLessons')
+  var totalIdx = headers.indexOf('totalLessons')
+  row[headers.indexOf('category')] = category
+  row[headers.indexOf('lessonsPerWeek')] = frequency
+  row[headers.indexOf('paidAmount')] = Number(row[headers.indexOf('paidAmount')] || 0) + amount
+  row[totalIdx] = Number(row[totalIdx] || 0) + calculation.lessonsAdded
+  row[remainingIdx] = Number(row[remainingIdx] || 0) + calculation.lessonsAdded
+  row[headers.indexOf('paid')] = true
+  row[headers.indexOf('paymentBalance')] = calculation.balance
+  var statusIdx = headers.indexOf('status')
+  if (statusIdx !== -1 && String(row[statusIdx] || '') !== 'Архив') row[statusIdx] = 'Активен'
+  var branchId = row[headers.indexOf('branchId')]
+  var payment = {
+    id: paymentId, requestId: literalSheetText(body.requestId), clientId: literalSheetText(body.clientId),
+    branchId: literalSheetText(branchId), amount: amount, category: category,
+    lessonsPerWeek: frequency, packagePrice: calculation.price, packageLessons: calculation.packageLessons,
+    packagesCount: calculation.packages, lessonsAdded: calculation.lessonsAdded, paidAt: now,
+    recordedBy: literalSheetText(auth.username), comment: literalSheetText(body.comment),
+    requestFingerprint: fingerprint,
   }
+  var paymentRow = paymentHeaders.map(function (header) {
+    return payment[header] === undefined ? '' : payment[header]
+  })
+  var ledgerRow = lessonLedgerRow(ledgerHeaders, {
+    requestId: body.requestId, clientId: body.clientId, branchId: branchId, paymentId: paymentId,
+    type: 'purchase', lessonsDelta: calculation.lessonsAdded, totalLessonsDelta: calculation.lessonsAdded,
+    balanceBefore: beforeRow[remainingIdx], balanceAfter: row[remainingIdx],
+    totalLessonsBefore: beforeRow[totalIdx], totalLessonsAfter: row[totalIdx],
+    createdAt: now, recordedBy: auth.username, comment: String(body.comment || ''),
+    reason: 'Подтверждённый платёж', requestFingerprint: fingerprint,
+  }, true)
+  return { clientRow: row, paymentRow: paymentRow, ledgerRow: ledgerRow }
+}
+
+function recordPayment(ss, body, auth) {
+  var snapshotStartedAt = new Date().getTime()
+  var clients = sheetContext(ss, 'Клиенты')
+  requirePaymentClientHeaders(clients.headers)
+  var clientIndex = findRowById(clients.data, clients.idIdx, body.clientId)
+  if (clientIndex === -1) throw new Error('Клиент не найден')
+  var beforeRow = clients.data[clientIndex]
+  if (!branchMatches(auth, beforeRow[clients.headers.indexOf('branchId')]))
+    throw new Error('Доступ к филиалу запрещен')
+  var paymentSheet = requireExistingSheet(ss, 'Платежи')
+  var ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
+  var payments = sheetObjects(paymentSheet)
+  var ledger = sheetObjects(ledgerSheet)
+  requirePaymentHeaders(payments.headers)
+  requireLessonLedgerHeaders(ledger.headers)
+  diagnosticLog('payment.snapshot_loaded', { durationMs: new Date().getTime() - snapshotStartedAt })
+  assertClientLedgerReconciled(beforeRow, clients.headers, ledger, payments, body.clientId)
+  var requestIdx = payments.headers.indexOf('requestId')
+  var existing = payments.rows.filter(function (row) {
+    // Accept pre-atomic SpreadsheetApp markers as well as literal API values.
+    return String(row[requestIdx]) === literalSheetText(body.requestId) ||
+      String(row[requestIdx]) === safeValue(body.requestId)
+  })[0]
+  if (existing) {
+    var category = body.category || normalizedClientCategory(beforeRow[clients.headers.indexOf('category')])
+    var frequency = body.lessonsPerWeek === undefined
+      ? Number(beforeRow[clients.headers.indexOf('lessonsPerWeek')] || 1) : Number(body.lessonsPerWeek)
+    if (String(existing[payments.headers.indexOf('requestFingerprint')]) !==
+        paymentRequestFingerprint(body, auth, category, frequency))
+      throw new Error('Этот requestId уже использован с другими данными')
+    var paymentId = String(existing[payments.headers.indexOf('id')])
+    var existingLedger = ledger.rows.filter(function (row) {
+      return String(row[ledger.headers.indexOf('paymentId')]) === paymentId
+    })[0]
+    if (!existingLedger) throw new Error('Платёж требует сверки с журналом занятий')
+    return {
+      success: true, duplicate: true,
+      payment: accountingRowObject(payments.headers, existing),
+      ledgerEntry: accountingRowObject(ledger.headers, existingLedger),
+      client: clientAccountingSnapshot(beforeRow, clients.headers),
+      audit: { success: true, checked: 1, discrepancies: [] },
+    }
+  }
+  var planned = preparePaymentMutation(clients.headers, beforeRow, body, auth, payments.headers, ledger.headers)
+  var requests = atomicChangedRowRequests(clients.sheet, clientIndex + 1, beforeRow, planned.clientRow)
+  requests.push(atomicAppendRowsRequest(paymentSheet, [planned.paymentRow]))
+  requests.push(atomicAppendRowsRequest(ledgerSheet, [planned.ledgerRow]))
+  commitAtomicSheetRequests(ss, requests, 'payment')
+  return {
+    success: true,
+    payment: accountingRowObject(payments.headers, planned.paymentRow),
+    ledgerEntry: accountingRowObject(ledger.headers, planned.ledgerRow),
+    client: clientAccountingSnapshot(planned.clientRow, clients.headers),
+    audit: { success: true, checked: 1, discrepancies: [] },
+  }
+}
+
+function createClientAtomic(ss, body, auth) {
+  var clients = sheetContext(ss, 'Клиенты')
+  requirePaymentClientHeaders(clients.headers)
+  var paymentSheet = requireExistingSheet(ss, 'Платежи')
+  var ledgerSheet = requireExistingSheet(ss, 'Журнал занятий')
+  var payments = sheetObjects(paymentSheet)
+  var ledger = sheetObjects(ledgerSheet)
+  requirePaymentHeaders(payments.headers)
+  requireLessonLedgerHeaders(ledger.headers)
+  var creationKey = sha256(String(auth.id) + ':' + String(body.requestId))
+  var markerId = 'client-create:' + creationKey
+  var clientId = 'client-' + creationKey
+  var fingerprintPayload = {}
+  Object.keys(body).sort().forEach(function (key) {
+    if (key !== 'auth' && key !== 'action') fingerprintPayload[key] = body[key]
+  })
+  var fingerprint = sha256(JSON.stringify(fingerprintPayload))
+  var existing = ledgerRequestRow(ledger, markerId)
+  if (existing) {
+    if (String(existing.row[ledger.headers.indexOf('type')]) !== 'client_creation' ||
+        String(existing.row[ledger.headers.indexOf('requestFingerprint')]) !== fingerprint)
+      throw new Error('Этот requestId уже использован с другими данными')
+    var existingIndex = findRowById(clients.data, clients.idIdx, clientId)
+    if (existingIndex === -1) throw new Error('Карточка требует сверки с журналом')
+    var existingRow = clients.data[existingIndex]
+    if (!branchMatches(auth, existingRow[clients.headers.indexOf('branchId')]))
+      throw new Error('Доступ к филиалу запрещен')
+    assertClientLedgerReconciled(existingRow, clients.headers, ledger, payments, clientId)
+    return accountingRowObject(clients.headers, existingRow)
+  }
+  if (findRowById(clients.data, clients.idIdx, clientId) !== -1)
+    throw new Error('Карточка требует сверки с журналом')
+  var initialBody = {}
+  Object.keys(body).forEach(function (key) { initialBody[key] = body[key] })
+  initialBody.paidAmount = 0
+  var openingRow = prepareClientRow(clients.headers, initialBody, clientId, true)
+  var paymentBody = {
+    clientId: clientId, amount: Number(body.paidAmount), category: body.category,
+    lessonsPerWeek: body.lessonsPerWeek, comment: body.comment,
+    requestId: String(body.requestId) + ':initial-payment',
+  }
+  var planned = Number(body.paidAmount || 0) > 0
+    ? preparePaymentMutation(clients.headers, openingRow, paymentBody, auth, payments.headers, ledger.headers)
+    : { clientRow: openingRow }
+  var marker = lessonLedgerRow(ledger.headers, {
+    requestId: markerId, clientId: clientId, branchId: body.branchId, type: 'client_creation',
+    lessonsDelta: 0, totalLessonsDelta: 0, balanceBefore: 0, balanceAfter: 0,
+    totalLessonsBefore: 0, totalLessonsAfter: 0, recordedBy: auth.username,
+    reason: 'Создание карточки клиента', requestFingerprint: fingerprint,
+  }, true)
+  // No client append precedes the commit, and no outer catch may delete it
+  // after an unconfirmed acknowledgement. The creation marker survives TTL.
+  var requests = [atomicAppendRowsRequest(clients.sheet, [planned.clientRow])]
+  if (planned.paymentRow) requests.push(atomicAppendRowsRequest(paymentSheet, [planned.paymentRow]))
+  requests.push(atomicAppendRowsRequest(ledgerSheet, planned.ledgerRow ? [marker, planned.ledgerRow] : [marker]))
+  commitAtomicSheetRequests(ss, requests, 'client_creation')
+  return accountingRowObject(clients.headers, planned.clientRow)
 }
 
 function getClientHistory(ss, body, auth) {
@@ -3308,22 +3504,35 @@ function getClientHistory(ss, body, auth) {
     throw new Error('Доступ к филиалу запрещен')
   var payments = sheetObjects(requireExistingSheet(ss, 'Платежи'))
   var ledger = sheetObjects(requireExistingSheet(ss, 'Журнал занятий'))
+  var clientId = String(body.clientId)
+  var selectedClients = Object.create(null)
+  selectedClients[clientId] = true
+  // Filter once for both history serialization and audit; preserve physical
+  // row numbers for diagnostics, with no persisted accounting cache.
+  payments = accountingClientRows(accountingRowsByClient(payments, selectedClients), payments.headers, clientId)
+  ledger = accountingClientRows(accountingRowsByClient(ledger, selectedClients), ledger.headers, clientId)
   function toObjects(parsed) {
-    var idIdx = parsed.headers.indexOf('clientId')
     return parsed.rows
-      .filter(function (row) {
-        return String(row[idIdx] || '') === String(body.clientId)
-      })
-      .map(function (row) {
-        var object = {}
-        parsed.headers.forEach(function (header, index) {
-          if (header) object[header] = row[index]
-        })
-        return object
-      })
+      .map(function (row) { return accountingRowObject(parsed.headers, row) })
       .reverse()
   }
-  return { success: true, payments: toObjects(payments), ledger: toObjects(ledger) }
+  var result = { success: true, payments: toObjects(payments), ledger: toObjects(ledger) }
+  if (body.includeAudit === true) {
+    // History and audit use exactly the same request-local reads. An audit
+    // failure must not conceal confirmed payments or pretend they are absent.
+    result.audit = null
+    try {
+      requireClientSubscriptionHeaders(context.headers)
+      requireLessonLedgerHeaders(ledger.headers)
+      var discrepancy = clientLedgerDiscrepancy(context.data[rowIndex], context.headers, ledger, payments, clientId)
+      result.audit = { success: true, checked: 1, discrepancies: discrepancy ? [discrepancy] : [] }
+      result.client = clientAccountingSnapshot(context.data[rowIndex], context.headers)
+    } catch (auditError) {
+      result.auditError = apiErrorPayload(auditError)
+      diagnosticLog('accounting.audit_failed', { code: result.auditError.code })
+    }
+  }
+  return result
 }
 
 function getReceipt(ss, body, auth) {
@@ -3351,6 +3560,10 @@ function getReceipt(ss, body, auth) {
 // 2. ОСНОВНОЙ ОБРАБОТЧИК (doPost)
 // ==========================================
 function doPost(e) {
+  ACTIVE_DIAGNOSTICS = false
+  ACTIVE_TIMINGS = []
+  ACTIVE_REQUEST_STARTED_AT = new Date().getTime()
+  ACTIVE_USERS_SNAPSHOT = null
   ACTIVE_IDEMPOTENCY_KEY = ''
   ACTIVE_IDEMPOTENCY_FINGERPRINT = ''
   ACTIVE_MUTATION_LOCK = false
@@ -3373,6 +3586,7 @@ function doPost(e) {
       return createResponse(apiErrorPayload('SCHEMA'))
     }
     body = verifySignedEnvelope(body, scriptSecret)
+    ACTIVE_DIAGNOSTICS = body.diagnostics === true
     diagnosticLog('signature.accepted', { action: String(body.action || '') })
     var schemaVersion = PropertiesService.getScriptProperties().getProperty('SCHEMA_VERSION')
     if (schemaVersion !== SCHEMA_VERSION) {
@@ -3441,9 +3655,9 @@ function doPost(e) {
     }
 
     if (cachedMutationResponse) {
-      // Attendance retries must return CURRENT balances, not a five-minute-old
-      // snapshot. Durable request markers below prevent a second deduction.
-      if (body.action !== 'recordAttendance' && body.action !== 'recordBulkAttendance') {
+      // Accounting retries must return CURRENT balances, not a five-minute-old
+      // snapshot. Durable request markers below prevent a second credit/charge.
+      if (['recordAttendance', 'recordBulkAttendance', 'recordPayment'].indexOf(body.action) === -1) {
         ACTIVE_MUTATION_LOCK = false
         return createResponse(cachedMutationResponse)
       }
@@ -3492,26 +3706,7 @@ function doPost(e) {
     }
 
     if (body.action === 'getUsers') {
-      var usersSheet = requireExistingSheet(ss, 'Users')
-      var usersData = usersSheet.getDataRange().getValues()
-      var usersHeaders = requireUsersAccessColumns(usersSheet)
-      var usersResult = usersData
-        .slice(1)
-        .map(function (row) {
-          return {
-            id: String(row[usersHeaders.indexOf('id')] || ''),
-            username: String(row[usersHeaders.indexOf('username')] || ''),
-            role: normalizeRole(row[usersHeaders.indexOf('role')]),
-            branchId: String(row[usersHeaders.indexOf('branchId')] || '') || null,
-            status: String(row[usersHeaders.indexOf('status')] || ''),
-            disabledAt: String(row[usersHeaders.indexOf('disabledAt')] || '') || null,
-            disabledBy: String(row[usersHeaders.indexOf('disabledBy')] || '') || null,
-          }
-        })
-        .filter(function (user) {
-          return user.id && user.role === 'coach'
-        })
-      return createResponse(usersResult)
+      return createResponse(coachAccountSummaries(ss))
     }
 
     if (body.action === 'assignUserBranch') {
@@ -3568,6 +3763,7 @@ function doPost(e) {
     if (body.action === 'getBootstrapData') {
       var bootstrapCacheVersion = readCacheVersion()
       return createResponse({
+        coachAccounts: auth.role === 'admin' && body.includeCoaches !== false ? coachAccountSummaries(ss) : undefined,
         branches: objectsForAuth(requireExistingSheet(ss, 'Филиалы'), auth, '', bootstrapCacheVersion),
         coaches: body.includeCoaches === false ? [] : objectsForAuth(
           requireExistingSheet(ss, 'Тренеры'),
@@ -3616,7 +3812,7 @@ function doPost(e) {
       createLesson: 'Расписание',
     }
 
-    if (['createClient', 'createLesson', 'createCoach'].indexOf(body.action) !== -1) {
+    if (['createClient', 'createLesson', 'createLessonWithClients', 'createCoach'].indexOf(body.action) !== -1) {
       assertScopedBranch(body, auth, ss)
     }
 
@@ -3899,38 +4095,10 @@ function doPost(e) {
     }
 
     if (body.action === 'createClient') {
-      var initialClientBody = {}
-      Object.keys(body).forEach(function (key) {
-        initialClientBody[key] = body[key]
-      })
-      initialClientBody.paidAmount = 0
-      var clientContext = sheetContext(ss, 'Клиенты')
-      var createdClient = appendClientObject(clientContext, initialClientBody)
-      try {
-        if (Number(body.paidAmount || 0) > 0) {
-          var initialPaymentBody = {}
-          Object.keys(body).forEach(function (key) {
-            initialPaymentBody[key] = body[key]
-          })
-          initialPaymentBody.clientId = String(createdClient.id)
-          initialPaymentBody.amount = Number(body.paidAmount)
-          initialPaymentBody.requestId = String(body.requestId) + ':initial-payment'
-          var initialPayment = recordPayment(ss, initialPaymentBody, auth)
-          createdClient.totalLessons = initialPayment.client.totalLessons
-          createdClient.remainingLessons = initialPayment.client.remainingLessons
-          createdClient.paidAmount = initialPayment.client.paidAmount
-          createdClient.paymentBalance = initialPayment.client.paymentBalance
-        }
-        return createResponse(createdClient)
-      } catch (creationError) {
-        var createdData = clientContext.sheet.getDataRange().getValues()
-        var createdRowIndex = findRowById(createdData, clientContext.idIdx, createdClient.id)
-        if (createdRowIndex !== -1) clientContext.sheet.deleteRow(createdRowIndex + 1)
-        throw creationError
-      }
+      return createResponse(createClientAtomic(ss, body, auth))
     }
 
-    if (body.action === 'createLesson') {
+    if (body.action === 'createLesson' || body.action === 'createLessonWithClients') {
       return createResponse(createLessonWithOptionalClient(ss, body, auth))
     }
 

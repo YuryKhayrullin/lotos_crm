@@ -14,6 +14,7 @@ const MUTATING_ACTIONS = new Set([
   'linkCoachUser',
   'createClient',
   'createLesson',
+  'createLessonWithClients',
   'createBranch',
   'createCoach',
   'updateClient',
@@ -201,6 +202,7 @@ export type ClientOption = {
 }
 
 export type BootstrapData = {
+  coachAccounts?: CoachAccount[]
   branches: IBranch[]
   coaches: ICoach[]
   lessons: ReturnType<typeof normalizeLesson>[]
@@ -222,6 +224,81 @@ export type LessonLedgerAudit = {
   success: boolean
   checked: number
   discrepancies: LessonLedgerDiscrepancy[]
+}
+
+export type AccountingClientSnapshot = {
+  remainingLessons: number
+  totalLessons: number
+  paidAmount: number
+  paymentBalance: number
+  category: 'плавание' | 'синхронное плавание'
+  lessonsPerWeek: number
+  status: 'Активен' | 'Пауза' | 'Архив'
+}
+
+export type ClientHistory = {
+  success: boolean
+  payments: JsonObject[]
+  ledger: JsonObject[]
+}
+
+export type ClientAccounting = ClientHistory & {
+  client?: AccountingClientSnapshot
+  audit: LessonLedgerAudit | null
+  auditError?: { code?: string; message: string }
+}
+
+export type PaymentResult = {
+  success: boolean
+  duplicate?: boolean
+  payment: JsonObject
+  client: AccountingClientSnapshot
+  // Optional during a rolling release with the previous GAS deployment.
+  ledgerEntry?: JsonObject
+  audit?: LessonLedgerAudit
+}
+
+function validAccountingSnapshot(value: unknown): value is AccountingClientSnapshot {
+  if (!value || typeof value !== 'object') return false
+  const snapshot = value as AccountingClientSnapshot
+  return (
+    ['remainingLessons', 'totalLessons', 'paidAmount', 'paymentBalance'].every((field) => {
+      const number = snapshot[field as keyof AccountingClientSnapshot]
+      return typeof number === 'number' && Number.isFinite(number) && number >= 0
+    }) &&
+    snapshot.remainingLessons <= snapshot.totalLessons &&
+    ['Активен', 'Пауза', 'Архив'].includes(snapshot.status) &&
+    ['плавание', 'синхронное плавание'].includes(snapshot.category) &&
+    [1, 2, 3].includes(snapshot.lessonsPerWeek)
+  )
+}
+
+function validLedgerAudit(value: unknown): value is LessonLedgerAudit {
+  if (!value || typeof value !== 'object') return false
+  const audit = value as LessonLedgerAudit
+  return (
+    audit.success === true &&
+    Number.isInteger(audit.checked) &&
+    audit.checked >= 0 &&
+    Array.isArray(audit.discrepancies) &&
+    audit.discrepancies.every(
+      (item) =>
+        item &&
+        typeof item.clientId === 'string' &&
+        typeof item.repairable === 'boolean' &&
+        item.current &&
+        item.calculated &&
+        [
+          item.current.remainingLessons,
+          item.current.totalLessons,
+          item.calculated.remainingLessons,
+          item.calculated.totalLessons,
+        ].every((number) => typeof number === 'number' && Number.isFinite(number)) &&
+        [item.ledgerIssues, item.paymentIssues, item.missingPaymentIds].every(
+          (items) => Array.isArray(items) && items.every((text) => typeof text === 'string'),
+        ),
+    )
+  )
 }
 
 class ApiClient {
@@ -575,12 +652,33 @@ class ApiClient {
 
   async fetchBootstrapData(signal?: AbortSignal, branchId?: string, includeCoaches = true): Promise<BootstrapData> {
     try {
-      const data = await this.request<{ branches?: unknown[]; coaches?: unknown[]; lessons?: unknown[] }>(
+      const data = await this.request<{
+        branches?: unknown[]
+        coaches?: unknown[]
+        lessons?: unknown[]
+        coachAccounts?: CoachAccount[]
+      }>(
         'getBootstrapData',
         { ...(branchId ? { branchId } : {}), ...(!includeCoaches ? { includeCoaches: false } : {}) },
         signal,
       )
+      if (
+        data.coachAccounts !== undefined &&
+        (!Array.isArray(data.coachAccounts) ||
+          data.coachAccounts.some(
+            (account) =>
+              !account ||
+              typeof account.id !== 'string' ||
+              !account.id ||
+              typeof account.username !== 'string' ||
+              !account.username ||
+              account.role !== 'coach' ||
+              !['Активен', 'Отключен', 'Ожидает подтверждения'].includes(account.status),
+          ))
+      )
+        throw new ApiError(502, { message: 'Сервис вернул некорректный список тренеров' })
       return {
+        ...(includeCoaches && data.coachAccounts !== undefined ? { coachAccounts: data.coachAccounts } : {}),
         branches: rowsWithIds(data.branches).map((value) => {
           return {
             id: String(value.id),
@@ -617,7 +715,16 @@ class ApiClient {
   }
 
   async createLesson(lessonData: JsonObject): Promise<ILesson> {
-    return this.request<ILesson>('createLesson', lessonData)
+    const count = Array.isArray(lessonData.clientIds) ? lessonData.clientIds.length : 0
+    const response = await this.request<ILesson & { clientsAssigned?: number }>(
+      count ? 'createLessonWithClients' : 'createLesson',
+      lessonData,
+    )
+    if (count && response.clientsAssigned !== count)
+      throw new ApiError(502, {
+        message: 'Сервис не подтвердил запись всех клиентов. Обновите расписание перед повтором.',
+      })
+    return response
   }
   async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
     return this.request<IBranch>('createBranch', branchData)
@@ -721,16 +828,79 @@ class ApiClient {
     lessonsPerWeek?: number,
     comment?: string,
     requestId?: string,
-  ): Promise<{ success: boolean; payment: Record<string, unknown>; client: Record<string, unknown> }> {
-    return this.request('recordPayment', { clientId, amount, category, lessonsPerWeek, comment, requestId })
+  ): Promise<PaymentResult> {
+    const result = await this.request<PaymentResult>('recordPayment', {
+      clientId,
+      amount,
+      category,
+      lessonsPerWeek,
+      comment,
+      requestId,
+    })
+    // Invalid acknowledgement is an uncertain outcome, never a reason to add
+    // the requested amount locally or retry with a new requestId.
+    if (
+      result?.success !== true ||
+      !result.payment ||
+      String(result.payment.clientId) !== clientId ||
+      !String(result.payment.id || '').trim() ||
+      !validAccountingSnapshot(result.client)
+    ) {
+      throw new ApiError(502, {
+        code: 'INVALID_RESPONSE',
+        message: 'Подтверждение платежа неполное. Проверяем историю.',
+      })
+    }
+    return {
+      ...result,
+      ledgerEntry:
+        result.ledgerEntry &&
+        String(result.ledgerEntry.id || '').trim() &&
+        String(result.ledgerEntry.paymentId) === String(result.payment.id)
+          ? result.ledgerEntry
+          : undefined,
+      audit: validLedgerAudit(result.audit) ? result.audit : undefined,
+    }
   }
 
-  async getClientHistory(clientId: string): Promise<{
-    success: boolean
-    payments: Array<Record<string, unknown>>
-    ledger: Array<Record<string, unknown>>
-  }> {
+  async getClientHistory(clientId: string): Promise<ClientHistory> {
     return this.request('getClientHistory', { clientId })
+  }
+
+  async getClientAccounting(clientId: string): Promise<ClientAccounting> {
+    const result = await this.request<ClientAccounting>('getClientHistory', { clientId, includeAudit: true })
+    if (result?.success !== true) {
+      throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Не удалось загрузить историю платежей.' })
+    }
+    const history = { success: true, payments: rowsWithIds(result.payments), ledger: rowsWithIds(result.ledger) }
+    const client = validAccountingSnapshot(result.client) ? result.client : undefined
+    if (Object.prototype.hasOwnProperty.call(result, 'audit')) {
+      return {
+        ...history,
+        client,
+        audit: validLedgerAudit(result.audit) ? result.audit : null,
+        auditError: validLedgerAudit(result.audit)
+          ? undefined
+          : {
+              code: result.auditError?.code,
+              message: result.auditError?.message || 'Не удалось выполнить сверку журнала. Повторите загрузку.',
+            },
+      }
+    }
+    // Compatibility with an older GAS deployment only. An explicit audit
+    // failure above must retain history without another expensive GAS call.
+    try {
+      const audit = await this.auditLessonLedger(clientId)
+      if (!validLedgerAudit(audit)) throw new Error('Неполный ответ сверки')
+      return { ...history, client, audit }
+    } catch {
+      return {
+        ...history,
+        client,
+        audit: null,
+        auditError: { message: 'Не удалось выполнить сверку журнала. Повторите загрузку.' },
+      }
+    }
   }
 
   async recordBulkAttendance(

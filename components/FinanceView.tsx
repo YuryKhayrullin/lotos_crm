@@ -38,15 +38,16 @@ export const FinanceView = observer(() => {
     ? [
         { label: 'Оплачено по клиентам', value: money.format(summary.totalPaidAmount), tone: 'text-emerald-600' },
         { label: 'Осталось занятий', value: String(summary.remainingLessons), tone: 'text-cyan-700' },
-        { label: 'Активных клиентов', value: String(summary.activeClients), tone: 'text-pink-600' },
+        { label: 'Активных клиентов', value: String(summary.activeClients), tone: 'text-cyan-700' },
       ]
     : []
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Финансы</h2>
-        <p className="mt-1 text-sm text-slate-500">Сводка по всем клиентам выбранного филиала</p>
+      <div className="rounded-3xl bg-gradient-to-br from-[#103c4a] via-[#0c5265] to-[#078b9e] p-6 text-white sm:p-7">
+        <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">Финансовый учёт</p>
+        <h2 className="text-2xl font-semibold tracking-tight">{store.currentBranch?.name || 'Все филиалы'}</h2>
+        <p className="mt-2 text-sm text-cyan-50/80">Оплаты и остатки занятий по всей выборке клиентов</p>
       </div>
       {error && (
         <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -58,15 +59,15 @@ export const FinanceView = observer(() => {
         <>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             {metrics.map((metric) => (
-              <Card key={metric.label} className="rounded-2xl border-slate-100 shadow-sm">
+              <Card key={metric.label} className="rounded-2xl border border-slate-200/80 bg-white ring-0 shadow-none">
                 <CardContent className="p-6">
                   <p className="text-sm text-slate-500">{metric.label}</p>
-                  <p className={`mt-3 text-3xl font-extrabold ${metric.tone}`}>{metric.value}</p>
+                  <p className={`mt-3 text-3xl font-semibold tracking-tight ${metric.tone}`}>{metric.value}</p>
                 </CardContent>
               </Card>
             ))}
           </div>
-          <Card className="rounded-2xl border-slate-100 shadow-sm">
+          <Card className="rounded-3xl border border-slate-200/80 bg-white ring-0 shadow-none">
             <CardContent className="p-6 text-sm text-slate-500">
               Учтено клиентов: {summary.totalClients}. В том числе на паузе: {summary.pausedClients}, в архиве:{' '}
               {summary.archivedClients}. Показатели рассчитываются на сервере по всей выборке, а не по открытой странице

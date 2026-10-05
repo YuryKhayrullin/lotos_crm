@@ -1,5 +1,5 @@
 import { flow, types, Instance } from 'mobx-state-tree'
-import { apiClient, ApiError } from '@/lib/api-client'
+import { apiClient, ApiError, type CoachAccount } from '@/lib/api-client'
 import { ClientStore } from './ClientStore'
 import { AuthStore } from './AuthStore'
 import { BranchModel, IBranch, CoachModel, ICoach, LessonModel, ILesson } from '@/store/models'
@@ -15,6 +15,8 @@ const RootStoreModel = types
     branchMenuOpen: types.optional(types.boolean, false),
     branches: types.optional(types.array(BranchModel), []),
     coaches: types.optional(types.array(CoachModel), []),
+    coachAccounts: types.optional(types.array(types.frozen<CoachAccount>()), []),
+    coachAccountsSessionVersion: types.optional(types.number, -1),
     clientStore: types.optional(ClientStore, {}),
     authStore: types.optional(AuthStore, {}),
     lessons: types.optional(types.array(LessonModel), []),
@@ -27,6 +29,14 @@ const RootStoreModel = types
     error: types.maybeNull(types.string),
   })
   .views((self) => ({
+    get hasLoadedCoachAccounts(): boolean {
+      return self.authStore.isAdmin && self.coachAccountsSessionVersion === self.authStore.sessionVersion
+    },
+    get currentCoachAccounts(): CoachAccount[] {
+      return self.authStore.isAdmin && self.coachAccountsSessionVersion === self.authStore.sessionVersion
+        ? self.coachAccounts.slice()
+        : []
+    },
     get currentBranch(): IBranch | undefined {
       return self.branches.find((b: IBranch) => b.id === self.selectedBranchId)
     },
@@ -118,6 +128,23 @@ const RootStoreModel = types
       setAttachCoachId,
       setError,
       addLessonToStore,
+      rememberCoachAccounts(accounts: CoachAccount[]) {
+        if (!self.authStore.isAdmin) return
+        if (
+          !Array.isArray(accounts) ||
+          accounts.some(
+            (account) =>
+              !account ||
+              !account.id ||
+              !account.username ||
+              account.role !== 'coach' ||
+              !['Активен', 'Отключен', 'Ожидает подтверждения'].includes(account.status),
+          )
+        )
+          throw new Error('Invalid trainer accounts')
+        self.coachAccounts.replace(accounts)
+        self.coachAccountsSessionVersion = self.authStore.sessionVersion
+      },
       initialize: flow(function* (force = false) {
         const userId = self.authStore.user?.id
           ? `${String(self.authStore.user.id)}:${self.authStore.sessionVersion}`
@@ -129,6 +156,8 @@ const RootStoreModel = types
         if (dataForUser !== userId) {
           self.branches.clear()
           self.coaches.clear()
+          self.coachAccounts.clear()
+          self.coachAccountsSessionVersion = -1
           self.lessons.clear()
           self.selectedBranchId = null
           self.hasLoadedData = false
@@ -146,7 +175,7 @@ const RootStoreModel = types
           const branchId = self.authStore.isAdmin ? self.selectedBranchId || undefined : undefined
           // Screens fetch their own visible data. Speculative reads here
           // contend with bootstrap/attendance for GAS and can outlive a tab.
-          const { branches, coaches, lessons } = yield apiClient.fetchBootstrapData(
+          const { branches, coaches, lessons, coachAccounts } = yield apiClient.fetchBootstrapData(
             controller.signal,
             branchId,
             !self.authStore.isCoach,
@@ -163,6 +192,10 @@ const RootStoreModel = types
           }
 
           self.branches.replace(branches)
+          if (self.authStore.isAdmin && coachAccounts !== undefined) {
+            self.coachAccounts.replace(coachAccounts)
+            self.coachAccountsSessionVersion = self.authStore.sessionVersion
+          }
           self.coaches.replace(coaches)
           self.lessons.replace(lessons)
 

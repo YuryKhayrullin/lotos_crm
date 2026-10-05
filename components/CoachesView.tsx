@@ -35,7 +35,7 @@ export const CoachesView = observer(() => {
   const [isAddCoachOpen, setIsAddCoachOpen] = useState(false)
   const [formData, setFormData] = useState(emptyCoachForm)
   const [formError, setFormError] = useState<string | null>(null)
-  const [accounts, setAccounts] = useState<CoachAccount[]>([])
+  const [accounts, setAccounts] = useState<CoachAccount[]>(() => store.currentCoachAccounts || [])
   const [assigningBranches, setAssigningBranches] = useState<Record<string, string>>({})
   const [linkingAccounts, setLinkingAccounts] = useState<Record<string, string>>({})
   const [passwords, setPasswords] = useState<Record<string, string>>({})
@@ -101,9 +101,14 @@ export const CoachesView = observer(() => {
           throw new Error('Invalid accounts response')
         if (!mounted.current || !store.authStore.isAdmin || version !== store.authStore.sessionVersion) return
         setAccounts(users)
+        store.rememberCoachAccounts?.(users)
         setAccountsError(null)
       } catch (error) {
         if (!mounted.current || version !== store.authStore.sessionVersion) return
+        if (error instanceof ApiError && error.status === 401) {
+          store.authStore.expireSession()
+          return
+        }
         setAccountsError(
           error instanceof ApiError ? error.message : 'Не удалось загрузить аккаунты. Нажмите «Обновить список».',
         )
@@ -119,13 +124,14 @@ export const CoachesView = observer(() => {
 
   useEffect(() => {
     mounted.current = true
-    setAccounts([])
+    setAccounts(store.currentCoachAccounts || [])
     setAccountsError(null)
     setAccountsNotice(null)
     setAssigningBranches({})
     setLinkingAccounts({})
     setPasswords({})
-    if (store.authStore.isAdmin) void loadAccounts()
+    if (store.authStore.isAdmin && !store.hasLoadedCoachAccounts) void loadAccounts()
+    else setAccountsLoading(false)
     return () => {
       mounted.current = false
       accountsRead.current = null
@@ -320,7 +326,9 @@ export const CoachesView = observer(() => {
       })
       setIsAddCoachOpen(false)
       setFormData(emptyCoachForm)
-      await loadAccounts()
+      // A profile-only creation does not change Users. The confirmed profile
+      // is already in the store; only refresh accounts when one was created.
+      if (formData.username) await loadAccounts()
     } catch (error) {
       setFormError(error instanceof ApiError ? error.message : 'Не удалось создать тренера')
     } finally {
@@ -464,9 +472,30 @@ export const CoachesView = observer(() => {
             </span>
           </div>
           <p className="mt-2 text-sm text-slate-600">{branchLabel(account.branchId)}</p>
-          {linkedCoach && <p className="mt-1 text-xs text-slate-500">Логин: {account.username}</p>}
-          {linkedCoach?.phone && <p className="mt-2 text-sm text-slate-600">{linkedCoach.phone}</p>}
-          {linkedCoach?.birthDate && <p className="mt-1 text-sm text-slate-600">{linkedCoach.birthDate}</p>}
+          <p className="mt-1 text-xs text-slate-500">Логин: {account.username}</p>
+          {!pending && (
+            <div className="mt-4 grid gap-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+              <p>Специализация: {linkedCoach?.specialty || 'Не указана'}</p>
+              <p className="flex items-center gap-2">
+                <Phone className="size-3.5" />
+                {linkedCoach?.phone || 'Телефон не указан'}
+              </p>
+              <p className="flex items-center gap-2">
+                <CalendarDays className="size-3.5" />
+                Дата рождения: {linkedCoach?.birthDate || 'Не указана'}
+              </p>
+              <p>
+                Записей в расписании:{' '}
+                {
+                  store.sortedBranchLessons.filter(
+                    (lesson) =>
+                      String(lesson.branchId) === account.branchId &&
+                      lesson.coachName === (linkedCoach?.name || account.username),
+                  ).length
+                }
+              </p>
+            </div>
+          )}
         </div>
         {pending ? (
           management
@@ -482,7 +511,7 @@ export const CoachesView = observer(() => {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap justify-between items-center gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+      <div className="flex flex-wrap justify-between items-center gap-4 bg-white p-6 rounded-3xl border border-slate-200/80">
         <div>
           <h2 className="text-xl font-bold text-slate-900">Тренеры</h2>
           <p className="mt-1 text-sm text-slate-500">Подтвердите новых тренеров и управляйте входом в CRM.</p>
@@ -550,7 +579,7 @@ export const CoachesView = observer(() => {
                     ))}
                   </SelectContent>
                 </Select>
-                {!store.selectedBranchId && (
+                {!store.selectedBranchId && !formData.branchId && (
                   <p className="-mt-3 text-xs text-amber-700">
                     В режиме «Все филиалы» филиал тренера нужно выбрать явно.
                   </p>
@@ -590,7 +619,7 @@ export const CoachesView = observer(() => {
       </div>
 
       {store.authStore.isAdmin && (
-        <Card className="rounded-2xl border-slate-200 bg-white">
+        <Card className="rounded-3xl border border-slate-200/80 bg-white ring-0">
           <CardContent className="grid gap-4 p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -649,7 +678,7 @@ export const CoachesView = observer(() => {
         </Card>
       )}
       {store.authStore.isAdmin && pendingAccounts.length > 0 && (
-        <Card className="rounded-2xl border-amber-200 bg-white" data-section="pending-coaches">
+        <Card className="rounded-3xl border border-amber-200 bg-white ring-0" data-section="pending-coaches">
           <CardContent className="grid gap-4 p-5">
             <h3 className="font-semibold text-slate-900">Новые заявки · {pendingAccounts.length}</h3>
             <p className="text-sm text-slate-600">
@@ -684,7 +713,10 @@ export const CoachesView = observer(() => {
               const selectedAccount =
                 linkingAccounts[coach.id] || (linkableAccounts.length === 1 ? linkableAccounts[0].id : '')
               return (
-                <Card key={coach.id} className="rounded-2xl border-cyan-100 hover:shadow-md transition-shadow">
+                <Card
+                  key={coach.id}
+                  className="rounded-3xl border border-slate-200/80 bg-white ring-0 hover:shadow-md transition-shadow"
+                >
                   <CardContent className="grid gap-4 p-6">
                     <div className="flex items-center gap-4">
                       <div className="flex size-16 items-center justify-center rounded-full bg-gradient-to-tr from-cyan-100 to-pink-100 text-xl font-bold text-cyan-700">
@@ -710,6 +742,15 @@ export const CoachesView = observer(() => {
                         )}
                       </div>
                     )}
+                    <p className="text-xs text-slate-500">
+                      Записей в расписании:{' '}
+                      {
+                        store.sortedBranchLessons.filter(
+                          (lesson) =>
+                            String(lesson.branchId) === String(coach.branchId) && lesson.coachName === coach.name,
+                        ).length
+                      }
+                    </p>
                     {store.authStore.isAdmin && (
                       <details className="border-t border-slate-100 pt-4">
                         <summary className="w-fit cursor-pointer text-sm text-cyan-800">Управление тренером</summary>

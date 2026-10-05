@@ -1,12 +1,19 @@
 'use client'
 
 import { observer } from 'mobx-react-lite'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStore } from '@/store/StoreProvider'
 import { CreateClientDto } from '@/store/models'
 import { calculateAge, formatBirthDate, formatPhone } from '@/lib/formatters'
 import { normalizeClient } from '@/lib/normalizers'
-import { apiClient, createRequestId, type LessonLedgerDiscrepancy } from '@/lib/api-client'
+import {
+  apiClient,
+  ApiError,
+  createRequestId,
+  type AccountingClientSnapshot,
+  type ClientAccounting,
+  type LessonLedgerDiscrepancy,
+} from '@/lib/api-client'
 import { packagePrice, calculatePaymentLessons } from '@/lib/subscription-pricing'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -34,6 +41,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { ClientAttendanceHistory } from './ClientAttendanceHistory'
 
 const statusStyle = (status: string) =>
   ({
@@ -58,6 +66,15 @@ type EditFormState = Pick<
   FormState,
   'childName' | 'parentName' | 'phone' | 'email' | 'birthDate' | 'category' | 'lessonsPerWeek'
 >
+
+type PaymentAttempt = {
+  clientId: string
+  amount: number
+  category: string
+  lessonsPerWeek: number
+  comment: string
+  requestId: string
+}
 
 const emptyEditForm: EditFormState = {
   childName: '',
@@ -152,6 +169,13 @@ const toClientListItem = (client: ReturnType<typeof normalizeClient>): ClientLis
 
 const CLIENT_PAGE_SIZE = 100
 
+// Keep an existing operation in its chronological position on an idempotent
+// retry; a genuinely new confirmed operation goes at the top exactly once.
+function upsertAccountingRow(rows: Array<Record<string, unknown>>, row: Record<string, unknown>) {
+  const index = rows.findIndex((existing) => String(existing.id) === String(row.id))
+  return index === -1 ? [row, ...rows] : rows.map((existing, i) => (i === index ? row : existing))
+}
+
 export const ClientsView = observer(() => {
   const store = useStore()
   const [clients, setClients] = useState<ClientListItem[]>([])
@@ -181,19 +205,21 @@ export const ClientsView = observer(() => {
   const [paymentComment, setPaymentComment] = useState('')
   const [paymentError, setPaymentError] = useState('')
   const [paymentLoading, setPaymentLoading] = useState(false)
-  const [paymentAttempt, setPaymentAttempt] = useState<{
-    clientId: string
-    amount: number
-    category: string
-    lessonsPerWeek: number
-    comment: string
-    requestId: string
-  } | null>(null)
+  const [paymentAttempt, setPaymentAttempt] = useState<PaymentAttempt | null>(null)
+  // Keep uncertain attempts when switching between client cards in this view.
+  // Opening another pupil must not discard the original retry key.
+  const pendingPayments = useRef(new Map<string, PaymentAttempt>())
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
   const [paymentHistory, setPaymentHistory] = useState<Array<Record<string, unknown>>>([])
   const [lessonLedger, setLessonLedger] = useState<Array<Record<string, unknown>>>([])
   const [ledgerAudit, setLedgerAudit] = useState<LessonLedgerDiscrepancy | null>(null)
   const [ledgerAuditChecked, setLedgerAuditChecked] = useState(false)
+  const [ledgerAuditError, setLedgerAuditError] = useState('')
+  const accountingRequestVersion = useRef(0)
+  const accountingReady = useRef(false)
+  const paymentSubmitting = useRef(false)
+  const mounted = useRef(true)
   const [auditRepairReason, setAuditRepairReason] = useState('')
   const [auditRepairConfirmed, setAuditRepairConfirmed] = useState(false)
   const [auditRepairError, setAuditRepairError] = useState('')
@@ -223,15 +249,118 @@ export const ClientsView = observer(() => {
   const [clientActionError, setClientActionError] = useState('')
   const [clientActionLoading, setClientActionLoading] = useState(false)
 
+  const selectedClient = selectedClientId ? clients.find((client) => client.id === selectedClientId) || null : null
+  const selectedAccountingClientId = selectedClient?.id ?? null
   const branchId = store.authStore.isAdmin ? store.selectedBranchId || undefined : undefined
+  const accountingScope = JSON.stringify([
+    store.authStore.user?.id,
+    store.authStore.sessionVersion,
+    store.authStore.isAdmin,
+    branchId,
+  ])
+  const accountingTarget = useRef({ clientId: selectedAccountingClientId, scope: accountingScope })
+  accountingTarget.current = { clientId: selectedAccountingClientId, scope: accountingScope }
+  const listContext = useRef({ key: '', loading: false, hasMore: false, statusFilter, sortConfig })
+  listContext.current = {
+    key: JSON.stringify([accountingScope, searchQuery, statusFilter, sortConfig]),
+    loading: isListLoading,
+    hasMore,
+    statusFilter,
+    sortConfig,
+  }
+  const isAccountingTarget = useCallback(
+    (clientId: string, scope: string) =>
+      mounted.current && accountingTarget.current.clientId === clientId && accountingTarget.current.scope === scope,
+    [],
+  )
+
+  const applyAccountingSnapshot = useCallback((clientId: string, snapshot: AccountingClientSnapshot) => {
+    setClients((current) => {
+      const updated = current.map((client) =>
+        client.id !== clientId
+          ? client
+          : {
+              ...client,
+              ...snapshot,
+              subscription: client.subscription
+                ? {
+                    ...client.subscription,
+                    remainingLessons: snapshot.remainingLessons,
+                    totalLessons: snapshot.totalLessons,
+                    paid: client.subscription.paid || snapshot.paidAmount > 0,
+                    status: snapshot.status,
+                  }
+                : client.subscription,
+            },
+      )
+      if (listContext.current.sortConfig.key === 'paidAmount') {
+        const direction = listContext.current.sortConfig.dir === 'asc' ? 1 : -1
+        updated.sort(
+          (left, right) => (left.paidAmount - right.paidAmount) * direction || left.id.localeCompare(right.id),
+        )
+      }
+      return updated
+    })
+  }, [])
+
+  const applyAccounting = useCallback(
+    (clientId: string, accounting: ClientAccounting) => {
+      setPaymentHistory(accounting.payments)
+      setLessonLedger(accounting.ledger)
+      setLedgerAudit(accounting.audit?.discrepancies[0] || null)
+      setLedgerAuditChecked(Boolean(accounting.audit))
+      setLedgerAuditError(accounting.auditError?.message || '')
+      setHistoryError('')
+      accountingReady.current = true
+      if (accounting.client) applyAccountingSnapshot(clientId, accounting.client)
+    },
+    [applyAccountingSnapshot],
+  )
+
   const refreshClients = () => setReloadVersion((version) => version + 1)
+  const closeClientProfile = () => {
+    accountingTarget.current.clientId = null
+    accountingRequestVersion.current++
+    accountingReady.current = false
+    setSelectedClientId(null)
+    setIsPaymentOpen(false)
+    setIsAdjustmentOpen(false)
+    setIsEditOpen(false)
+  }
   const openClientProfile = (clientId: string) => {
+    accountingTarget.current = { clientId, scope: accountingScope }
+    accountingRequestVersion.current++
+    accountingReady.current = false
     setClientActionError('')
+    setIsPaymentOpen(false)
+    setIsAdjustmentOpen(false)
+    setIsEditOpen(false)
     setPaymentHistory([])
     setLessonLedger([])
     setHistoryLoading(true)
     setSelectedClientId(clientId)
   }
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    // Attempts and dialogs belong to a session/branch, never to the next one.
+    pendingPayments.current.clear()
+    setPaymentAttempt(null)
+    setAdjustmentAttempt(null)
+    setAuditRepairAttempt(null)
+    setIsPaymentOpen(false)
+    setIsAdjustmentOpen(false)
+    setIsEditOpen(false)
+    setPaymentError('')
+    setAdjustmentError('')
+    setAuditRepairError('')
+  }, [accountingScope])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -306,14 +435,16 @@ export const ClientsView = observer(() => {
     }
   }
 
-  const selectedClient = selectedClientId ? clients.find((client) => client.id === selectedClientId) || null : null
-  const selectedAccountingClientId = selectedClient?.id ?? null
   const canDeleteSelected = Boolean(
     selectedClient &&
     !historyLoading &&
+    !historyError &&
     ledgerAuditChecked &&
     paymentHistory.length === 0 &&
-    lessonLedger.length === 0 &&
+    lessonLedger.every(
+      (entry) =>
+        entry.type === 'client_creation' && Number(entry.lessonsDelta) === 0 && Number(entry.totalLessonsDelta) === 0,
+    ) &&
     selectedClient.attendanceHistory.length === 0 &&
     selectedClient.assignedLessonIds.length === 0 &&
     selectedClient.paidAmount === 0 &&
@@ -321,47 +452,81 @@ export const ClientsView = observer(() => {
   )
 
   useEffect(() => {
+    const requestVersion = ++accountingRequestVersion.current
+    accountingReady.current = false
     if (!selectedAccountingClientId || !store.authStore.isAdmin) {
       setPaymentHistory([])
       setLessonLedger([])
       setLedgerAudit(null)
       setLedgerAuditChecked(false)
+      setHistoryLoading(false)
+      setHistoryError('')
+      setLedgerAuditError('')
       return
     }
     let cancelled = false
     setHistoryLoading(true)
+    setHistoryError('')
+    setPaymentHistory([])
+    setLessonLedger([])
+    setLedgerAudit(null)
     setLedgerAuditChecked(false)
-    void Promise.all([
-      apiClient.getClientHistory(selectedAccountingClientId),
-      apiClient.auditLessonLedger(selectedAccountingClientId),
-    ])
-      .then(([history, audit]) => {
-        if (cancelled) return
-        setPaymentHistory(history.payments)
-        setLessonLedger(history.ledger)
-        setLedgerAudit(audit.discrepancies[0] || null)
-        setLedgerAuditChecked(true)
+    setLedgerAuditError('')
+    const isCurrent = () =>
+      !cancelled &&
+      requestVersion === accountingRequestVersion.current &&
+      isAccountingTarget(selectedAccountingClientId, accountingScope)
+    void apiClient
+      .getClientAccounting(selectedAccountingClientId)
+      .then((accounting) => {
+        if (isCurrent()) applyAccounting(selectedAccountingClientId, accounting)
       })
       .catch(() => {
-        if (!cancelled) {
+        if (isCurrent()) {
           setPaymentHistory([])
           setLessonLedger([])
-          setLedgerAudit(null)
+          setHistoryError('Не удалось загрузить историю платежей. Закройте и снова откройте карточку.')
         }
       })
       .finally(() => {
-        if (!cancelled) setHistoryLoading(false)
+        if (isCurrent()) setHistoryLoading(false)
       })
     return () => {
       cancelled = true
     }
     // Refreshing the list creates new objects, not a new selected pupil.
     // Successful accounting writes explicitly refresh history/audit below.
-  }, [selectedAccountingClientId, store.authStore.isAdmin])
+  }, [selectedAccountingClientId, store.authStore.isAdmin, accountingScope, isAccountingTarget, applyAccounting])
+
+  const refreshSelectedAccounting = async (clientId: string, scope = accountingScope) => {
+    if (!isAccountingTarget(clientId, scope)) return
+    const requestVersion = ++accountingRequestVersion.current
+    setHistoryLoading(true)
+    const isCurrent = () => requestVersion === accountingRequestVersion.current && isAccountingTarget(clientId, scope)
+    try {
+      const accounting = await apiClient.getClientAccounting(clientId)
+      if (isCurrent()) applyAccounting(clientId, accounting)
+    } catch {
+      // A refresh failure is not a failed mutation. Retain confirmed rows and
+      // never ask the operator to create a second payment/adjustment.
+      if (isCurrent()) {
+        setHistoryError('Не удалось обновить историю. Подтверждённые операции сохранены; повторите загрузку.')
+        setLedgerAuditChecked(false)
+        setLedgerAuditError('Не удалось обновить сверку журнала.')
+      }
+    } finally {
+      if (isCurrent()) setHistoryLoading(false)
+    }
+  }
 
   const openPayment = () => {
     if (!selectedClient) return
-    if (!paymentAttempt || paymentAttempt.clientId !== selectedClient.id) {
+    const pending = pendingPayments.current.get(selectedClient.id)
+    if (pending) {
+      setPaymentAttempt(pending)
+      setPaymentAmount(String(pending.amount))
+      setPaymentComment(pending.comment)
+    } else {
       setPaymentAttempt(null)
       setPaymentAmount(String(packagePrice(selectedClient.category, selectedClient.lessonsPerWeek) || ''))
       setPaymentComment('')
@@ -371,7 +536,8 @@ export const ClientsView = observer(() => {
   }
 
   const submitPayment = async () => {
-    if (!selectedClient || paymentLoading) return
+    if (!selectedClient || paymentSubmitting.current) return
+    const retryingUncertainAttempt = pendingPayments.current.has(selectedClient.id)
     const amount = Number(paymentAmount)
     if (!paymentAttempt && (!Number.isFinite(amount) || amount <= 0)) {
       setPaymentError('Введите сумму платежа больше нуля')
@@ -380,7 +546,7 @@ export const ClientsView = observer(() => {
     const attempt =
       paymentAttempt?.clientId === selectedClient.id
         ? paymentAttempt
-        : {
+        : pendingPayments.current.get(selectedClient.id) || {
             clientId: selectedClient.id,
             amount,
             category: selectedClient.category,
@@ -388,11 +554,17 @@ export const ClientsView = observer(() => {
             comment: paymentComment.trim(),
             requestId: createRequestId(),
           }
+    pendingPayments.current.set(attempt.clientId, attempt)
     setPaymentAttempt(attempt)
+    paymentSubmitting.current = true
     setPaymentLoading(true)
     setPaymentError('')
+    const scope = accountingScope
+    const listKey = listContext.current.key
+    // A read started before this mutation must not overwrite its new balance.
+    accountingRequestVersion.current++
     try {
-      await apiClient.recordPayment(
+      const result = await apiClient.recordPayment(
         attempt.clientId,
         attempt.amount,
         attempt.category,
@@ -400,34 +572,78 @@ export const ClientsView = observer(() => {
         attempt.comment,
         attempt.requestId,
       )
-      setPaymentAttempt(null)
-      setIsPaymentOpen(false)
-      refreshClients()
-      const [history, audit] = await Promise.all([
-        apiClient.getClientHistory(attempt.clientId),
-        apiClient.auditLessonLedger(attempt.clientId),
-      ])
-      setPaymentHistory(history.payments)
-      setLessonLedger(history.ledger)
-      setLedgerAudit(audit.discrepancies[0] || null)
-      setLedgerAuditChecked(true)
-    } catch (error) {
-      // A lost HTTP response is not proof that Sheets rejected the payment.
-      const history = await apiClient.getClientHistory(attempt.clientId).catch(() => null)
-      if (history?.payments.some((payment) => String(payment.requestId) === attempt.requestId)) {
+      if (!mounted.current || accountingTarget.current.scope !== scope) return
+      pendingPayments.current.delete(attempt.clientId)
+      const needsListRefresh =
+        listKey !== listContext.current.key ||
+        listContext.current.loading ||
+        listContext.current.statusFilter !== 'all' ||
+        (listContext.current.hasMore && listContext.current.sortConfig.key === 'paidAmount')
+      clientRequestVersion.current++
+      setIsListLoading(false)
+      applyAccountingSnapshot(attempt.clientId, result.client)
+      if (needsListRefresh) refreshClients()
+      if (isAccountingTarget(attempt.clientId, scope)) {
+        accountingRequestVersion.current++
         setPaymentAttempt(null)
         setIsPaymentOpen(false)
-        const audit = await apiClient.auditLessonLedger(attempt.clientId).catch(() => null)
-        setPaymentHistory(history.payments)
-        setLessonLedger(history.ledger)
-        setLedgerAudit(audit?.discrepancies[0] || null)
-        setLedgerAuditChecked(Boolean(audit))
-        refreshClients()
+        setPaymentHistory((current) => upsertAccountingRow(current, result.payment))
+        if (result.ledgerEntry) setLessonLedger((current) => upsertAccountingRow(current, result.ledgerEntry!))
+        setHistoryLoading(false)
+        setHistoryError('')
+        setLedgerAudit(result.audit?.discrepancies[0] || null)
+        setLedgerAuditChecked(Boolean(result.audit))
+        setLedgerAuditError('')
+        // Normally all history is already loaded and this confirmed response
+        // completes the UI update with no follow-up GAS calls.
+        if (!accountingReady.current || !result.ledgerEntry || !result.audit) {
+          void refreshSelectedAccounting(attempt.clientId, scope)
+        }
+      }
+    } catch (error) {
+      // A lost HTTP response is not proof that Sheets rejected the payment.
+      if (!isAccountingTarget(attempt.clientId, scope)) return
+      const recoveryVersion = ++accountingRequestVersion.current
+      const accounting = await apiClient.getClientAccounting(attempt.clientId).catch(() => null)
+      if (!isAccountingTarget(attempt.clientId, scope) || recoveryVersion !== accountingRequestVersion.current) return
+      if (accounting) applyAccounting(attempt.clientId, accounting)
+      setHistoryLoading(false)
+      if (accounting?.payments.some((payment) => String(payment.requestId) === attempt.requestId)) {
+        pendingPayments.current.delete(attempt.clientId)
+        setPaymentAttempt(null)
+        setIsPaymentOpen(false)
+        clientRequestVersion.current++
+        setIsListLoading(false)
+        if (
+          !accounting.client ||
+          listContext.current.statusFilter !== 'all' ||
+          (listContext.current.hasMore && listContext.current.sortConfig.key === 'paidAmount') ||
+          listKey !== listContext.current.key
+        )
+          refreshClients()
       } else {
-        setPaymentError(error instanceof Error ? error.message : 'Не удалось сохранить платёж')
+        // A first, explicitly rejected validation has not committed. Let the
+        // operator correct the amount. Never discard a previously uncertain
+        // attempt merely because a later retry was rejected.
+        const rejectedBeforeWrite =
+          !retryingUncertainAttempt && error instanceof ApiError && error.code === 'VALIDATION'
+        if (rejectedBeforeWrite) {
+          pendingPayments.current.delete(attempt.clientId)
+          setPaymentAttempt(null)
+        }
+        setPaymentError(
+          error instanceof Error ? error.message : 'Не удалось подтвердить платёж. Повторите тот же запрос.',
+        )
+        if (!accounting)
+          setHistoryError(
+            rejectedBeforeWrite
+              ? 'Не удалось проверить историю платежей.'
+              : 'Не удалось проверить историю. Повторная попытка платежа использует тот же requestId.',
+          )
       }
     } finally {
-      setPaymentLoading(false)
+      paymentSubmitting.current = false
+      if (mounted.current) setPaymentLoading(false)
     }
   }
   const openAdjustment = () => {
@@ -515,7 +731,7 @@ export const ClientsView = observer(() => {
     setClientActionError('')
     try {
       await apiClient.updateClient(selectedClient.id, { status: archive ? 'Архив' : 'Активен' })
-      setSelectedClientId(null)
+      closeClientProfile()
       refreshClients()
     } catch (error) {
       setClientActionError(error instanceof Error ? error.message : 'Не удалось изменить статус клиента')
@@ -536,24 +752,13 @@ export const ClientsView = observer(() => {
     setClientActionError('')
     try {
       await apiClient.deleteClient(selectedClient.id)
-      setSelectedClientId(null)
+      closeClientProfile()
       refreshClients()
     } catch (error) {
       setClientActionError(error instanceof Error ? error.message : 'Не удалось удалить карточку')
     } finally {
       setClientActionLoading(false)
     }
-  }
-
-  const refreshSelectedAccounting = async (clientId: string) => {
-    const [history, audit] = await Promise.all([
-      apiClient.getClientHistory(clientId),
-      apiClient.auditLessonLedger(clientId),
-    ])
-    setPaymentHistory(history.payments)
-    setLessonLedger(history.ledger)
-    setLedgerAudit(audit.discrepancies[0] || null)
-    setLedgerAuditChecked(true)
   }
 
   const submitAdjustment = async () => {
@@ -574,14 +779,18 @@ export const ClientsView = observer(() => {
     setAdjustmentAttempt(attempt)
     setAdjustmentLoading(true)
     setAdjustmentError('')
+    const scope = accountingScope
+    accountingRequestVersion.current++
     try {
       await apiClient.recordAdjustment(attempt.clientId, attempt.lessonsDelta, attempt.reason, '', attempt.requestId)
-      refreshClients()
-      await refreshSelectedAccounting(attempt.clientId)
+      if (!isAccountingTarget(attempt.clientId, scope)) return
       setAdjustmentAttempt(null)
       setIsAdjustmentOpen(false)
+      refreshClients()
+      void refreshSelectedAccounting(attempt.clientId, scope)
     } catch (error) {
-      setAdjustmentError(error instanceof Error ? error.message : 'Не удалось сохранить корректировку')
+      if (isAccountingTarget(attempt.clientId, scope))
+        setAdjustmentError(error instanceof Error ? error.message : 'Не удалось сохранить корректировку')
     } finally {
       setAdjustmentLoading(false)
     }
@@ -604,6 +813,8 @@ export const ClientsView = observer(() => {
     setAuditRepairAttempt(attempt)
     setAuditRepairLoading(true)
     setAuditRepairError('')
+    const scope = accountingScope
+    accountingRequestVersion.current++
     try {
       await apiClient.repairLessonLedger(
         attempt.clientId,
@@ -612,13 +823,15 @@ export const ClientsView = observer(() => {
         attempt.reason,
         attempt.requestId,
       )
-      refreshClients()
-      await refreshSelectedAccounting(attempt.clientId)
+      if (!isAccountingTarget(attempt.clientId, scope)) return
       setAuditRepairAttempt(null)
       setAuditRepairConfirmed(false)
       setAuditRepairReason('')
+      refreshClients()
+      void refreshSelectedAccounting(attempt.clientId, scope)
     } catch (error) {
-      setAuditRepairError(error instanceof Error ? error.message : 'Не удалось исправить журнал')
+      if (isAccountingTarget(attempt.clientId, scope))
+        setAuditRepairError(error instanceof Error ? error.message : 'Не удалось исправить журнал')
     } finally {
       setAuditRepairLoading(false)
     }
@@ -696,10 +909,10 @@ export const ClientsView = observer(() => {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-4 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-6">
+      <div className="flex flex-col gap-4 rounded-3xl border border-slate-200/80 bg-white p-4 sm:flex-row sm:items-center sm:justify-between sm:p-6">
         <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Клиенты и дети</h2>
         {store.authStore.isAdmin && (
-          <Button onClick={openAdd} className="w-full rounded-full bg-cyan-600 hover:bg-cyan-700 sm:w-auto">
+          <Button onClick={openAdd} className="w-full rounded-xl bg-cyan-700 hover:bg-cyan-800 sm:w-auto">
             <Plus className="mr-2 size-4" /> Добавить клиента
           </Button>
         )}
@@ -1001,7 +1214,7 @@ export const ClientsView = observer(() => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!selectedClient} onOpenChange={(open) => !open && setSelectedClientId(null)}>
+      <Dialog open={!!selectedClient} onOpenChange={(open) => !open && closeClientProfile()}>
         <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
           {selectedClient && (
             <div>
@@ -1013,15 +1226,26 @@ export const ClientsView = observer(() => {
                         {selectedClient.initials || selectedClient.childName.slice(0, 2).toUpperCase()}
                       </div>
                       <DialogTitle className="text-2xl font-bold text-white">{selectedClient.childName}</DialogTitle>
-                      <p className="mt-1 text-sm text-slate-300">Профиль клиента · ID {selectedClient.id}</p>
+                      <p className="mt-1 text-sm text-slate-300">Посещения и остаток занятий</p>
                     </div>
                     <Badge className={statusStyle(selectedClient.status)}>{selectedClient.status}</Badge>
                   </div>
                 </DialogHeader>
               </div>
               <div className="grid gap-5 p-5 sm:p-8">
+                <div className="rounded-2xl bg-cyan-50 p-5 ring-1 ring-cyan-100">
+                  <p className="text-sm text-cyan-800">Осталось занятий</p>
+                  <p className="mt-1 text-3xl font-bold text-cyan-950">
+                    {selectedClient.remainingLessons}{' '}
+                    <span className="text-base font-medium text-cyan-700">из {selectedClient.totalLessons}</span>
+                  </p>
+                </div>
+                <ClientAttendanceHistory history={selectedClient.attendanceHistory} lessons={store.lessons} />
                 {store.authStore.isAdmin && (
-                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <details className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <summary className="cursor-pointer text-sm font-medium text-slate-500">
+                      Управление карточкой
+                    </summary>
                     <div className="flex flex-wrap gap-2">
                       <Button variant="outline" onClick={openEdit} disabled={clientActionLoading}>
                         <Pencil className="mr-2 size-4" /> Редактировать
@@ -1071,32 +1295,8 @@ export const ClientsView = observer(() => {
                     {clientActionError && (
                       <p className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{clientActionError}</p>
                     )}
-                  </section>
+                  </details>
                 )}
-                <section className="grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Остаток занятий</p>
-                    <p className="mt-2 text-2xl font-bold text-cyan-950">
-                      {selectedClient.remainingLessons}
-                      <span className="text-base font-medium text-slate-400"> / {selectedClient.totalLessons}</span>
-                    </p>
-                  </div>
-                  <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Оплачено</p>
-                    <p className="mt-2 text-2xl font-bold text-cyan-950">
-                      {selectedClient.paidAmount > 0
-                        ? `${selectedClient.paidAmount.toLocaleString('ru-RU')} ₽`
-                        : 'Не указано'}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-100">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Нагрузка</p>
-                    <p className="mt-2 text-2xl font-bold text-cyan-950">
-                      {selectedClient.lessonsPerWeek}{' '}
-                      <span className="text-base font-medium text-slate-400">раз/нед.</span>
-                    </p>
-                  </div>
-                </section>
 
                 <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                   <h3 className="mb-4 font-bold text-slate-900">Контактная информация</h3>
@@ -1135,35 +1335,6 @@ export const ClientsView = observer(() => {
                   </div>
                 </section>
 
-                <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                  <h3 className="mb-4 font-bold text-slate-900">Параметры абонемента</h3>
-                  <div className="grid gap-3 sm:grid-cols-4">
-                    <div>
-                      <p className="text-xs text-slate-400">Секция</p>
-                      <p className="mt-1 font-semibold text-slate-800">
-                        {selectedClient.category === 'синхронное плавание' ? 'Синхронное плавание' : 'Плавание'}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">Филиал</p>
-                      <p className="mt-1 font-semibold text-slate-800">
-                        {store.branches.find((branch) => String(branch.id) === String(selectedClient.branchId))?.name ||
-                          'Не указан'}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">Статус оплаты</p>
-                      <p className="mt-1 font-semibold text-slate-700">
-                        {selectedClient.paidAmount > 0 ? 'Сумма внесена' : 'Сумма не указана'}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-400">Назначенных занятий</p>
-                      <p className="mt-1 font-semibold text-slate-800">{selectedClient.assignedLessonIds.length}</p>
-                    </div>
-                  </div>
-                </section>
-
                 <section className="rounded-2xl border border-cyan-100 bg-gradient-to-br from-cyan-50 via-white to-sky-50 p-5 shadow-sm">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="flex items-start gap-3">
@@ -1192,7 +1363,7 @@ export const ClientsView = observer(() => {
                       </div>
                     )}
                   </div>
-                  <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                  <div className="mt-5 grid gap-3 sm:grid-cols-2">
                     <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
                       <p className="text-xs text-slate-500">Оплачено всего</p>
                       <p className="mt-1 text-lg font-bold text-slate-900">
@@ -1200,25 +1371,27 @@ export const ClientsView = observer(() => {
                       </p>
                     </div>
                     <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
-                      <p className="text-xs text-slate-500">Остаток денег</p>
-                      <p className="mt-1 text-lg font-bold text-slate-900">
-                        {selectedClient.paymentBalance.toLocaleString('ru-RU')} ₽
-                      </p>
-                    </div>
-                    <div className="rounded-xl bg-white/80 p-3 ring-1 ring-cyan-100">
-                      <p className="text-xs text-slate-500">Начислено занятий</p>
-                      <p className="mt-1 text-lg font-bold text-slate-900">{selectedClient.totalLessons}</p>
+                      <p className="text-xs text-slate-500">Осталось занятий</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{selectedClient.remainingLessons}</p>
                     </div>
                   </div>
                   <div className="mt-5 flex items-center gap-2 text-sm font-semibold text-slate-800">
                     <History className="size-4 text-cyan-600" /> История платежей
                   </div>
-                  {historyLoading ? (
+                  {historyLoading && paymentHistory.length === 0 ? (
                     <div className="mt-3 flex items-center gap-2 text-sm text-slate-500">
                       <Loader2 className="size-4 animate-spin" /> Загружаем историю…
                     </div>
+                  ) : historyError && paymentHistory.length === 0 ? (
+                    <p role="alert" className="mt-3 text-sm text-red-600">
+                      {historyError}
+                    </p>
                   ) : paymentHistory.length === 0 ? (
-                    <p className="mt-3 text-sm text-slate-500">Платежей пока нет</p>
+                    <p className="mt-3 text-sm text-slate-500">
+                      {selectedClient.paidAmount > 0
+                        ? `В карточке учтено ${selectedClient.paidAmount.toLocaleString('ru-RU')} ₽, но запись платежа в истории отсутствует. Нужно проверить лист «Платежи»; повторно начислять оплату и занятия не нужно.`
+                        : 'Платежей пока нет'}
+                    </p>
                   ) : (
                     <div className="mt-3 grid gap-2">
                       {paymentHistory.slice(0, 8).map((payment) => (
@@ -1249,8 +1422,28 @@ export const ClientsView = observer(() => {
                       ))}
                     </div>
                   )}
+                  {historyError && paymentHistory.length > 0 && (
+                    <p role="alert" className="mt-3 text-sm text-amber-700">
+                      {historyError}
+                    </p>
+                  )}
+                  {(historyError || ledgerAuditError) && store.authStore.isAdmin && (
+                    <Button
+                      variant="outline"
+                      className="mt-3"
+                      disabled={historyLoading || paymentLoading}
+                      onClick={() => void refreshSelectedAccounting(selectedClient.id)}
+                    >
+                      Повторить загрузку истории
+                    </Button>
+                  )}
                   {lessonLedger.length > 0 && (
                     <p className="mt-3 text-xs text-slate-400">В журнале движений: {lessonLedger.length} операций</p>
+                  )}
+                  {ledgerAuditError && (
+                    <p role="alert" className="mt-3 text-sm text-amber-700">
+                      Сверка: {ledgerAuditError}
+                    </p>
                   )}
                   {store.authStore.isAdmin && ledgerAuditChecked && (
                     <div className="mt-5 rounded-xl border border-slate-200 bg-white/80 p-4">
@@ -1463,7 +1656,7 @@ export const ClientsView = observer(() => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isAdjustmentOpen} onOpenChange={setIsAdjustmentOpen}>
+      <Dialog open={isAdjustmentOpen && !!selectedClient} onOpenChange={setIsAdjustmentOpen}>
         <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
           <div className="bg-gradient-to-br from-amber-500 to-orange-600 px-6 py-7 text-white">
             <DialogHeader>
@@ -1520,7 +1713,7 @@ export const ClientsView = observer(() => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isPaymentOpen} onOpenChange={setIsPaymentOpen}>
+      <Dialog open={isPaymentOpen && !!selectedClient} onOpenChange={setIsPaymentOpen}>
         <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
           <div className="bg-gradient-to-br from-cyan-600 to-sky-700 px-6 py-7 text-white">
             <DialogHeader>

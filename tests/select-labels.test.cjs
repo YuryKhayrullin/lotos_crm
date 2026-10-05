@@ -49,3 +49,13 @@ test('real Base UI renders one placeholder for null and a readable account name 
   assert.equal(displayedValue(null, items), 'Выберите филиал')
   assert.equal(displayedValue('1799036797270', items), 'anna')
 })
+
+test('select popup colors are registered in Tailwind and its portal sits above dialogs', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'app/globals.css'), 'utf8')
+  const theme = css.match(/@theme\s*\{([\s\S]*?)\}/)[1]
+  for (const token of ['popover', 'popover-foreground', 'accent', 'accent-foreground', 'input', 'ring']) {
+    assert(theme.includes(`--color-${token}: var(--${token});`), `${token} must generate a real color utility`)
+  }
+  const source = fs.readFileSync(path.join(__dirname, '..', 'components/ui/select.tsx'), 'utf8')
+  assert(source.includes('className="isolate z-[60]"'), 'positioner must sit above z-50 modal content')
+})

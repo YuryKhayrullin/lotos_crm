@@ -7,11 +7,27 @@ const {
   isLessonOnDay,
   lessonOccurrenceDate,
   parseTimeToHHMM,
+  lessonTemporalStatus,
 } = require('../.test-dist/utils/date-core.js')
 
 const lesson = (date, dayOfWeek, isRecurring = false) => ({ date, dayOfWeek, isRecurring })
 const weekStart = new Date('2026-09-21T00:00:00')
 const weekEnd = new Date('2026-09-27T00:00:00')
+
+test('schedule separates upcoming, ongoing and completed at exact start and end boundaries', () => {
+  const status = (hour, minute = 0) =>
+    lessonTemporalStatus('2026-10-05', '17:00', '1 час', new Date(2026, 9, 5, hour, minute))
+  assert.equal(status(16, 59), 'upcoming')
+  assert.equal(status(17), 'ongoing')
+  assert.equal(status(17, 59), 'ongoing')
+  assert.equal(status(18), 'completed')
+  assert.equal(status(19, 41), 'completed')
+  assert.equal(lessonTemporalStatus('2026-10-05', '21:00', '1 час', new Date(2026, 9, 5, 19, 41)), 'upcoming')
+  assert.equal(lessonTemporalStatus('2026-10-05', '23:30', '1 час 30 мин', new Date(2026, 9, 6, 0, 30)), 'ongoing')
+  assert.equal(lessonTemporalStatus('2026-10-05', '17:00', '45 мин', new Date(2026, 9, 5, 17, 45)), 'completed')
+  assert.equal(lessonTemporalStatus(null, '17:00', '1 час', new Date()), 'unknown')
+  assert.equal(lessonTemporalStatus('2026-10-05', '17:00', 'не указана', new Date(2026, 9, 5, 18)), 'unknown')
+})
 
 test('filters dated lessons by week', () => {
   assert.equal(isLessonInWeek(lesson('2026-09-22', 'Вт'), weekStart, weekEnd), true)
