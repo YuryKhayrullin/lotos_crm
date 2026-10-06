@@ -41,6 +41,21 @@ const accountingSnapshot = {
   lessonsPerWeek: 1,
   status: 'Активен',
 }
+
+test('client creation sends the explicit retry key and rejects an unconfirmed success body', async () => {
+  const requests = []
+  let response = {}
+  const api = apiWithFetch(async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return { ok: true, status: 200, json: async () => response }
+  })
+  const payload = { childName: 'Anna', paidAmount: 5500 }
+  await assert.rejects(api.createClient(payload, 'stable-creation'), (error) => error.code === 'INVALID_RESPONSE')
+  response = { id: 'confirmed-client' }
+  assert.equal((await api.createClient(payload, 'stable-creation')).id, 'confirmed-client')
+  assert.deepEqual(requests[0], requests[1])
+  assert.equal(requests[1].payload.requestId, 'stable-creation')
+})
 test('combined accounting sends includeAudit and normally performs one request', async () => {
   const requests = []
   const api = apiWithFetch(async (_url, options) => {

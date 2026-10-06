@@ -323,6 +323,8 @@ const RootStoreModel = types
           const response = yield apiClient.createLesson(lessonData)
           // Нормализуем ответ от сервера, так как Code.gs возвращает объект с ключами из таблицы
           const newLesson = normalizeLesson(response)
+          const existingLesson = self.lessons.find((lesson) => lesson.id === newLesson.id)
+          if (existingLesson) return existingLesson
           self.lessons.push(newLesson)
           return newLesson
         } catch (error: any) {

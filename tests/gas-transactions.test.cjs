@@ -4,6 +4,7 @@ const vm = require('node:vm')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const ts = require('typescript')
 
 const gas = fs.readFileSync(path.join(__dirname, '..', 'backend', 'Code.gs'), 'utf8')
 
@@ -154,7 +155,7 @@ function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
   }
   const properties = new Map([
     ['GAS_HMAC_SECRET', 's'.repeat(32)],
-    ['SCHEMA_VERSION', '12'],
+    ['SCHEMA_VERSION', '13'],
     ['READ_CACHE_VERSION', '1'],
   ])
   const lock = {
@@ -253,6 +254,16 @@ function createHarness(sheetData, { allowUnlockedReads = false } = {}) {
   }
   vm.createContext(context)
   vm.runInContext(gas, context)
+  // Creation fixtures represent a migrated schema. Migration tests omit
+  // branches and exercise setupSchema itself rather than these defaults.
+  if (sheetData.Расписание && sheetData.Филиалы) {
+    for (const [name, headers] of [
+      ['Создание занятий', context.LESSON_CREATION_HEADERS],
+      ['Журнал администрирования', context.ADMIN_AUDIT_HEADERS],
+    ]) {
+      if (!sheets.has(name)) sheets.set(name, makeSheet(name, [Array.from(headers)]))
+    }
+  }
   const canonicalRequireServerAuth = context.requireServerAuth
   context.requireServerAuth = () => ({ id: 'admin-1', username: 'admin', role: 'admin', branchId: null })
   context.verifySignedEnvelope = () => state.envelope
@@ -289,6 +300,466 @@ const ACCOUNTING_CLIENT_HEADERS = [
   'assignedLessonIds',
   'childName',
 ]
+// Execute the real BFF policy/router and fresh Users authorization. Only the
+// signed transport and Google services are local test doubles.
+function stageOneHarness() {
+  const clientHeaders = ACCOUNTING_CLIENT_HEADERS.concat([
+    'parentName',
+    'phone',
+    'email',
+    'birthDate',
+    'assignedLessonId',
+  ])
+  const clients = [
+    [
+      'a',
+      'branch-1',
+      'плавание',
+      1,
+      5500,
+      2,
+      2,
+      true,
+      100,
+      'Активен',
+      '',
+      'drive:private',
+      '[]',
+      'legacy',
+      'Anna',
+      'Parent',
+      '+70000000000',
+      'private@example.org',
+      '01.01.2020',
+      '',
+    ],
+    [
+      'b',
+      'branch-1',
+      'плавание',
+      1,
+      5500,
+      2,
+      2,
+      true,
+      100,
+      'Активен',
+      '',
+      '',
+      '[]',
+      '',
+      'Boris',
+      'Parent',
+      '',
+      '',
+      '',
+      'legacy',
+    ],
+    [
+      'unassigned',
+      'branch-1',
+      'плавание',
+      1,
+      0,
+      0,
+      0,
+      false,
+      0,
+      'Активен',
+      '',
+      '',
+      '[]',
+      '',
+      'Unassigned',
+      '',
+      '',
+      '',
+      '',
+      '',
+    ],
+    [
+      'foreign',
+      'branch-2',
+      'плавание',
+      1,
+      0,
+      0,
+      0,
+      false,
+      0,
+      'Активен',
+      '',
+      '',
+      '[]',
+      '',
+      'Foreign',
+      '',
+      '',
+      '',
+      '',
+      '',
+    ],
+  ]
+  const lessonHeaders = [
+    'id',
+    'branchId',
+    'date',
+    'dayOfWeek',
+    'time',
+    'category',
+    'isRecurring',
+    'clientIds',
+    'title',
+    'coachName',
+    'pool',
+    'duration',
+    'maxCapacity',
+    'count',
+    'privateNote',
+  ]
+  const harness = createHarness(
+    {
+      Users: [
+        REGISTRATION_HEADERS,
+        ['admin-1', 'admin', 'hash', '1', '', 'Активен', '', ''],
+        ['coach-1', 'coach', 'hash', '2', 'branch-1', 'Активен', '', ''],
+      ],
+      Филиалы: [
+        ['id', 'name', 'address', 'privateNote'],
+        ['branch-1', 'Pool', 'Address', 'secret'],
+        ['branch-2', 'Other', 'Other address', 'secret'],
+      ],
+      Тренеры: [
+        ['id', 'name', 'branchId', 'phone', 'birthDate', 'userId'],
+        ['profile', 'Coach', 'branch-1', 'private-phone', '01.01.1990', 'coach-1'],
+      ],
+      Клиенты: [clientHeaders, ...clients],
+      Расписание: [
+        lessonHeaders,
+        ...[
+          ['group', 'a,b'],
+          ['empty', '[]'],
+          ['legacy', ''],
+          ['unresolved', ''],
+        ].map(([id, ids]) => [
+          id,
+          'branch-1',
+          '2026-10-06',
+          'Вт',
+          '17:00',
+          'плавание',
+          false,
+          ids,
+          id,
+          'Coach',
+          'Pool',
+          '1 час',
+          10,
+          '0 / 10',
+          'secret',
+        ]),
+        [
+          'foreign-lesson',
+          'branch-2',
+          '2026-10-06',
+          'Вт',
+          '17:00',
+          'плавание',
+          false,
+          '[]',
+          'Other',
+          '',
+          '',
+          '1 час',
+          10,
+          '',
+          'secret',
+        ],
+      ],
+      Платежи: [PAYMENT_HEADERS],
+      'Журнал занятий': [
+        LEDGER_HEADERS,
+        ...['a', 'b'].map((clientId) =>
+          ledgerRow({ clientId, lessonsDelta: 2, totalLessonsDelta: 2, balanceAfter: 2, totalLessonsAfter: 2 }),
+        ),
+      ],
+    },
+    { allowUnlockedReads: true },
+  )
+  harness.context.requireServerAuth = harness.canonicalRequireServerAuth
+  const user = { id: 'coach-1', username: 'coach', role: 'coach', branchId: 'branch-1' }
+  const admin = { id: 'admin-1', username: 'admin', role: 'admin', branchId: null }
+  let gasCalls = 0
+  const gasCall = async ({ action, payload, auth }) => {
+    gasCalls++
+    harness.state.envelope = { action, payload, auth }
+    return JSON.parse(
+      harness.context.doPost({ postData: { contents: '{"signature":"mock","signedEnvelope":"mock"}' } }).value,
+    )
+  }
+  const moduleExports = {}
+  const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, '..', 'lib/server/crm-router.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText
+  vm.runInNewContext(compiled, {
+    exports: moduleExports,
+    require(name) {
+      if (name === 'server-only') return {}
+      if (name === './policy') return require('../.test-dist/server/policy.js')
+      if (name === './gas') return { callGas: gasCall }
+      if (name === './passwords') return {}
+      throw new Error('Unexpected dependency: ' + name)
+    },
+  })
+  return {
+    ...harness,
+    user,
+    admin,
+    gasCalls: () => gasCalls,
+    gasCall,
+    bff: (action, payload, actor = user) => moduleExports.dispatchCrmAction({ action, payload, user: actor }),
+  }
+}
+
+test('stage 1 denies coach lesson mutations independently in BFF and authoritative GAS', async () => {
+  const h = stageOneHarness()
+  const payloads = {
+    createLesson: { branchId: 'branch-1', date: '2026-10-06', time: '18:00', title: 'Class' },
+    createLessonWithClients: { branchId: 'branch-1', date: '2026-10-06', time: '18:00', title: 'Class', clientIds: [] },
+    updateLesson: { id: 'group', title: 'Changed' },
+    deleteLesson: { id: 'group' },
+  }
+  for (const [action, fields] of Object.entries(payloads)) {
+    const payload = { ...fields, requestId: 'denied-' + action }
+    await assert.rejects(h.bff(action, payload), (error) => error.status === 403)
+    assert.equal((await h.gasCall({ action, payload, auth: h.user })).code, 'FORBIDDEN')
+  }
+  assert.equal(h.gasCalls(), 4, 'BFF refusals must never call GAS')
+  assert.equal(h.state.writes.length, 0)
+})
+
+test('stage 1 projects every coach read and caches only safe branch-scoped objects', async () => {
+  const h = stageOneHarness()
+  const forbidden = [
+    'paidAmount',
+    'paymentBalance',
+    'receiptUrl',
+    'attendanceHistory',
+    'phone',
+    'email',
+    'birthDate',
+    'password',
+    'passwordHash',
+    'userId',
+    'privateNote',
+  ]
+  function inspect(value) {
+    if (!value || typeof value !== 'object') return
+    for (const [key, child] of Object.entries(value)) {
+      assert(!forbidden.includes(key), key)
+      inspect(child)
+    }
+  }
+  for (const sheet of ['Клиенты', 'Филиалы', 'Тренеры', 'Расписание']) {
+    const first = await h.bff('getSheet', { sheet, branchId: 'branch-2' })
+    assert(Array.isArray(first))
+    inspect(first)
+    assert(first.every((row) => (sheet === 'Филиалы' ? row.id === 'branch-1' : row.branchId === 'branch-1')))
+    const reads = h.state.events.filter((event) => event === 'read:' + sheet).length
+    inspect(await h.bff('getSheet', { sheet }))
+    assert.equal(h.state.events.filter((event) => event === 'read:' + sheet).length, reads, 'safe cache hit')
+  }
+  for (const action of ['getClients', 'getDashboardSummary', 'searchClientOptions', 'getBootstrapData'])
+    inspect(await h.bff(action, {}))
+  assert.equal((await h.bff('getSheet', { sheet: 'Клиенты' }, h.admin))[0].paidAmount, 5500, 'admin contract retained')
+  h.sheets.get('Users').rows[2][5] = 'Отключен'
+  assert.equal(
+    (await h.bff('getSheet', { sheet: 'Клиенты' })).code,
+    'UNAUTHORIZED',
+    'cached data never bypasses fresh Users',
+  )
+})
+
+test('stage 1 uses the same explicit and legacy membership for roster and attendance, with no partial bulk writes', async () => {
+  const h = stageOneHarness()
+  const roster = (lessonId) => h.bff('getLessonRoster', { lessonId, date: '2026-10-06' })
+  assert.deepEqual((await roster('legacy')).clients.map((row) => row.id).sort(), ['a', 'b'])
+  assert.equal((await roster('unresolved')).clients.length, 0)
+  assert.equal((await roster('empty')).clients.length, 0)
+  assert.deepEqual((await roster('group')).clients.map((row) => row.id).sort(), ['a', 'b'])
+  h.sheets.get('Расписание').rows[1][7] = '["a"]'
+  assert.deepEqual(
+    (await roster('group')).clients.map((row) => row.id),
+    ['a'],
+  )
+  for (const [lessonId, clientId] of [
+    ['group', 'b'],
+    ['empty', 'a'],
+    ['unresolved', 'a'],
+    ['legacy', 'unassigned'],
+  ]) {
+    const result = await h.bff('recordAttendance', {
+      lessonId,
+      clientId,
+      date: '2026-10-06',
+      status: 'absent',
+      requestId: lessonId + ':' + clientId,
+    })
+    assert.equal(result.code, 'FORBIDDEN')
+  }
+  const beforeClients = JSON.stringify(h.sheets.get('Клиенты').rows)
+  const beforeLedger = JSON.stringify(h.sheets.get('Журнал занятий').rows)
+  const result = await h.bff('recordBulkAttendance', {
+    requestId: 'mixed',
+    attendance: ['a', 'b'].map((clientId) => ({ clientId, lessonId: 'group', date: '2026-10-06', status: 'attended' })),
+  })
+  assert.equal(result.code, 'FORBIDDEN')
+  assert.equal(JSON.stringify(h.sheets.get('Клиенты').rows), beforeClients)
+  assert.equal(JSON.stringify(h.sheets.get('Журнал занятий').rows), beforeLedger)
+  assert.equal(h.state.writes.length, 0)
+  const mark = { clientId: 'a', lessonId: 'group', date: '2026-10-06', status: 'attended', requestId: 'valid' }
+  assert.equal((await h.bff('recordAttendance', mark)).success, true)
+  const remaining = h.sheets.get('Клиенты').rows[1][6]
+  assert.equal((await h.bff('recordAttendance', mark)).results[0].duplicate, true)
+  assert.equal(h.sheets.get('Клиенты').rows[1][6], remaining)
+})
+
+test('stage 1 rejects protected or malformed lesson updates before writing, and old JWT cannot move a lesson', async () => {
+  const h = stageOneHarness()
+  for (const fields of [
+    { branchId: 'branch-2' },
+    { clientIds: ['a'] },
+    { count: '99' },
+    { privateNote: 'changed' },
+    { time: '25:00' },
+    { date: '2026-02-30' },
+    { category: 'invalid' },
+    { isRecurring: 'true' },
+    { maxCapacity: 0 },
+    { duration: 'invalid' },
+  ]) {
+    const result = await h.bff(
+      'updateLesson',
+      { id: 'group', ...fields, requestId: 'invalid-' + JSON.stringify(fields) },
+      h.admin,
+    )
+    assert.equal(result.code, 'VALIDATION', JSON.stringify(fields))
+    assert.equal(h.state.writes.length, 0)
+  }
+  h.sheets.get('Users').rows[2][4] = 'branch-2'
+  h.sheets.get('Расписание').rows[1][1] = 'branch-2'
+  await assert.rejects(
+    h.bff('updateLesson', { id: 'group', title: 'Changed', requestId: 'stale' }),
+    (error) => error.status === 403,
+  )
+  assert.equal(
+    (
+      await h.gasCall({
+        action: 'updateLesson',
+        payload: { id: 'group', branchId: 'branch-1', title: 'Changed', requestId: 'stale-gas' },
+        auth: h.user,
+      })
+    ).status,
+    'error',
+  )
+  assert.equal(h.sheets.get('Расписание').rows[1][1], 'branch-2')
+  const result = await h.bff(
+    'updateLesson',
+    {
+      id: '  group  ',
+      title: 'Updated',
+      time: '18:00',
+      duration: '45 мин',
+      maxCapacity: 12,
+      isRecurring: false,
+      requestId: 'admin-update',
+    },
+    h.admin,
+  )
+  assert.equal(result.success, true)
+  assert.equal(h.sheets.get('Расписание').rows[1][0], 'group', 'id is a locator, not a writable cell')
+  assert.equal(h.sheets.get('Расписание').rows[1][1], 'branch-2')
+  assert.equal(h.sheets.get('Расписание').rows[1][8], 'Updated')
+})
+
+test('stage 1 creates explicit empty groups and admin enrollment synchronizes roster membership', async () => {
+  const h = stageOneHarness()
+  const created = await h.bff(
+    'createLesson',
+    {
+      branchId: 'branch-1',
+      date: '2026-10-06',
+      time: '18:00',
+      title: 'New group',
+      category: 'плавание',
+      dayOfWeek: 'Вт',
+      isRecurring: false,
+      requestId: 'empty-creation',
+    },
+    h.admin,
+  )
+  assert.equal(created.clientIds, '[]')
+  const roster = () => h.bff('getLessonRoster', { lessonId: created.id, date: '2026-10-06' })
+  assert.equal((await roster()).clients.length, 0)
+  const assignment = { clientId: 'a', lessonId: created.id, requestId: 'enrollment' }
+  assert.equal((await h.bff('assignClientLesson', assignment, h.admin)).success, true)
+  assert.deepEqual(
+    (await roster()).clients.map((row) => row.id),
+    ['a'],
+  )
+  const writes = h.state.writes.length
+  assert.equal(
+    (await h.bff('assignClientLesson', { ...assignment, requestId: 'same-enrollment' }, h.admin)).alreadyAssigned,
+    true,
+  )
+  assert.equal(h.state.writes.length, writes)
+  const outside = await h.bff(
+    'assignClientLesson',
+    { ...assignment, clientId: 'foreign', requestId: 'foreign-enrollment' },
+    h.admin,
+  )
+  assert.equal(outside.code, 'FORBIDDEN')
+  assert.equal(h.state.writes.length, writes)
+})
+
+test('stage 1 rolls back both assignment and explicit group when its audit fails', async () => {
+  const h = stageOneHarness()
+  const beforeClients = JSON.stringify(h.sheets.get('Клиенты').rows)
+  const beforeLessons = JSON.stringify(h.sheets.get('Расписание').rows)
+  h.context.auditAdminMutation = () => {
+    throw new Error('Schema audit failure')
+  }
+  const result = await h.bff(
+    'assignClientLesson',
+    { clientId: 'a', lessonId: 'empty', requestId: 'audit-failure' },
+    h.admin,
+  )
+  assert.equal(result.code, 'SCHEMA')
+  assert.equal(JSON.stringify(h.sheets.get('Клиенты').rows), beforeClients)
+  assert.equal(JSON.stringify(h.sheets.get('Расписание').rows), beforeLessons)
+})
+
+test('stage 1 fails closed on malformed explicit enrollment and missing branch headers', async () => {
+  const h = stageOneHarness()
+  h.sheets.get('Расписание').rows[3][7] = '[broken'
+  assert.equal((await h.bff('getLessonRoster', { lessonId: 'legacy', date: '2026-10-06' })).code, 'SCHEMA')
+  assert.equal(
+    (
+      await h.bff('recordAttendance', {
+        clientId: 'a',
+        lessonId: 'legacy',
+        date: '2026-10-06',
+        status: 'absent',
+        requestId: 'broken-enrollment',
+      })
+    ).code,
+    'SCHEMA',
+  )
+  h.sheets.get('Клиенты').rows[0][1] = 'missing-branch'
+  assert.equal((await h.bff('getClients', {})).code, 'SCHEMA')
+  assert.equal(h.state.writes.length, 0)
+})
+
 function accountingHarness() {
   return createHarness(
     {
@@ -864,9 +1335,9 @@ test('schema migration is repeatable and preserves historical lesson balances', 
     ],
   })
 
-  assert.equal(harness.context.setupSchema(), 'Schema 12 is ready')
-  assert.equal(harness.context.setupSchema(), 'Schema 12 is ready')
-  assert.equal(harness.properties.get('SCHEMA_VERSION'), '12')
+  assert.equal(harness.context.setupSchema(), 'Schema 13 is ready')
+  assert.equal(harness.context.setupSchema(), 'Schema 13 is ready')
+  assert.equal(harness.properties.get('SCHEMA_VERSION'), '13')
 
   const clientRows = harness.sheets.get('Клиенты').rows
   const clientHeaders = clientRows[0]
@@ -1547,6 +2018,75 @@ test('attendance retry returns current balances after a later correction, even w
   }
 })
 
+test('stage 2 literal and historical escaped attendance markers survive correction and cache expiry', () => {
+  for (const prefix of ['+', '-', '=', '@'])
+    for (const escaped of [false, true]) {
+      const h = atomicAttendanceHarness()
+      assert.equal(h.request('recordAttendance', atomicMark(prefix + 'original')).success, true)
+      const ledger = h.sheets.get('Журнал занятий')
+      const requestColumn = ledger.rows[0].indexOf('requestId')
+      const marker = ledger.rows.find((row) => String(row[requestColumn]).includes(prefix + 'original'))
+      assert.equal(marker[requestColumn], prefix + 'original:client-1')
+      if (escaped) marker[requestColumn] = "'" + marker[requestColumn]
+      assert.equal(h.request('recordAttendance', atomicMark('correction', 'absent')).success, true)
+      h.cacheValues.clear()
+      const writes = h.state.writes.length
+      const result = h.request('recordAttendance', atomicMark(prefix + 'original'))
+      assert.equal(result.results[0].duplicate, true)
+      assert.equal(result.results[0].client.remainingLessons, 2)
+      assert.equal(h.state.writes.length, writes)
+    }
+})
+
+test('stage 2 lesson creation survives lost acknowledgement and cache expiry with one atomic commit', async () => {
+  for (const action of ['createLesson', 'createLessonWithClients']) {
+    const h = stageOneHarness()
+    const payload = {
+      branchId: 'branch-1',
+      date: '2026-10-06',
+      time: '18:00',
+      title: 'Durable',
+      category: 'плавание',
+      requestId: 'durable-lesson',
+      ...(action === 'createLesson' ? { clientId: 'a' } : { clientIds: ['a', 'b'] }),
+    }
+    h.atomicOptions.loseAcknowledgement = true
+    assert.equal((await h.bff(action, payload, h.admin)).code, 'SCHEMA')
+    h.cacheValues.clear()
+    const result = await h.bff(action, payload, h.admin)
+    assert.ok(result.id)
+    assert.equal(h.sheets.get('Расписание').rows.filter((row) => row[0] === result.id).length, 1)
+    assert.equal(h.atomicBatches.length, 1)
+    const writes = h.state.writes.length
+    h.cacheValues.clear()
+    assert.deepEqual(await h.bff(action, payload, h.admin), result)
+    assert.equal((await h.bff(action, { ...payload, title: 'Different' }, h.admin)).code, 'CONFLICT')
+    assert.equal(h.state.writes.length, writes)
+  }
+})
+
+test('stage 2 empty lesson creation rejects unavailable atomic service or missing durable schema without writes', async () => {
+  for (const failure of ['service', 'journal', 'audit', 'old-schema', 'rejection']) {
+    const h = stageOneHarness()
+    const before = JSON.stringify([...h.sheets.entries()].map(([name, sheet]) => [name, sheet.rows]))
+    if (failure === 'service') delete h.context.Sheets
+    if (failure === 'journal') h.sheets.get('Создание занятий').rows[0][0] = 'broken'
+    if (failure === 'audit') h.sheets.get('Журнал администрирования').rows[0][0] = 'broken'
+    if (failure === 'old-schema') h.properties.set('SCHEMA_VERSION', '12')
+    if (failure === 'rejection') h.atomicOptions.failBefore = true
+    const expected = JSON.stringify([...h.sheets.entries()].map(([name, sheet]) => [name, sheet.rows]))
+    const result = await h.bff(
+      'createLesson',
+      { branchId: 'branch-1', date: '2026-10-06', time: '18:00', title: 'Empty', requestId: 'failed-creation' },
+      h.admin,
+    )
+    assert.equal(result.code, 'SCHEMA', failure)
+    assert.equal(JSON.stringify([...h.sheets.entries()].map(([name, sheet]) => [name, sheet.rows])), expected)
+    assert.equal(h.state.writes.length, 0)
+    assert.ok(before)
+  }
+})
+
 test('expired attendance retries never undo a later correction, including absence requests', () => {
   const harness = resilienceAttendanceHarness()
   const mark = (status, requestId) =>
@@ -1622,7 +2162,7 @@ test('first attendance on a legacy card establishes its opening ledger balance w
     'assignedLessonIds',
   ]
   const harness = createHarness({
-    Клиенты: [clientHeaders, ['legacy-client', 'branch-1', '', 3, 4, '[]', 'Активен', false, '', '', 0, '']],
+    Клиенты: [clientHeaders, ['legacy-client', 'branch-1', '', 3, 4, '[]', 'Активен', false, '', '', 0, 'lesson-1']],
     Платежи: [PAYMENT_HEADERS],
     'Журнал занятий': [LEDGER_HEADERS],
     Расписание: [
@@ -1682,7 +2222,20 @@ test('first attendance restores a confirmed legacy payment that is missing from 
   const harness = createHarness({
     Клиенты: [
       clientHeaders,
-      ['paid-client', 'branch-1', 'плавание', 8, 8, '[]', 'Активен', true, '2026-09-27T09:33:31.754Z', '', 0, ''],
+      [
+        'paid-client',
+        'branch-1',
+        'плавание',
+        8,
+        8,
+        '[]',
+        'Активен',
+        true,
+        '2026-09-27T09:33:31.754Z',
+        '',
+        0,
+        'lesson-1',
+      ],
     ],
     Платежи: [PAYMENT_HEADERS, payment],
     'Журнал занятий': [LEDGER_HEADERS],
@@ -1726,8 +2279,8 @@ test('bulk attendance writes no client marks when any selected client fails vali
   const harness = createHarness({
     Клиенты: [
       headers,
-      ['swimmer', 'branch-1', 'плавание', 1, 1, '[]', 'Активен', true, '', '', 0, ''],
-      ['synchronized', 'branch-1', 'синхронное плавание', 1, 1, '[]', 'Активен', true, '', '', 0, ''],
+      ['swimmer', 'branch-1', 'плавание', 1, 1, '[]', 'Активен', true, '', '', 0, 'lesson-1'],
+      ['synchronized', 'branch-1', 'синхронное плавание', 1, 1, '[]', 'Активен', true, '', '', 0, 'lesson-1'],
     ],
     Платежи: [PAYMENT_HEADERS],
     'Журнал занятий': [
@@ -2235,7 +2788,7 @@ test('legacy schedule is migrated before a dated lesson can be created', () => {
   assert.equal(created.isRecurring, 'false')
   assert.equal(rows.length, 3)
 })
-test('coach roster reads every client in the lesson branch and category, beyond the first 100', () => {
+test('coach roster reads assigned clients beyond the first 100 and explicit groups never admit unassigned clients', () => {
   const headers = [
     'id',
     'childName',
@@ -2287,7 +2840,7 @@ test('coach roster reads every client in the lesson branch and category, beyond 
   )
   harness.context.requireServerAuth = () => ({ id: 'coach-1', username: 'coach', role: 'coach', branchId: 'branch-1' })
   const roster = harness.request('getLessonRoster', { lessonId: 'lesson-1', date: '2026-10-02' })
-  assert.equal(roster.clients.length, 131)
+  assert.equal(roster.clients.length, 130)
   assert.equal(harness.state.acquisitions, 0)
   assert.equal(
     roster.clients.some((client) => client.id === 'client-134'),
@@ -2300,8 +2853,8 @@ test('coach roster reads every client in the lesson branch and category, beyond 
   )
   assert.equal(
     roster.clients.some((client) => client.id === 'client-132'),
-    true,
-    'an explicit lesson assignment is not required for a group roster',
+    false,
+    'legacy lessons require an explicit assignment',
   )
   const schedule = harness.sheets.get('Расписание')
   schedule.rows[0].push('clientIds')
@@ -2319,7 +2872,7 @@ test('coach roster reads every client in the lesson branch and category, beyond 
     status: 'absent',
     requestId: 'unassigned-category-client',
   })
-  assert.equal(unassignedAttendance.success, true)
+  assert.equal(unassignedAttendance.code, 'FORBIDDEN')
   const wrongCategory = harness.request('recordAttendance', {
     clientId: 'client-134',
     lessonId: 'lesson-1',
@@ -2982,7 +3535,7 @@ test('createLesson creates and assigns a lesson to a client in one mutation', ()
       ['id', 'branchId', 'status', 'assignedLessonIds'],
       ['client-1', 'branch-1', 'Активен', 'lesson-old'],
     ],
-    Расписание: [['id', 'branchId', 'date', 'dayOfWeek', 'time', 'title', 'category', 'isRecurring']],
+    Расписание: [['id', 'branchId', 'date', 'dayOfWeek', 'time', 'title', 'category', 'isRecurring', 'clientIds']],
   })
 
   const created = harness.request('createLesson', {
@@ -3000,7 +3553,7 @@ test('createLesson creates and assigns a lesson to a client in one mutation', ()
   assert.equal(created.clientAssigned, true)
   assert.equal(harness.state.acquisitions, 1)
   assert.equal(harness.sheets.get('Расписание').rows.length, 2)
-  assert.match(harness.sheets.get('Клиенты').rows[1][3], /^lesson-old,\d+-\d+$/)
+  assert.equal(harness.sheets.get('Клиенты').rows[1][3], 'lesson-old,' + created.id)
   assert.equal(
     harness.state.events.filter((event) => event === 'read:Расписание').length,
     1,
@@ -3096,7 +3649,7 @@ test('group lesson rejects an invalid member before creating or enrolling anyone
   }
 })
 
-test('group lesson rolls back earlier enrollments when a later write fails', () => {
+test('group lesson API rejection leaves all enrollments and the lesson unchanged', () => {
   const harness = createHarness({
     Филиалы: [
       ['id', 'name'],
@@ -3110,18 +3663,7 @@ test('group lesson rolls back earlier enrollments when a later write fails', () 
     Расписание: [['id', 'branchId', 'date', 'dayOfWeek', 'time', 'title', 'category', 'isRecurring', 'clientIds']],
   })
   const sheet = harness.sheets.get('Клиенты')
-  const original = sheet.getRange
-  let fail = true
-  sheet.getRange = function (...args) {
-    const range = original.apply(this, args)
-    if (args[0] === 3 && fail) {
-      fail = false
-      range.setValues = () => {
-        throw new Error('write failed')
-      }
-    }
-    return range
-  }
+  harness.atomicOptions.failBefore = true
   const result = harness.request('createLessonWithClients', {
     branchId: 'branch-1',
     date: '2026-10-04',
@@ -3143,7 +3685,7 @@ test('createLesson removes the new lesson when client assignment fails', () => {
       ['branch-1', 'Pool'],
     ],
     Клиенты: [['id', 'branchId', 'status', 'assignedLessonIds']],
-    Расписание: [['id', 'branchId', 'date', 'dayOfWeek', 'time', 'title', 'category', 'isRecurring']],
+    Расписание: [['id', 'branchId', 'date', 'dayOfWeek', 'time', 'title', 'category', 'isRecurring', 'clientIds']],
   })
 
   const result = harness.request('createLesson', {

@@ -19,6 +19,13 @@ test('admin can use administrative actions', () => {
 })
 
 test('coach cannot use administrative actions', () => {
+  for (const action of ['createLesson', 'createLessonWithClients', 'updateLesson', 'deleteLesson']) {
+    assert.throws(
+      () => assertActionAllowed(action, coach),
+      (error) => error.status === 403,
+    )
+    assert.doesNotThrow(() => assertActionAllowed(action, admin))
+  }
   assert.throws(() => assertActionAllowed('createClient', coach), /Недостаточно прав/)
   assert.throws(() => assertActionAllowed('deleteCoach', coach), /Недостаточно прав/)
   assert.throws(() => assertActionAllowed('deactivateUser', coach), /Недостаточно прав/)

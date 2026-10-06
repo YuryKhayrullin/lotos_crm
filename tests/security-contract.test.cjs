@@ -300,7 +300,7 @@ test('dead edit actions are absent while client editing remains connected to the
 })
 
 test('all CRM mutations share a lock and administrative changes have a privacy-safe audit trail', () => {
-  assert.match(gas, /var SCHEMA_VERSION = '12'/)
+  assert.match(gas, /var SCHEMA_VERSION = '13'/)
   assert.match(gas, /function writeChangedRowCells\(/)
   assert.match(gas, /function appendAdminAudit\(/)
   assert.match(gas, /function onEdit\(e\)/)

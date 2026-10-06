@@ -1,6 +1,9 @@
 import type { SessionUser } from './session'
 
 const ADMIN_ONLY = new Set([
+  'createLesson',
+  'updateLesson',
+  'deleteLesson',
   'createLessonWithClients',
   'getUsers',
   'assignUserBranch',
@@ -33,9 +36,6 @@ const COACH_ALLOWED = new Set([
   'getDashboardSummary',
   'searchClientOptions',
   'getLessonRoster',
-  'createLesson',
-  'updateLesson',
-  'deleteLesson',
   'recordAttendance',
   'recordBulkAttendance',
 ])

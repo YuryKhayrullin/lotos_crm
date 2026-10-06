@@ -87,7 +87,7 @@ export const ScheduleView = observer(() => {
   )
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<'день' | 'неделя'>(store.authStore.isCoach ? 'день' : 'неделя')
+  const [viewMode, setViewMode] = useState<'день' | 'неделя'>('день')
 
   // Получаем выбранную дату для режима "день"
   const selectedDayData = DAYS.find((d) => d.key === selectedDay)

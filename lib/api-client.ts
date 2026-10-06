@@ -576,8 +576,14 @@ class ApiClient {
       .filter((item) => !category || item.category === category)
   }
 
-  async createClient(clientData: CreateClientDto): Promise<IClient> {
-    return this.request<IClient>('createClient', clientData as unknown as JsonObject)
+  async createClient(clientData: CreateClientDto, requestId: string): Promise<IClient> {
+    const response = await this.request<IClient>('createClient', { ...clientData, requestId } as unknown as JsonObject)
+    if (!response || typeof response.id !== 'string' || !response.id.trim())
+      throw new ApiError(502, {
+        code: 'INVALID_RESPONSE',
+        message: 'Создание клиента не подтверждено. Повторите тот же запрос.',
+      })
+    return response
   }
 
   async deleteClient(id: string): Promise<void> {
@@ -720,6 +726,11 @@ class ApiClient {
       count ? 'createLessonWithClients' : 'createLesson',
       lessonData,
     )
+    if (!response || typeof response.id !== 'string' || !response.id.trim())
+      throw new ApiError(502, {
+        code: 'INVALID_RESPONSE',
+        message: 'Создание занятия не подтверждено. Повторите тот же запрос.',
+      })
     if (count && response.clientsAssigned !== count)
       throw new ApiError(502, {
         message: 'Сервис не подтвердил запись всех клиентов. Обновите расписание перед повтором.',

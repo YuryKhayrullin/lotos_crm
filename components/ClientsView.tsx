@@ -6,6 +6,7 @@ import { useStore } from '@/store/StoreProvider'
 import { CreateClientDto } from '@/store/models'
 import { calculateAge, formatBirthDate, formatPhone } from '@/lib/formatters'
 import { normalizeClient } from '@/lib/normalizers'
+import { CreationRetry } from '@/lib/creation-retry'
 import {
   apiClient,
   ApiError,
@@ -200,6 +201,8 @@ export const ClientsView = observer(() => {
   )
   const [formError, setFormError] = useState('')
   const [isCreating, setIsCreating] = useState(false)
+  const creationRetry = useRef(new CreationRetry<CreateClientDto>())
+  const [creationPending, setCreationPending] = useState(false)
   const [isPaymentOpen, setIsPaymentOpen] = useState(false)
   const [paymentAmount, setPaymentAmount] = useState('')
   const [paymentComment, setPaymentComment] = useState('')
@@ -853,12 +856,17 @@ export const ClientsView = observer(() => {
     })
 
   const openAdd = () => {
+    if (creationRetry.current.attempt) {
+      setIsAddOpen(true)
+      return
+    }
     setFormError('')
     setFormData(emptyForm(store.selectedBranchId || String(store.branches[0]?.id || '')))
     setIsAddOpen(true)
   }
 
   const handleSubmit = async () => {
+    if (creationRetry.current.running) return
     if (!formData.childName.trim() || !formData.parentName.trim()) return setFormError('Укажите имя ребёнка и родителя')
     if (formData.phone.replace(/\D/g, '').length < 11) return setFormError('Введите полный номер телефона')
     if (!formData.category || !formData.lessonsPerWeek || !formData.branchId)
@@ -895,15 +903,31 @@ export const ClientsView = observer(() => {
     }
     setIsCreating(true)
     try {
-      await apiClient.createClient(clientData)
+      const result = await creationRetry.current.submit(
+        clientData,
+        createRequestId,
+        (snapshot, requestId) => apiClient.createClient(snapshot, requestId),
+        (error) =>
+          error instanceof ApiError &&
+          ['VALIDATION', 'FORBIDDEN', 'UNAUTHORIZED', 'NOT_FOUND', 'BUSY'].includes(error.code || ''),
+      )
+      if (!result) return
       refreshClients()
       setIsAddOpen(false)
       setFormData(emptyForm(formData.branchId))
       setFormError('')
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Не удалось сохранить клиента')
+      setFormError(
+        creationRetry.current.attempt
+          ? 'Создание не подтверждено. Данные сохранены для повтора того же запроса. Не создавайте клиента заново и не перезагружайте страницу. ' +
+              (error instanceof Error ? error.message : '')
+          : error instanceof Error
+            ? error.message
+            : 'Не удалось сохранить клиента',
+      )
     } finally {
       setIsCreating(false)
+      setCreationPending(Boolean(creationRetry.current.attempt))
     }
   }
 
@@ -1039,7 +1063,12 @@ export const ClientsView = observer(() => {
         </div>
       )}
 
-      <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+      <Dialog
+        open={isAddOpen}
+        onOpenChange={(open) => {
+          if (open || (!creationRetry.current.running && !creationRetry.current.attempt)) setIsAddOpen(open)
+        }}
+      >
         <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
           <div className="bg-gradient-to-br from-cyan-600 to-sky-700 px-6 py-7 text-white sm:px-8">
             <DialogHeader>
@@ -1057,158 +1086,159 @@ export const ClientsView = observer(() => {
               </div>
             )}
 
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center gap-3">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-cyan-50 text-cyan-700">
-                  <UserRound className="size-4" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900">Личные данные</h3>
-                  <p className="text-xs text-slate-500">Основная информация о ребёнке и родителе</p>
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">
-                  <span>Имя ребёнка</span>
-                  <Input
-                    placeholder="Например, Екатерина"
-                    value={formData.childName}
-                    onChange={(event) => updateForm('childName', event.target.value)}
-                    className="h-11 rounded-xl"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Имя родителя</span>
-                  <Input
-                    placeholder="Имя и фамилия"
-                    value={formData.parentName}
-                    onChange={(event) => updateForm('parentName', event.target.value)}
-                    className="h-11 rounded-xl"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Телефон</span>
-                  <Input
-                    placeholder="+7 (___) ___-__-__"
-                    value={formData.phone}
-                    onChange={(event) => updateForm('phone', formatPhone(event.target.value))}
-                    className="h-11 rounded-xl"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>
-                    Email <em className="font-normal text-slate-400">необязательно</em>
-                  </span>
-                  <Input
-                    type="email"
-                    placeholder="parent@mail.ru"
-                    value={formData.email}
-                    onChange={(event) => updateForm('email', event.target.value)}
-                    className="h-11 rounded-xl"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Дата рождения</span>
-                  <Input
-                    placeholder="ДД.ММ.ГГГГ"
-                    value={formData.birthDate}
-                    onChange={(event) => updateForm('birthDate', formatBirthDate(event.target.value))}
-                    maxLength={10}
-                    className="h-11 rounded-xl"
-                  />
-                </label>
-              </div>
-            </section>
-
-            <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center gap-3">
-                <div className="flex size-9 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
-                  <Waves className="size-4" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900">Абонемент</h3>
-                  <p className="text-xs text-slate-500">Секция, нагрузка и филиал</p>
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Секция</span>
-                  <select
-                    value={formData.category}
-                    onChange={(event) => updateForm('category', event.target.value)}
-                    className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
-                  >
-                    <option value="">Выберите секцию</option>
-                    <option value="плавание">Плавание</option>
-                    <option value="синхронное плавание">Синхронное плавание</option>
-                  </select>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Занятий в неделю</span>
-                  <select
-                    value={formData.lessonsPerWeek}
-                    onChange={(event) => updateForm('lessonsPerWeek', event.target.value)}
-                    className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
-                  >
-                    <option value="">Выберите нагрузку</option>
-                    <option value="1">1 занятие</option>
-                    <option value="2">2 занятия</option>
-                    <option value="3">3 занятия</option>
-                  </select>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>
-                    Сколько оплатил клиент <em className="font-normal text-slate-400">необязательно</em>
-                  </span>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="1"
-                    inputMode="decimal"
-                    placeholder="Введите сумму в рублях"
-                    value={formData.paidAmount}
-                    onChange={(event) => updateForm('paidAmount', event.target.value)}
-                    className="h-11 rounded-xl"
-                  />
-                  <span className="text-xs font-normal text-slate-500">
-                    Цена пакета подставляется автоматически. Оплата начисляет занятия и сохраняется в истории.
-                  </span>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                  <span>Филиал</span>
-                  <select
-                    value={formData.branchId}
-                    onChange={(event) => updateForm('branchId', event.target.value)}
-                    className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
-                  >
-                    <option value="">Выберите филиал</option>
-                    {store.branches.map((branch) => (
-                      <option key={branch.id} value={branch.id}>
-                        {branch.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              {formData.category && formData.lessonsPerWeek && (
-                <div className="mt-4 flex items-center justify-between gap-4 rounded-xl bg-cyan-50 px-4 py-3 text-sm">
-                  <div>
-                    <p className="font-medium text-cyan-900">План первого пакета</p>
-                    <p className="mt-0.5 text-xs text-cyan-700">
-                      {packagePrice(formData.category, formData.lessonsPerWeek).toLocaleString('ru-RU')} ₽ за 4 недели
-                    </p>
+            <fieldset disabled={isCreating || creationPending} className="contents">
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-cyan-50 text-cyan-700">
+                    <UserRound className="size-4" />
                   </div>
-                  <strong className="shrink-0 text-cyan-950">{Number(formData.lessonsPerWeek) * 4} занятий</strong>
+                  <div>
+                    <h3 className="font-bold text-slate-900">Личные данные</h3>
+                    <p className="text-xs text-slate-500">Основная информация о ребёнке и родителе</p>
+                  </div>
                 </div>
-              )}
-            </section>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">
+                    <span>Имя ребёнка</span>
+                    <Input
+                      placeholder="Например, Екатерина"
+                      value={formData.childName}
+                      onChange={(event) => updateForm('childName', event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Имя родителя</span>
+                    <Input
+                      placeholder="Имя и фамилия"
+                      value={formData.parentName}
+                      onChange={(event) => updateForm('parentName', event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Телефон</span>
+                    <Input
+                      placeholder="+7 (___) ___-__-__"
+                      value={formData.phone}
+                      onChange={(event) => updateForm('phone', formatPhone(event.target.value))}
+                      className="h-11 rounded-xl"
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>
+                      Email <em className="font-normal text-slate-400">необязательно</em>
+                    </span>
+                    <Input
+                      type="email"
+                      placeholder="parent@mail.ru"
+                      value={formData.email}
+                      onChange={(event) => updateForm('email', event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Дата рождения</span>
+                    <Input
+                      placeholder="ДД.ММ.ГГГГ"
+                      value={formData.birthDate}
+                      onChange={(event) => updateForm('birthDate', formatBirthDate(event.target.value))}
+                      maxLength={10}
+                      className="h-11 rounded-xl"
+                    />
+                  </label>
+                </div>
+              </section>
 
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex size-9 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
+                    <Waves className="size-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900">Абонемент</h3>
+                    <p className="text-xs text-slate-500">Секция, нагрузка и филиал</p>
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Секция</span>
+                    <select
+                      value={formData.category}
+                      onChange={(event) => updateForm('category', event.target.value)}
+                      className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+                    >
+                      <option value="">Выберите секцию</option>
+                      <option value="плавание">Плавание</option>
+                      <option value="синхронное плавание">Синхронное плавание</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Занятий в неделю</span>
+                    <select
+                      value={formData.lessonsPerWeek}
+                      onChange={(event) => updateForm('lessonsPerWeek', event.target.value)}
+                      className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+                    >
+                      <option value="">Выберите нагрузку</option>
+                      <option value="1">1 занятие</option>
+                      <option value="2">2 занятия</option>
+                      <option value="3">3 занятия</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>
+                      Сколько оплатил клиент <em className="font-normal text-slate-400">необязательно</em>
+                    </span>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputMode="decimal"
+                      placeholder="Введите сумму в рублях"
+                      value={formData.paidAmount}
+                      onChange={(event) => updateForm('paidAmount', event.target.value)}
+                      className="h-11 rounded-xl"
+                    />
+                    <span className="text-xs font-normal text-slate-500">
+                      Цена пакета подставляется автоматически. Оплата начисляет занятия и сохраняется в истории.
+                    </span>
+                  </label>
+                  <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                    <span>Филиал</span>
+                    <select
+                      value={formData.branchId}
+                      onChange={(event) => updateForm('branchId', event.target.value)}
+                      className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
+                    >
+                      <option value="">Выберите филиал</option>
+                      {store.branches.map((branch) => (
+                        <option key={branch.id} value={branch.id}>
+                          {branch.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {formData.category && formData.lessonsPerWeek && (
+                  <div className="mt-4 flex items-center justify-between gap-4 rounded-xl bg-cyan-50 px-4 py-3 text-sm">
+                    <div>
+                      <p className="font-medium text-cyan-900">План первого пакета</p>
+                      <p className="mt-0.5 text-xs text-cyan-700">
+                        {packagePrice(formData.category, formData.lessonsPerWeek).toLocaleString('ru-RU')} ₽ за 4 недели
+                      </p>
+                    </div>
+                    <strong className="shrink-0 text-cyan-950">{Number(formData.lessonsPerWeek) * 4} занятий</strong>
+                  </div>
+                )}
+              </section>
+            </fieldset>
             <Button
               onClick={handleSubmit}
               disabled={isCreating}
               className="h-12 rounded-xl bg-cyan-600 text-base font-bold text-white shadow-lg shadow-cyan-200 hover:bg-cyan-700"
             >
-              {isCreating ? 'Сохраняем…' : 'Создать профиль клиента'}
+              {isCreating ? 'Сохраняем…' : creationPending ? 'Повторить тот же запрос' : 'Создать профиль клиента'}
             </Button>
           </div>
         </DialogContent>

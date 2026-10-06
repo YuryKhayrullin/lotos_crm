@@ -51,6 +51,11 @@ function componentHarness(file, exportName, apiClient, now) {
       if (!sameDeps(hooks[index]?.deps, deps)) hooks[index] = { deps, callback }
       return hooks[index].callback
     },
+    useMemo(factory, deps) {
+      const index = cursor++
+      if (!sameDeps(hooks[index]?.deps, deps)) hooks[index] = { deps, value: factory() }
+      return hooks[index].value
+    },
     useEffect(effect, deps) {
       const index = cursor++
       if (sameDeps(hooks[index]?.deps, deps)) return
@@ -118,7 +123,7 @@ function componentHarness(file, exportName, apiClient, now) {
       if (name === '@/lib/branch-selection') return {}
       if (name === '@/lib/formatters') return require('../.test-dist/formatters.js')
       if (name === '@/lib/trainer-options') return require('../.test-dist/trainer-options.js')
-      if (name === '@/lib/normalizers' || name === '@/lib/subscription-pricing') {
+      if (name === '@/lib/normalizers' || name === '@/lib/subscription-pricing' || name === '@/lib/creation-retry') {
         const moduleExports = {}
         const dependency = name.slice(2) + '.ts'
         const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, '..', dependency), 'utf8'), {
@@ -130,12 +135,12 @@ function componentHarness(file, exportName, apiClient, now) {
         })
         return moduleExports
       }
-      if (name === './ClientAttendanceHistory') return elements
+      if (['./ClientAttendanceHistory', './AttendanceModal', './RoleGuard'].includes(name)) return elements
       if (name === '@/lib/api-client')
         return { apiClient, createRequestId: () => 'registration-attempt', ApiError: Error }
       if (
         name === '@/lib/utils/date' &&
-        ['components/CoachDashboard.tsx', 'components/AdminWorkspace.tsx'].includes(file)
+        ['components/CoachDashboard.tsx', 'components/AdminWorkspace.tsx', 'components/ScheduleView.tsx'].includes(file)
       )
         return require('../.test-dist/utils/date-core.js')
       if (name === '@/lib/utils/date')
@@ -1192,6 +1197,39 @@ test('lesson time picker excludes elapsed slots and offers all slots on a future
   )
 })
 
+test('schedule opens on today for admin and coach, with past dates only in an explicitly selected view', () => {
+  for (const isCoach of [false, true]) {
+    const h = componentHarness('components/ScheduleView.tsx', 'ScheduleView', {}, new Date('2026-10-06T16:44:00'))
+    h.store.authStore.isCoach = isCoach
+    h.store.authStore.isAdmin = !isCoach
+    h.store.sortedBranchLessons = [
+      {
+        id: 'yesterday',
+        title: 'Yesterday lesson',
+        date: '2026-10-05',
+        dayOfWeek: 'Пн',
+        time: '17:00',
+        duration: '1 час',
+      },
+      { id: 'today', title: 'Today lesson', date: '2026-10-06', dayOfWeek: 'Вт', time: '17:00', duration: '1 час' },
+    ]
+    let tree = h.render()
+    assert(textContent(tree).includes('Today lesson'))
+    assert(!textContent(tree).includes('Yesterday lesson'))
+    buttonNamed(tree, 'Неделя').props.onClick()
+    tree = h.render()
+    assert(textContent(tree).includes('Yesterday lesson'))
+    nodes(tree).find((node) => node.type === 'button' && textContent(node) === 'Пн 5').props.onClick()
+    tree = h.render()
+    assert(textContent(tree).includes('Yesterday lesson'))
+    assert(!textContent(tree).includes('Today lesson'))
+    nodes(tree).find((node) => node.type === 'button' && textContent(node) === 'Вт 6').props.onClick()
+    tree = h.render()
+    assert(!textContent(tree).includes('Yesterday lesson'))
+    assert(textContent(tree).includes('Today lesson'))
+  }
+})
+
 test('checkbox selection sends all 20 pupils in one create and guards double clicks', async () => {
   const pupils = Array.from({ length: 20 }, (_, index) => ({
     id: 'child-' + index,
@@ -1231,6 +1269,40 @@ test('checkbox selection sends all 20 pupils in one create and guards double cli
     pupils.map((pupil) => pupil.id),
   )
   assert.equal(calls[0].maxCapacity, 20)
+})
+
+test('lesson form retries the frozen attempt after lost reply, including after its start time', async () => {
+  const h = componentHarness(
+    'components/CreateLessonModal.tsx',
+    'CreateLessonModal',
+    {},
+    new Date('2026-10-06T10:00:00'),
+  )
+  h.store.coaches = [{ id: 'coach', name: 'Trainer', branchId: 'branch-1' }]
+  const calls = []
+  let closed = 0
+  h.store.createLesson = async (payload) => {
+    calls.push(payload)
+    if (calls.length === 1) throw new Error('lost reply')
+    return { id: 'confirmed' }
+  }
+  const props = { isOpen: true, onClose: () => closed++ }
+  let tree = h.render(props)
+  nodes(tree)
+    .find((node) => node.type === 'Select' && node.props.items?.some((item) => item.name === 'Trainer'))
+    .props.onValueChange('profile:coach')
+  await buttonNamed(h.render(props), 'Создать занятие').props.onClick()
+  tree = h.render(props)
+  assert.equal(nodes(tree).find((node) => node.type === 'fieldset').props.disabled, true)
+  nodes(tree)
+    .find((node) => node.type === 'Dialog')
+    .props.onOpenChange(false)
+  assert.equal(closed, 0)
+  h.setTime(new Date('2026-10-07T10:00:00'))
+  h.render(props)
+  await buttonNamed(h.render(props), 'Повторить тот же запрос').props.onClick()
+  assert.deepEqual(calls[1], calls[0])
+  assert.equal(closed, 1)
 })
 
 test('subscription pagination coalesces rapid clicks and ignores an old page after a new search', async () => {
@@ -1363,6 +1435,52 @@ const openAndSubmitPayment = (harness) => {
   save.props.onClick()
   return save
 }
+
+test('client creation UI prevents double submission and retains its first payment payload after lost reply', async () => {
+  const attempts = []
+  let fail
+  const { harness: h } = await startAccountingView(
+    {
+      createClient: async (...args) => {
+        attempts.push(args)
+        if (attempts.length === 1)
+          return new Promise((_, reject) => {
+            fail = reject
+          })
+        return { id: 'confirmed-client' }
+      },
+    },
+    [],
+  )
+  buttonNamed(h.render(), 'Добавить клиента').props.onClick()
+  const addDialog = () =>
+    nodes(h.render()).find((node) => node.type === 'Dialog' && textContent(node).includes('Новый клиент'))
+  for (const [placeholder, value] of [
+    ['Например, Екатерина', 'Anna'],
+    ['Имя и фамилия', 'Parent'],
+    ['+7 (___) ___-__-__', '79991234567'],
+  ])
+    nodes(addDialog())
+      .find((node) => node.type === 'Input' && node.props.placeholder === placeholder)
+      .props.onChange({ target: { value } })
+  const selects = nodes(addDialog()).filter((node) => node.type === 'select')
+  selects[0].props.onChange({ target: { value: 'плавание' } })
+  selects[1].props.onChange({ target: { value: '1' } })
+  const save = buttonNamed(h.render(), 'Создать профиль клиента')
+  const first = save.props.onClick()
+  await save.props.onClick()
+  assert.equal(attempts.length, 1)
+  fail(new Error('lost reply'))
+  await first
+  assert.equal(nodes(addDialog()).find((node) => node.type === 'fieldset').props.disabled, true)
+  addDialog().props.onOpenChange(false)
+  assert.equal(addDialog().props.open, true)
+  await buttonNamed(h.render(), 'Повторить тот же запрос').props.onClick()
+  assert.deepEqual(attempts[1], attempts[0])
+  assert.equal(attempts[1][0].paidAmount, 5500)
+  assert.equal(attempts[1][1], 'registration-attempt')
+  assert.equal(addDialog().props.open, false)
+})
 
 test('empty-card deletion permits only valid zero-credit creation markers, not accounting movements', async () => {
   for (const [entry, permitted] of [
