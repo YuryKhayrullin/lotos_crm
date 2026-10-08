@@ -1,9 +1,10 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowRight, CalendarCheck2, CalendarDays, ChevronLeft, ChevronRight, Clock3, MapPin } from 'lucide-react'
 import { ILesson } from '@/store/models'
-import { isLessonOnDay, parseTimeToHHMM, toLocalDateOnly } from '@/lib/utils/date'
+import { isLessonOnDay, parseTimeToHHMM, toLocalDateOnly, calendarDayInZone } from '@/lib/utils/date'
+import { apiClient } from '@/lib/api-client'
 
 // Navigation uses the already-loaded schedule, never a network request.
 const moveDay = (date: Date, offset: number) => {
@@ -21,21 +22,53 @@ type Props = {
   now: Date
   onSchedule: () => void
   onOpenLesson: (lesson: ILesson, date: Date) => void
+  timeZone?: string
 }
 
-export function CoachDashboard({ lessons, branchName, now, onSchedule, onOpenLesson }: Props) {
+export function CoachDashboard({ lessons, branchName, now: instantNow, onSchedule, onOpenLesson, timeZone }: Props) {
+  const native = apiClient.isPostgresBackend?.() === true
+  const now = native ? calendarDayInZone(instantNow, timeZone || 'Europe/Moscow') : instantNow
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [weekOffset, setWeekOffset] = useState(0)
   const todayKey = toLocalDateOnly(now)
   const selectedKey = selectedDate || todayKey
   const selectedDay = selectedDate ? new Date(selectedDate + 'T12:00:00') : now
   const monday = moveDay(now, -((now.getDay() + 6) % 7))
+  const weekKey = toLocalDateOnly(moveDay(monday, weekOffset * 7))
+  const [loadedWeek, setLoadedWeek] = useState<{ from: string; to: string; lessons: ILesson[] } | null>(null)
+  const [rangeError, setRangeError] = useState('')
+  useEffect(() => {
+    if (!native) return
+    const controller = new AbortController(),
+      start = new Date(weekKey + 'T12:00:00')
+    const to = toLocalDateOnly(moveDay(start, 6))
+    void apiClient
+      .fetchSchedule(weekKey, to, undefined, controller.signal)
+      .then((rows) => {
+        if (!controller.signal.aborted) {
+          setRangeError('')
+          setLoadedWeek({ from: weekKey, to, lessons: rows })
+        }
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setRangeError(error instanceof Error ? error.message : 'Расписание недоступно')
+      })
+    return () => controller.abort()
+  }, [native, weekKey])
+  const availableLessons = loadedWeek
+    ? [
+        ...lessons.filter((lesson) => !lesson.date || lesson.date < loadedWeek.from || lesson.date > loadedWeek.to),
+        ...loadedWeek.lessons,
+      ]
+    : lessons
   // Preserve chronological order even if an upstream snapshot was unsorted.
   const sortableTime = (lesson: ILesson) => {
     const time = parseTimeToHHMM(lesson.time)
     return /^\d{2}:\d{2}$/.test(time) ? time : '99:99'
   }
-  const orderedLessons = lessons.slice().sort((a, b) => sortableTime(a).localeCompare(sortableTime(b)))
+  const orderedLessons = availableLessons
+    .filter((lesson) => lesson.status !== 'cancelled')
+    .sort((a, b) => sortableTime(a).localeCompare(sortableTime(b)))
   const currentWeek = Array.from({ length: 7 }, (_, index) => {
     const date = moveDay(monday, index)
     return { date, lessons: orderedLessons.filter((lesson) => isLessonOnDay(lesson, date)) }
@@ -58,8 +91,10 @@ export function CoachDashboard({ lessons, branchName, now, onSchedule, onOpenLes
         const time = parseTimeToHHMM(item.time)
         return (
           /^\d{2}:\d{2}$/.test(time) &&
-          (offset > 0 ||
-            Number(time.slice(0, 2)) * 60 + Number(time.slice(3)) >= now.getHours() * 60 + now.getMinutes())
+          (native && item.startsAt
+            ? Date.parse(item.startsAt) >= instantNow.getTime()
+            : offset > 0 ||
+              Number(time.slice(0, 2)) * 60 + Number(time.slice(3)) >= now.getHours() * 60 + now.getMinutes())
         )
       })
       if (lesson) return { lesson, date }
@@ -84,6 +119,7 @@ export function CoachDashboard({ lessons, branchName, now, onSchedule, onOpenLes
 
   return (
     <>
+      {rangeError && <p role="alert">{rangeError}. Откройте полное расписание для повторной загрузки.</p>}
       <section className="relative overflow-hidden rounded-[28px] bg-gradient-to-br from-[#103c4a] via-[#0c5265] to-[#078b9e] p-5 text-white sm:p-8">
         <div
           aria-hidden="true"
@@ -189,7 +225,11 @@ export function CoachDashboard({ lessons, branchName, now, onSchedule, onOpenLes
             )
           })}
         </div>
-        {selectedLessons.length === 0 ? (
+        {native && loadedWeek?.from !== weekKey ? (
+          <p role="status" className="p-6">
+            {rangeError ? 'Данные выбранной недели не загружены.' : 'Загружаем выбранную неделю…'}
+          </p>
+        ) : selectedLessons.length === 0 ? (
           <div className="flex flex-col items-center px-6 py-10 text-center sm:py-14">
             <span className="mb-4 flex size-16 items-center justify-center rounded-2xl bg-cyan-50 text-cyan-700">
               <CalendarCheck2 className="size-8" />

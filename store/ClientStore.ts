@@ -8,12 +8,14 @@ export const ClientStore = types.model('ClientStore', {}).actions(() => ({
     attendanceList: {
       clientId: string
       status: 'attended' | 'absent'
+      expectedVersion?: number
     }[],
     lessonId: string,
     date: string,
     requestId: string,
+    metadata?: { expectedLessonVersion?: number; reason?: string },
   ) {
-    const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, date, requestId)
+    const result = yield apiClient.recordBulkAttendance(attendanceList, lessonId, date, requestId, metadata)
     const failures = Array.isArray(result.results)
       ? result.results.filter((item: { success: boolean }) => !item.success)
       : []

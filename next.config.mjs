@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  serverExternalPackages: ['pdf-lib'],
   typescript: {
     ignoreBuildErrors: false,
   },

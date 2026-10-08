@@ -34,6 +34,7 @@ function registrationRoute({
   vm.runInNewContext(compiled, {
     exports,
     Buffer,
+    process: { env: { CRM_BACKEND: 'gas' } },
     require(name) {
       if (name === 'next/server')
         return {

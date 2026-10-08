@@ -112,6 +112,7 @@ function componentHarness(file, exportName, apiClient, now) {
     },
     document: events('document'),
     require(name) {
+      if (name === './MutationRecoveryPanel') return { MutationRecoveryPanel: 'MutationRecoveryPanel' }
       if (name === 'react') return react
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx }
       if (name === 'mobx-react-lite') return { observer: (component) => component }
@@ -135,7 +136,16 @@ function componentHarness(file, exportName, apiClient, now) {
         })
         return moduleExports
       }
-      if (['./ClientAttendanceHistory', './AttendanceModal', './RoleGuard'].includes(name)) return elements
+      if (
+        [
+          './ClientReceiptPanel',
+          './ClientAttendanceHistory',
+          './AttendanceModal',
+          './RoleGuard',
+          './LessonManagementModal',
+        ].includes(name)
+      )
+        return elements
       if (name === '@/lib/api-client')
         return { apiClient, createRequestId: () => 'registration-attempt', ApiError: Error }
       if (
@@ -144,7 +154,12 @@ function componentHarness(file, exportName, apiClient, now) {
       )
         return require('../.test-dist/utils/date-core.js')
       if (name === '@/lib/utils/date')
-        return { isValidDateOnly: () => true, parseTimeToHHMM: (value) => value, isLessonOnDay: () => true }
+        return {
+          ...require('../.test-dist/utils/date-core.js'),
+          isValidDateOnly: () => true,
+          parseTimeToHHMM: (value) => value,
+          isLessonOnDay: () => true,
+        }
       if (name.startsWith('@/components/') || name === 'lucide-react') return elements
       throw new Error('Unexpected dependency: ' + name)
     },
@@ -1219,11 +1234,15 @@ test('schedule opens on today for admin and coach, with past dates only in an ex
     buttonNamed(tree, 'Неделя').props.onClick()
     tree = h.render()
     assert(textContent(tree).includes('Yesterday lesson'))
-    nodes(tree).find((node) => node.type === 'button' && textContent(node) === 'Пн 5').props.onClick()
+    nodes(tree)
+      .find((node) => node.type === 'button' && textContent(node) === 'Пн 5')
+      .props.onClick()
     tree = h.render()
     assert(textContent(tree).includes('Yesterday lesson'))
     assert(!textContent(tree).includes('Today lesson'))
-    nodes(tree).find((node) => node.type === 'button' && textContent(node) === 'Вт 6').props.onClick()
+    nodes(tree)
+      .find((node) => node.type === 'button' && textContent(node) === 'Вт 6')
+      .props.onClick()
     tree = h.render()
     assert(!textContent(tree).includes('Yesterday lesson'))
     assert(textContent(tree).includes('Today lesson'))
@@ -1407,10 +1426,15 @@ const emptyAccounting = () => ({
 const profileDialog = (tree) =>
   nodes(tree).find((node) => node.type === 'Dialog' && textContent(node).includes('Оплаты и продление'))
 const paymentDialog = (tree) =>
-  nodes(tree).find((node) => node.type === 'Dialog' && textContent(node).includes('Продление абонемента'))
+  nodes(tree).find(
+    (node) =>
+      node.type === 'Dialog' &&
+      textContent(nodes(node).find((child) => child.type === 'DialogTitle')) === 'Продление абонемента',
+  )
 async function startAccountingView(api, items = [accountingClient()]) {
   let listReads = 0
   const harness = componentHarness('components/ClientsView.tsx', 'ClientsView', {
+    isPostgresBackend: () => false,
     fetchClientsPage: async () => {
       listReads++
       return { items, page: 1, total: items.length, hasMore: false }
@@ -1784,7 +1808,11 @@ test('confirmed adjustment is not reported as failed when its combined history r
   buttonNamed(harness.render(), 'Корректировка').props.onClick()
   let tree = harness.render()
   const adjustment = () =>
-    nodes(tree).find((node) => node.type === 'Dialog' && textContent(node).includes('Сохранить корректировку'))
+    nodes(tree).find(
+      (node) =>
+        node.type === 'Dialog' &&
+        textContent(nodes(node).find((child) => child.type === 'DialogTitle')) === 'Корректировка абонемента',
+    )
   nodes(adjustment())
     .find((node) => node.type === 'Input' && node.props.type === 'number')
     .props.onChange({ target: { value: '1' } })

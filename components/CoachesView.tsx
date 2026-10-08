@@ -389,7 +389,7 @@ export const CoachesView = observer(() => {
             <Button
               variant={account.status === 'Активен' ? 'destructive' : 'default'}
               size="sm"
-              disabled={controlsBusy || (!active && !validBranch)}
+              disabled={controlsBusy || account.profileArchived || (!active && !validBranch)}
               onClick={() => void changeAccountStatus(account)}
             >
               <UserRoundCheck className="mr-1 size-3.5" />{' '}
@@ -401,8 +401,36 @@ export const CoachesView = observer(() => {
                     ? 'Подтвердить доступ'
                     : 'Разрешить вход'}
             </Button>
+            {active && account.canRevokeSessions && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={controlsBusy}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      'Завершить все сессии «' + account.username + '»? Для нового входа потребуется пароль.',
+                    )
+                  )
+                    return
+                  void runAccountAction(account.id, async () => {
+                    confirmed(await apiClient.revokeUserSessions(account.id))
+                    setAccountsNotice('Все сессии тренера завершены. Аккаунт остаётся активным.')
+                    await loadAccounts()
+                  })
+                }}
+              >
+                Завершить сессии
+              </Button>
+            )}
           </div>
           {!active && !validBranch && <p className="text-xs text-slate-500">Выберите филиал, чтобы разрешить вход.</p>}
+          {account.profileArchived && (
+            <p className="text-xs text-slate-500">
+              Карточка тренера архивирована. Вход отключён; повторная активация требует отдельного восстановления
+              карточки.
+            </p>
+          )}
         </div>
         <details
           className={pending ? 'border-t border-slate-100 pt-3 md:col-span-2' : 'border-t border-slate-100 pt-3'}

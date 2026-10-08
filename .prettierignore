@@ -3,3 +3,8 @@ next-env.d.ts
 
 # Project instructions are maintained as plain text, not formatted Markdown.
 CLAUDE.md
+
+# Prisma's generated client is reproducible, not hand-maintained source.
+.generated/
+.tools/
+.artifacts/

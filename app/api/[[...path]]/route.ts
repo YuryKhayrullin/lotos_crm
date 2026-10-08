@@ -307,6 +307,12 @@ async function dispatchRequest(method: HttpMethod, request: NextRequest, context
   let routeName = 'unmatched'
   try {
     const segments = (await context.params).path ?? []
+    const backend = process.env.CRM_BACKEND || 'gas'
+    if (backend === 'postgres') {
+      const { dispatchPostgresRequest } = await import('@/lib/server/postgres/runtime')
+      return dispatchPostgresRequest(request, segments)
+    }
+    if (backend !== 'gas') throw new RouteError('Некорректная конфигурация backend', 503, 'SERVICE_UNAVAILABLE')
     const matchingRoutes = ROUTES.filter((candidate) => candidate.match(segments) !== null)
     const route = matchingRoutes.find((candidate) => candidate.method === method)
     if (!route) {

@@ -43,6 +43,7 @@ import {
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ClientAttendanceHistory } from './ClientAttendanceHistory'
+import { ClientReceiptPanel } from './ClientReceiptPanel'
 
 const statusStyle = (status: string) =>
   ({
@@ -215,6 +216,14 @@ export const ClientsView = observer(() => {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [paymentHistory, setPaymentHistory] = useState<Array<Record<string, unknown>>>([])
+  const [nativeAttendance, setNativeAttendance] = useState<{
+    clientId: string
+    entries: Record<string, unknown>[]
+    total: number
+  } | null>(null)
+  const [legacyHistory, setLegacyHistory] = useState<{ clientId: string; entries: Record<string, unknown>[] } | null>(
+    null,
+  )
   const [lessonLedger, setLessonLedger] = useState<Array<Record<string, unknown>>>([])
   const [ledgerAudit, setLedgerAudit] = useState<LessonLedgerDiscrepancy | null>(null)
   const [ledgerAuditChecked, setLedgerAuditChecked] = useState(false)
@@ -231,6 +240,7 @@ export const ClientsView = observer(() => {
     clientId: string
     expectedRemainingLessons: number
     expectedTotalLessons: number
+    auditFingerprint?: string
     reason: string
     requestId: string
   } | null>(null)
@@ -308,6 +318,13 @@ export const ClientsView = observer(() => {
 
   const applyAccounting = useCallback(
     (clientId: string, accounting: ClientAccounting) => {
+      setLegacyHistory({ clientId, entries: (accounting.legacyHistory || []).flatMap((group) => group.history) })
+      if (accounting.attendanceHistory)
+        setNativeAttendance({
+          clientId,
+          entries: accounting.attendanceHistory,
+          total: accounting.attendanceTotal || accounting.attendanceHistory.length,
+        })
       setPaymentHistory(accounting.payments)
       setLessonLedger(accounting.ledger)
       setLedgerAudit(accounting.audit?.discrepancies[0] || null)
@@ -440,6 +457,7 @@ export const ClientsView = observer(() => {
 
   const canDeleteSelected = Boolean(
     selectedClient &&
+    selectedClient.canDelete !== false &&
     !historyLoading &&
     !historyError &&
     ledgerAuditChecked &&
@@ -612,6 +630,8 @@ export const ClientsView = observer(() => {
       if (accounting) applyAccounting(attempt.clientId, accounting)
       setHistoryLoading(false)
       if (accounting?.payments.some((payment) => String(payment.requestId) === attempt.requestId)) {
+        if (apiClient.isPostgresBackend?.() === true)
+          void apiClient.resolveMutationDraft(attempt.requestId, 'acknowledge').catch(() => undefined)
         pendingPayments.current.delete(attempt.clientId)
         setPaymentAttempt(null)
         setIsPaymentOpen(false)
@@ -698,6 +718,7 @@ export const ClientsView = observer(() => {
     setEditError('')
     try {
       await apiClient.updateClient(selectedClient.id, {
+        ...(selectedClient.version === undefined ? {} : { expectedVersion: selectedClient.version }),
         childName: editForm.childName.trim(),
         parentName: editForm.parentName.trim(),
         phone: editForm.phone,
@@ -733,7 +754,10 @@ export const ClientsView = observer(() => {
     setClientActionLoading(true)
     setClientActionError('')
     try {
-      await apiClient.updateClient(selectedClient.id, { status: archive ? 'Архив' : 'Активен' })
+      await apiClient.updateClient(selectedClient.id, {
+        status: archive ? 'Архив' : 'Активен',
+        ...(selectedClient.version === undefined ? {} : { expectedVersion: selectedClient.version }),
+      })
       closeClientProfile()
       refreshClients()
     } catch (error) {
@@ -754,7 +778,7 @@ export const ClientsView = observer(() => {
     setClientActionLoading(true)
     setClientActionError('')
     try {
-      await apiClient.deleteClient(selectedClient.id)
+      await apiClient.deleteClient(selectedClient.id, selectedClient.version)
       closeClientProfile()
       refreshClients()
     } catch (error) {
@@ -810,6 +834,7 @@ export const ClientsView = observer(() => {
             clientId: selectedClient.id,
             expectedRemainingLessons: ledgerAudit.current.remainingLessons,
             expectedTotalLessons: ledgerAudit.current.totalLessons,
+            auditFingerprint: ledgerAudit.auditFingerprint,
             reason: auditRepairReason.trim(),
             requestId: createRequestId(),
           }
@@ -825,6 +850,7 @@ export const ClientsView = observer(() => {
         attempt.expectedTotalLessons,
         attempt.reason,
         attempt.requestId,
+        attempt.auditFingerprint,
       )
       if (!isAccountingTarget(attempt.clientId, scope)) return
       setAuditRepairAttempt(null)
@@ -850,7 +876,7 @@ export const ClientsView = observer(() => {
       const next = { ...previous, [field]: value }
       if ((field === 'category' || field === 'lessonsPerWeek') && next.category && next.lessonsPerWeek) {
         const price = packagePrice(next.category, next.lessonsPerWeek)
-        if (price > 0) next.paidAmount = String(price)
+        if (price > 0) next.paidAmount = apiClient.isPostgresBackend() ? '' : String(price)
       }
       return next
     })
@@ -919,7 +945,10 @@ export const ClientsView = observer(() => {
     } catch (error) {
       setFormError(
         creationRetry.current.attempt
-          ? 'Создание не подтверждено. Данные сохранены для повтора того же запроса. Не создавайте клиента заново и не перезагружайте страницу. ' +
+          ? 'Создание не подтверждено. Данные сохранены для повтора того же запроса. Не создавайте клиента заново. ' +
+              (apiClient.isPostgresBackend()
+                ? 'После перезагрузки проверьте панель восстановления операций. '
+                : 'До проверки исхода не перезагружайте страницу. ') +
               (error instanceof Error ? error.message : '')
           : error instanceof Error
             ? error.message
@@ -978,19 +1007,41 @@ export const ClientsView = observer(() => {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead onClick={() => toggleSort('childName')} className="cursor-pointer">
-                Имя{' '}
-                {sortConfig.key === 'childName' &&
-                  (sortConfig.dir === 'asc' ? (
-                    <ChevronUp className="inline size-4" />
-                  ) : (
-                    <ChevronDown className="inline size-4" />
-                  ))}
+              <TableHead
+                aria-sort={
+                  sortConfig.key === 'childName' ? (sortConfig.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="Сортировать по имени"
+                  onClick={() => toggleSort('childName')}
+                  className="focus-visible:outline-2 focus-visible:outline-cyan-700"
+                >
+                  Имя{' '}
+                  {sortConfig.key === 'childName' &&
+                    (sortConfig.dir === 'asc' ? (
+                      <ChevronUp className="inline size-4" />
+                    ) : (
+                      <ChevronDown className="inline size-4" />
+                    ))}
+                </button>
               </TableHead>
               <TableHead>Родитель / Телефон</TableHead>
               <TableHead>Остаток</TableHead>
-              <TableHead onClick={() => toggleSort('paidAmount')} className="cursor-pointer">
-                Баланс
+              <TableHead
+                aria-sort={
+                  sortConfig.key === 'paidAmount' ? (sortConfig.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="Сортировать по сумме оплат"
+                  onClick={() => toggleSort('paidAmount')}
+                  className="focus-visible:outline-2 focus-visible:outline-cyan-700"
+                >
+                  Баланс
+                </button>
               </TableHead>
               <TableHead>Статус</TableHead>
             </TableRow>
@@ -1007,7 +1058,17 @@ export const ClientsView = observer(() => {
                     <div className="flex size-8 items-center justify-center rounded-full bg-cyan-100 text-xs font-bold text-cyan-700">
                       {client.initials || client.childName.slice(0, 2).toUpperCase()}
                     </div>
-                    {client.childName}
+                    <button
+                      type="button"
+                      aria-label={'Открыть карточку: ' + client.childName}
+                      className="text-left focus-visible:rounded focus-visible:outline-2 focus-visible:outline-cyan-700"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        openClientProfile(client.id)
+                      }}
+                    >
+                      {client.childName}
+                    </button>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -1165,6 +1226,7 @@ export const ClientsView = observer(() => {
                     <span>Секция</span>
                     <select
                       value={formData.category}
+                      aria-label="Секция"
                       onChange={(event) => updateForm('category', event.target.value)}
                       className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
                     >
@@ -1177,6 +1239,7 @@ export const ClientsView = observer(() => {
                     <span>Занятий в неделю</span>
                     <select
                       value={formData.lessonsPerWeek}
+                      aria-label="Занятий в неделю"
                       onChange={(event) => updateForm('lessonsPerWeek', event.target.value)}
                       className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
                     >
@@ -1193,7 +1256,7 @@ export const ClientsView = observer(() => {
                     <Input
                       type="number"
                       min="0"
-                      step="1"
+                      step="0.01"
                       inputMode="decimal"
                       placeholder="Введите сумму в рублях"
                       value={formData.paidAmount}
@@ -1201,12 +1264,15 @@ export const ClientsView = observer(() => {
                       className="h-11 rounded-xl"
                     />
                     <span className="text-xs font-normal text-slate-500">
-                      Цена пакета подставляется автоматически. Оплата начисляет занятия и сохраняется в истории.
+                      {apiClient.isPostgresBackend()
+                        ? 'Необязательная оплата: карточка, платёж и начисления сохранятся вместе. Сумма с учётом денежного остатка должна покрывать полный пакет.'
+                        : 'Цена пакета подставляется автоматически. Оплата начисляет занятия и сохраняется в истории.'}
                     </span>
                   </label>
                   <label className="grid gap-1.5 text-sm font-medium text-slate-700">
                     <span>Филиал</span>
                     <select
+                      aria-label="Филиал клиента"
                       value={formData.branchId}
                       onChange={(event) => updateForm('branchId', event.target.value)}
                       className="h-11 rounded-xl border border-slate-200 bg-white px-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
@@ -1270,7 +1336,55 @@ export const ClientsView = observer(() => {
                     <span className="text-base font-medium text-cyan-700">из {selectedClient.totalLessons}</span>
                   </p>
                 </div>
-                <ClientAttendanceHistory history={selectedClient.attendanceHistory} lessons={store.lessons} />
+                {nativeAttendance?.clientId === selectedClient.id &&
+                  nativeAttendance.total > nativeAttendance.entries.length && (
+                    <p className="text-sm text-slate-500">
+                      Показаны последние {nativeAttendance.entries.length} из {nativeAttendance.total} посещений.
+                    </p>
+                  )}
+                {apiClient.isPostgresBackend() && (
+                  <ClientReceiptPanel
+                    key={selectedClient.id}
+                    clientId={selectedClient.id}
+                    receiptVersion={selectedClient.receiptVersion || 0}
+                    receiptUrl={selectedClient.subscription?.receiptUrl || ''}
+                    onSaved={async () => {
+                      refreshClients()
+                      await refreshSelectedAccounting(selectedClient.id, accountingScope)
+                    }}
+                  />
+                )}
+                <ClientAttendanceHistory
+                  history={
+                    nativeAttendance?.clientId === selectedClient.id
+                      ? nativeAttendance.entries
+                      : selectedClient.attendanceHistory
+                  }
+                  lessons={store.lessons}
+                />
+                {legacyHistory?.clientId === selectedClient.id && legacyHistory.entries.length > 0 && (
+                  <details className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <summary className="cursor-pointer font-semibold">
+                      История из старой CRM ({legacyHistory.entries.length})
+                    </summary>
+                    <p className="mt-2 text-sm">
+                      Исходные записи сохранены отдельно. Они не списывают занятия повторно; неполный контекст не даёт
+                      права новой отметки.
+                    </p>
+                    <ul className="mt-3 grid gap-2 text-sm">
+                      {legacyHistory.entries.map((entry, index) => (
+                        <li key={index}>
+                          {String(entry.date || 'Дата неизвестна')} ·{' '}
+                          {entry.status === 'attended'
+                            ? 'Посетил'
+                            : entry.status === 'absent'
+                              ? 'Отсутствовал'
+                              : 'Статус требует сверки'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 {store.authStore.isAdmin && (
                   <details className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <summary className="cursor-pointer text-sm font-medium text-slate-500">
@@ -1577,258 +1691,263 @@ export const ClientsView = observer(() => {
             </div>
           )}
         </DialogContent>
-      </Dialog>
 
-      <Dialog open={isEditOpen && !!selectedClient} onOpenChange={setIsEditOpen}>
-        <DialogContent className="max-h-[92vh] max-w-xl overflow-y-auto rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
-          <div className="bg-gradient-to-br from-cyan-700 to-sky-800 px-6 py-7 text-white">
-            <DialogHeader>
-              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
-                <Pencil className="size-6" />
-              </div>
-              <DialogTitle className="text-2xl font-bold text-white">Редактирование клиента</DialogTitle>
-              <p className="mt-1 text-sm text-cyan-50">
-                Баланс занятий и суммы меняются только через платёж или журналируемую корректировку.
-              </p>
-            </DialogHeader>
-          </div>
-          <div className="grid gap-4 p-6">
-            {editError && (
-              <p className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                {editError}
-              </p>
-            )}
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Имя ребёнка
-              <Input
-                value={editForm.childName}
-                onChange={(event) => updateEditForm('childName', event.target.value)}
-                disabled={isEditing}
-                className="h-11 bg-white"
-              />
-            </label>
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Родитель
-              <Input
-                value={editForm.parentName}
-                onChange={(event) => updateEditForm('parentName', event.target.value)}
-                disabled={isEditing}
-                className="h-11 bg-white"
-              />
-            </label>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                Телефон
-                <Input
-                  inputMode="tel"
-                  value={editForm.phone}
-                  onChange={(event) => updateEditForm('phone', formatPhone(event.target.value))}
-                  disabled={isEditing}
-                  className="h-11 bg-white"
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                Email
-                <Input
-                  type="email"
-                  value={editForm.email}
-                  onChange={(event) => updateEditForm('email', event.target.value)}
-                  disabled={isEditing}
-                  className="h-11 bg-white"
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                Дата рождения
-                <Input
-                  inputMode="numeric"
-                  value={editForm.birthDate}
-                  maxLength={10}
-                  onChange={(event) => updateEditForm('birthDate', formatBirthDate(event.target.value))}
-                  disabled={isEditing}
-                  placeholder="ДД.ММ.ГГГГ"
-                  className="h-11 bg-white"
-                />
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-                Секция
-                <select
-                  value={editForm.category}
-                  onChange={(event) => updateEditForm('category', event.target.value)}
-                  disabled={isEditing}
-                  className="h-11 rounded-md border border-slate-200 bg-white px-3"
-                >
-                  <option value="плавание">Плавание</option>
-                  <option value="синхронное плавание">Синхронное плавание</option>
-                </select>
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">
-                Нагрузка для следующей покупки
-                <select
-                  value={editForm.lessonsPerWeek}
-                  onChange={(event) => updateEditForm('lessonsPerWeek', event.target.value)}
-                  disabled={isEditing}
-                  className="h-11 rounded-md border border-slate-200 bg-white px-3"
-                >
-                  <option value="1">1 занятие в неделю</option>
-                  <option value="2">2 занятия в неделю</option>
-                  <option value="3">3 занятия в неделю</option>
-                </select>
-              </label>
-            </div>
-            <Button
-              onClick={() => void submitEdit()}
-              disabled={isEditing}
-              className="h-12 rounded-xl bg-cyan-700 text-base font-bold text-white hover:bg-cyan-800"
-            >
-              {isEditing ? 'Сохраняем…' : 'Сохранить изменения'}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={isAdjustmentOpen && !!selectedClient} onOpenChange={setIsAdjustmentOpen}>
-        <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
-          <div className="bg-gradient-to-br from-amber-500 to-orange-600 px-6 py-7 text-white">
-            <DialogHeader>
-              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
-                <Settings2 className="size-6" />
-              </div>
-              <DialogTitle className="text-2xl font-bold text-white">Корректировка абонемента</DialogTitle>
-              <p className="mt-1 text-sm text-amber-50">
-                Операция будет записана в журнал с автором, причиной и остатком до/после.
-              </p>
-            </DialogHeader>
-          </div>
-          <div className="grid gap-4 p-6">
-            {adjustmentError && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                {adjustmentError}
-              </div>
-            )}
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Изменение занятий
-              <Input
-                type="number"
-                min="-100"
-                max="100"
-                step="1"
-                value={adjustmentDelta}
-                disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
-                onChange={(event) => setAdjustmentDelta(event.target.value)}
-                placeholder="Например, 2 или -1"
-                className="h-12 bg-white text-lg"
-              />
-              <span className="text-xs font-normal text-slate-500">
-                Положительное число начисляет, отрицательное уменьшает и общий лимит, и остаток.
-              </span>
-            </label>
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Причина <span className="text-rose-600">*</span>
-              <Input
-                value={adjustmentReason}
-                disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
-                onChange={(event) => setAdjustmentReason(event.target.value)}
-                placeholder="Например: корректировка после смены тарифа"
-                className="h-11 bg-white"
-              />
-            </label>
-            <Button
-              onClick={() => void submitAdjustment()}
-              disabled={adjustmentLoading}
-              className="h-12 rounded-xl bg-amber-600 text-base font-bold text-white hover:bg-amber-700"
-            >
-              {adjustmentLoading ? 'Сохраняем…' : 'Сохранить корректировку'}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={isPaymentOpen && !!selectedClient} onOpenChange={setIsPaymentOpen}>
-        <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
-          <div className="bg-gradient-to-br from-cyan-600 to-sky-700 px-6 py-7 text-white">
-            <DialogHeader>
-              <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
-                <CreditCard className="size-6" />
-              </div>
-              <DialogTitle className="text-2xl font-bold text-white">Продление абонемента</DialogTitle>
-              <p className="mt-1 text-sm text-cyan-50">
-                {selectedClient?.childName} · новый платёж без создания клиента
-              </p>
-            </DialogHeader>
-          </div>
-          <div className="grid gap-4 p-6">
-            {paymentError && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                {paymentError}
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
-                <p className="text-xs text-slate-500">Текущий тариф</p>
-                <p className="mt-1 font-bold text-slate-900">{selectedClient?.category}</p>
-              </div>
-              <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
-                <p className="text-xs text-slate-500">Цена пакета</p>
-                <p className="mt-1 font-bold text-slate-900">
-                  {selectedClient
-                    ? packagePrice(selectedClient.category, selectedClient.lessonsPerWeek).toLocaleString('ru-RU')
-                    : 0}{' '}
-                  ₽
+        <Dialog open={isEditOpen && !!selectedClient} onOpenChange={setIsEditOpen}>
+          <DialogContent className="max-h-[92vh] max-w-xl overflow-y-auto rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+            <div className="bg-gradient-to-br from-cyan-700 to-sky-800 px-6 py-7 text-white">
+              <DialogHeader>
+                <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                  <Pencil className="size-6" />
+                </div>
+                <DialogTitle className="text-2xl font-bold text-white">Редактирование клиента</DialogTitle>
+                <p className="mt-1 text-sm text-cyan-50">
+                  Баланс занятий и суммы меняются только через платёж или журналируемую корректировку.
                 </p>
-              </div>
+              </DialogHeader>
             </div>
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Сумма нового платежа
-              <Input
-                type="number"
-                min="1"
-                step="1"
-                value={paymentAmount}
-                disabled={paymentLoading || Boolean(paymentAttempt)}
-                onChange={(event) => setPaymentAmount(event.target.value)}
-                className="h-12 rounded-xl bg-white text-lg"
-                placeholder="Например, 16000"
-              />
-              <span className="text-xs font-normal text-slate-500">
-                Можно оплатить сразу несколько месяцев — система начислит все полные пакеты.
-              </span>
-            </label>
-            {selectedClient && Number(paymentAmount) > 0 && (
-              <div className="rounded-xl bg-cyan-50 px-4 py-3 text-sm text-cyan-900">
-                {(() => {
-                  const info = calculatePaymentLessons(
-                    selectedClient.category,
-                    selectedClient.lessonsPerWeek,
-                    Number(paymentAmount) + selectedClient.paymentBalance,
-                  )
-                  return (
-                    <>
-                      <strong>{info.packages} пак.</strong> · будет начислено <strong>{info.lessons} занятий</strong>
-                      {info.remainder > 0 ? ` · остаток ${info.remainder.toLocaleString('ru-RU')} ₽` : ''}
-                    </>
-                  )
-                })()}
+            <div className="grid gap-4 p-6">
+              {editError && (
+                <p className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {editError}
+                </p>
+              )}
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Имя ребёнка
+                <Input
+                  value={editForm.childName}
+                  onChange={(event) => updateEditForm('childName', event.target.value)}
+                  disabled={isEditing}
+                  className="h-11 bg-white"
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Родитель
+                <Input
+                  value={editForm.parentName}
+                  onChange={(event) => updateEditForm('parentName', event.target.value)}
+                  disabled={isEditing}
+                  className="h-11 bg-white"
+                />
+              </label>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                  Телефон
+                  <Input
+                    inputMode="tel"
+                    value={editForm.phone}
+                    onChange={(event) => updateEditForm('phone', formatPhone(event.target.value))}
+                    disabled={isEditing}
+                    className="h-11 bg-white"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                  Email
+                  <Input
+                    type="email"
+                    value={editForm.email}
+                    onChange={(event) => updateEditForm('email', event.target.value)}
+                    disabled={isEditing}
+                    className="h-11 bg-white"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                  Дата рождения
+                  <Input
+                    inputMode="numeric"
+                    value={editForm.birthDate}
+                    maxLength={10}
+                    onChange={(event) => updateEditForm('birthDate', formatBirthDate(event.target.value))}
+                    disabled={isEditing}
+                    placeholder="ДД.ММ.ГГГГ"
+                    className="h-11 bg-white"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                  Секция
+                  <select
+                    value={editForm.category}
+                    onChange={(event) => updateEditForm('category', event.target.value)}
+                    disabled={isEditing}
+                    className="h-11 rounded-md border border-slate-200 bg-white px-3"
+                  >
+                    <option value="плавание">Плавание</option>
+                    <option value="синхронное плавание">Синхронное плавание</option>
+                  </select>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium text-slate-700 sm:col-span-2">
+                  Нагрузка для следующей покупки
+                  <select
+                    value={editForm.lessonsPerWeek}
+                    onChange={(event) => updateEditForm('lessonsPerWeek', event.target.value)}
+                    disabled={isEditing}
+                    className="h-11 rounded-md border border-slate-200 bg-white px-3"
+                  >
+                    <option value="1">1 занятие в неделю</option>
+                    <option value="2">2 занятия в неделю</option>
+                    <option value="3">3 занятия в неделю</option>
+                  </select>
+                </label>
               </div>
-            )}
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
-              Комментарий{' '}
-              <Input
-                value={paymentComment}
-                disabled={paymentLoading || Boolean(paymentAttempt)}
-                onChange={(event) => setPaymentComment(event.target.value)}
-                className="h-11 rounded-xl bg-white"
-                placeholder="Например: оплата за октябрь и ноябрь"
-              />
-            </label>
-            <Button
-              onClick={() => void submitPayment()}
-              disabled={paymentLoading}
-              className="h-12 rounded-xl bg-cyan-600 text-base font-bold text-white hover:bg-cyan-700"
-            >
-              {paymentLoading ? 'Сохраняем…' : 'Сохранить платёж'}
-            </Button>
-          </div>
-        </DialogContent>
+              <Button
+                onClick={() => void submitEdit()}
+                disabled={isEditing}
+                className="h-12 rounded-xl bg-cyan-700 text-base font-bold text-white hover:bg-cyan-800"
+              >
+                {isEditing ? 'Сохраняем…' : 'Сохранить изменения'}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isAdjustmentOpen && !!selectedClient} onOpenChange={setIsAdjustmentOpen}>
+          <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+            <div className="bg-gradient-to-br from-amber-500 to-orange-600 px-6 py-7 text-white">
+              <DialogHeader>
+                <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                  <Settings2 className="size-6" />
+                </div>
+                <DialogTitle className="text-2xl font-bold text-white">Корректировка абонемента</DialogTitle>
+                <p className="mt-1 text-sm text-amber-50">
+                  Операция будет записана в журнал с автором, причиной и остатком до/после.
+                </p>
+              </DialogHeader>
+            </div>
+            <div className="grid gap-4 p-6">
+              {adjustmentError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {adjustmentError}
+                </div>
+              )}
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Изменение занятий
+                <Input
+                  type="number"
+                  min="-100"
+                  max="100"
+                  step="1"
+                  value={adjustmentDelta}
+                  disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
+                  onChange={(event) => setAdjustmentDelta(event.target.value)}
+                  placeholder="Например, 2 или -1"
+                  className="h-12 bg-white text-lg"
+                />
+                <span className="text-xs font-normal text-slate-500">
+                  Положительное число начисляет, отрицательное уменьшает и общий лимит, и остаток.
+                </span>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Причина <span className="text-rose-600">*</span>
+                <Input
+                  value={adjustmentReason}
+                  disabled={adjustmentLoading || Boolean(adjustmentAttempt)}
+                  onChange={(event) => setAdjustmentReason(event.target.value)}
+                  placeholder="Например: корректировка после смены тарифа"
+                  className="h-11 bg-white"
+                />
+              </label>
+              <Button
+                onClick={() => void submitAdjustment()}
+                disabled={adjustmentLoading}
+                className="h-12 rounded-xl bg-amber-600 text-base font-bold text-white hover:bg-amber-700"
+              >
+                {adjustmentLoading ? 'Сохраняем…' : 'Сохранить корректировку'}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isPaymentOpen && !!selectedClient} onOpenChange={setIsPaymentOpen}>
+          <DialogContent className="max-w-lg rounded-[28px] border-0 bg-slate-50 p-0 shadow-2xl">
+            <div className="bg-gradient-to-br from-cyan-600 to-sky-700 px-6 py-7 text-white">
+              <DialogHeader>
+                <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-white/15">
+                  <CreditCard className="size-6" />
+                </div>
+                <DialogTitle className="text-2xl font-bold text-white">Продление абонемента</DialogTitle>
+                <p className="mt-1 text-sm text-cyan-50">
+                  {selectedClient?.childName} · новый платёж без создания клиента
+                </p>
+              </DialogHeader>
+            </div>
+            <div className="grid gap-4 p-6">
+              {paymentError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+                >
+                  {paymentError}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                  <p className="text-xs text-slate-500">Текущий тариф</p>
+                  <p className="mt-1 font-bold text-slate-900">{selectedClient?.category}</p>
+                </div>
+                <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                  <p className="text-xs text-slate-500">Цена пакета</p>
+                  <p className="mt-1 font-bold text-slate-900">
+                    {selectedClient
+                      ? packagePrice(selectedClient.category, selectedClient.lessonsPerWeek).toLocaleString('ru-RU')
+                      : 0}{' '}
+                    ₽
+                  </p>
+                </div>
+              </div>
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Сумма нового платежа
+                <Input
+                  aria-label="Сумма нового платежа"
+                  type="number"
+                  min="1"
+                  step="0.01"
+                  value={paymentAmount}
+                  disabled={paymentLoading || Boolean(paymentAttempt)}
+                  onChange={(event) => setPaymentAmount(event.target.value)}
+                  className="h-12 rounded-xl bg-white text-lg"
+                  placeholder="Например, 16000"
+                />
+                <span className="text-xs font-normal text-slate-500">
+                  Можно оплатить сразу несколько месяцев — система начислит все полные пакеты.
+                </span>
+              </label>
+              {selectedClient && Number(paymentAmount) > 0 && (
+                <div className="rounded-xl bg-cyan-50 px-4 py-3 text-sm text-cyan-900">
+                  {(() => {
+                    const info = calculatePaymentLessons(
+                      selectedClient.category,
+                      selectedClient.lessonsPerWeek,
+                      paymentAmount,
+                      selectedClient.paymentBalance,
+                    )
+                    return (
+                      <>
+                        <strong>{info.packages} пак.</strong> · будет начислено <strong>{info.lessons} занятий</strong>
+                        {info.remainder > 0 ? ` · остаток ${info.remainder.toLocaleString('ru-RU')} ₽` : ''}
+                      </>
+                    )
+                  })()}
+                </div>
+              )}
+              <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+                Комментарий{' '}
+                <Input
+                  value={paymentComment}
+                  disabled={paymentLoading || Boolean(paymentAttempt)}
+                  onChange={(event) => setPaymentComment(event.target.value)}
+                  className="h-11 rounded-xl bg-white"
+                  placeholder="Например: оплата за октябрь и ноябрь"
+                />
+              </label>
+              <Button
+                onClick={() => void submitPayment()}
+                disabled={paymentLoading}
+                className="h-12 rounded-xl bg-cyan-600 text-base font-bold text-white hover:bg-cyan-700"
+              >
+                {paymentLoading ? 'Сохраняем…' : 'Сохранить платёж'}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </Dialog>
     </div>
   )

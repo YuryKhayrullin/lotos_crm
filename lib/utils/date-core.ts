@@ -26,6 +26,39 @@ export const dayOfWeekToNumber = (day: string): number => {
 export const toLocalDateOnly = (date: Date): string =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 
+// Calendar-only representation; never send this virtual Date as an instant.
+export const calendarDayInZone = (instant: Date, timeZone?: string): Date => {
+  if (!timeZone) return new Date(instant)
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(instant)
+  const part = (name: string) => Number(parts.find((value) => value.type === name)?.value)
+  return new Date(part('year'), part('month') - 1, part('day'), 12)
+}
+export const instantTemporalStatus = (startsAt: string, endsAt: string, now: Date): LessonTemporalStatus => {
+  const start = Date.parse(startsAt),
+    end = Date.parse(endsAt)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 'unknown'
+  return now.getTime() < start ? 'upcoming' : now.getTime() < end ? 'ongoing' : 'completed'
+}
+export const isFutureLocalTime = (date: string, time: string, now: Date, timeZone?: string): boolean => {
+  if (!timeZone) return new Date(date + 'T' + time + ':00').getTime() > now.getTime()
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const part = (name: string) => parts.find((value) => value.type === name)?.value || ''
+  return date + 'T' + time > `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}`
+}
+
 // For a recurring lesson, resolve the actual day in the displayed week.
 export const lessonOccurrenceDate = (lesson: LessonDateLike, weekStart: Date): string | null => {
   const start = lesson.date ? parseDateOnly(lesson.date) : null

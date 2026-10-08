@@ -1,5 +1,8 @@
 'use client'
 
+import { MutationRecoveryPanel } from './MutationRecoveryPanel'
+import { apiClient } from '@/lib/api-client'
+
 import { useEffect, useState } from 'react'
 import { observer } from 'mobx-react-lite'
 import { useStore } from '@/store/StoreProvider'
@@ -28,7 +31,16 @@ export const CoachWorkspace = observer(() => {
     }
   }, [])
 
-  const now = new Date()
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const refresh = () => setNow(new Date())
+    const timer = window.setInterval(refresh, 30000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [])
   const screen = store.currentScreen === 'Расписание' ? 'Расписание' : 'Дашборд'
   const username = store.authStore.user?.username || 'Тренер'
   const navigation = [
@@ -130,7 +142,14 @@ export const CoachWorkspace = observer(() => {
           )}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-sm text-slate-600">
-              {now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}
+              {now.toLocaleDateString('ru-RU', {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+                ...(apiClient.isPostgresBackend()
+                  ? { timeZone: store.currentBranch?.timeZone || 'Europe/Moscow' }
+                  : {}),
+              })}
             </p>
             <button
               type="button"
@@ -161,6 +180,7 @@ export const CoachWorkspace = observer(() => {
               )}
             </div>
           )}
+          <MutationRecoveryPanel key={store.authStore.sessionVersion} />
           <WorkspaceBoundary key={`${store.authStore.sessionVersion}:${screen}`}>
             {!store.hasLoadedData ? (
               <p role="status" className="rounded-xl border border-slate-200 bg-white p-6">
@@ -176,6 +196,7 @@ export const CoachWorkspace = observer(() => {
                   lessons={store.sortedBranchLessons}
                   branchName={store.currentBranch?.name || 'Ваш филиал'}
                   now={now}
+                  timeZone={store.currentBranch?.timeZone || 'Europe/Moscow'}
                   onSchedule={() => store.setScreen('Расписание')}
                   onOpenLesson={(lesson, date) => {
                     setOccurrenceDate(toLocalDateOnly(date))

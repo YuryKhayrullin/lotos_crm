@@ -52,6 +52,7 @@ export const AttendanceModal = observer(
     const [attendance, setAttendance] = useState<AttendanceMap>({})
     const [initialAttendance, setInitialAttendance] = useState<AttendanceMap>({})
     const [pendingAttempt, setPendingAttempt] = useState<AttendanceAttempt | null>(null)
+    const [lessonVersion, setLessonVersion] = useState<number | undefined>()
     const [saving, setSaving] = useState(false)
     const savingRef = useRef(false)
     const loadedDraftKeyRef = useRef<string | null>(null)
@@ -92,6 +93,7 @@ export const AttendanceModal = observer(
         .then((result) => {
           if (controller.signal.aborted || !sameSession()) return
           setRoster(result.clients)
+          setLessonVersion(result.lessonVersion)
           const initialMarks: AttendanceMap = {}
           result.clients.forEach((client) => {
             initialMarks[client.id] = client.mark
@@ -107,13 +109,20 @@ export const AttendanceModal = observer(
                 nextMarks[id] = restored.attendance[id]
             })
           }
-          setPendingAttempt(restored?.pendingAttempt || null)
+          const attempt = result.pendingAttempt || restored?.pendingAttempt || null
+          if (result.pendingAttempt) {
+            result.pendingAttempt.attendanceList.forEach((mark) => {
+              nextMarks[mark.clientId] = mark.status
+            })
+            setSaveError('Найдена сохранённая попытка. Повтор отправит прежние данные и ключ без повторного списания.')
+          }
+          setPendingAttempt(attempt)
           setAttendance(nextMarks)
           setInitialAttendance(initialMarks)
           rememberAttendanceDraft(draftKey, {
             attendance: nextMarks,
             initialAttendance: initialMarks,
-            pendingAttempt: restored?.pendingAttempt || null,
+            pendingAttempt: attempt,
           })
         })
         .catch((error) => {
@@ -138,7 +147,7 @@ export const AttendanceModal = observer(
     if (!lesson) return null
 
     const handleToggle = (clientId: string, status: AttendanceStatus) => {
-      if (pendingAttempt) return
+      if (pendingAttempt || roster.find((client) => client.id === clientId)?.canMark === false) return
       const next = {
         ...attendance,
         [clientId]: attendance[clientId] === status && initialAttendance[clientId] !== status ? null : status,
@@ -151,7 +160,8 @@ export const AttendanceModal = observer(
       if (pendingAttempt) return
       const next = { ...attendance }
       roster.forEach((client) => {
-        if (client.remainingLessons > 0 || initialAttendance[client.id] === 'attended') next[client.id] = 'attended'
+        if (client.canMark !== false && (client.remainingLessons > 0 || initialAttendance[client.id] === 'attended'))
+          next[client.id] = 'attended'
       })
       setAttendance(next)
       remember(next)
@@ -180,7 +190,12 @@ export const AttendanceModal = observer(
           lessonId: lesson.id,
           date: lessonDate,
           requestId: createRequestId(),
-          attendanceList: changedEntries.map(([clientId, status]) => ({ clientId, status })),
+          expectedLessonVersion: lessonVersion,
+          attendanceList: changedEntries.map(([clientId, status]) => ({
+            clientId,
+            status,
+            ...(lessonVersion ? { expectedVersion: roster.find((client) => client.id === clientId)?.version } : {}),
+          })),
         }
         setPendingAttempt(attempt)
         remember(attendance, attempt)
@@ -189,6 +204,7 @@ export const AttendanceModal = observer(
           attempt.lessonId,
           attempt.date,
           attempt.requestId,
+          { expectedLessonVersion: attempt.expectedLessonVersion, reason: attempt.reason },
         )
         if (!sameSession()) return
         setPendingAttempt(null)
@@ -347,7 +363,8 @@ export const AttendanceModal = observer(
                   {roster.map((client) => {
                     const mark = attendance[client.id]
                     const wasAttended = initialAttendance[client.id] === 'attended'
-                    const attendanceDisabled = client.remainingLessons <= 0 && !wasAttended
+                    const attendanceDisabled =
+                      client.canMark === false || (client.remainingLessons <= 0 && !wasAttended)
                     return (
                       <div
                         key={client.id}
@@ -392,7 +409,7 @@ export const AttendanceModal = observer(
                             type="button"
                             variant="outline"
                             aria-pressed={mark === 'absent'}
-                            disabled={saving || Boolean(pendingAttempt)}
+                            disabled={saving || Boolean(pendingAttempt) || client.canMark === false}
                             onClick={() => handleToggle(client.id, 'absent')}
                             className={`h-10 min-w-28 rounded-xl ${
                               mark === 'absent'

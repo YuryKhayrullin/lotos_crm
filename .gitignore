@@ -14,9 +14,25 @@ tsconfig.tsbuildinfo
 typescript_errors.log
 .env.local
 
+# All real environment files, including future staging/production credentials
+.env*
+!.env.example
+!**/.env*.example
+
+# Private files and generated migration/verification artifacts
+.artifacts/
+.private/
+.tools/
+.migration-baseline/
+storage/
+
 
 # Common ignores
 node_modules
 .next/
 .DS_Store
 *:Zone.Identifier
+.generated/
+
+# User-supplied migration source: may contain personal data/password hashes.
+/База данных.xlsx

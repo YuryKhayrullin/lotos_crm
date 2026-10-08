@@ -1,0 +1,625 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../.generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  admin
+  coach
+}
+
+enum UserStatus {
+  pending
+  active
+  disabled
+}
+
+enum ClientStatus {
+  active
+  paused
+  archived
+}
+
+enum Category {
+  swimming
+  synchronized_swimming
+}
+
+enum LessonStatus {
+  scheduled
+  completed
+  cancelled
+}
+
+enum EnrollmentStatus {
+  active
+  removed
+}
+
+enum AttendanceStatus {
+  attended
+  absent
+}
+
+enum LedgerType {
+  opening_balance
+  purchase
+  attendance
+  attendance_correction
+  adjustment
+  audit_repair
+}
+
+// Better Auth core models. Auth children may cascade; domain history never does.
+// Nullable email permits storing legacy username-only accounts. Enabling login
+// for imported accounts still requires the separately approved password policy.
+model User {
+  id            String     @id @default(uuid())
+  name          String
+  email         String?    @unique
+  emailVerified Boolean    @default(false) @map("email_verified")
+  image         String?
+  username      String?    @unique
+  role          Role       @default(coach)
+  status        UserStatus @default(pending)
+  authVersion   Int        @default(1) @map("auth_version")
+  branchId      String?    @map("branch_id")
+  disabledAt    DateTime?  @map("disabled_at") @db.Timestamptz(3)
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  branch               Branch?               @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  sessions             Session[]
+  accounts             Account[]
+  coach                Coach?
+  requests             MutationRequest[]
+  auditEvents          AuditEvent[]
+  createdLessons       Lesson[]              @relation("LessonCreator")
+  attendanceEvents     AttendanceEvent[]
+  recordedPayments     Payment[]
+  ledgerEntries        LessonLedgerEntry[]
+  documents            Document[]
+  registrationAttempts RegistrationAttempt[]
+  attendanceDrafts     AttendanceDraft[]
+  documentUploads      DocumentUpload[]
+  mutationDrafts       MutationDraft[]
+  importBatches        ImportBatch[]
+
+  @@index([branchId, status])
+  @@map("users")
+}
+
+model Session {
+  id          String   @id @default(uuid())
+  token       String   @unique
+  userId      String   @map("user_id")
+  authVersion Int      @default(1) @map("auth_version")
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id @default(uuid())
+  userId                String    @map("user_id")
+  accountId             String    @map("account_id")
+  providerId            String    @map("provider_id")
+  password              String?
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at") @db.Timestamptz(3)
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at") @db.Timestamptz(3)
+  scope                 String?
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(uuid())
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([identifier])
+  @@index([expiresAt])
+  @@map("verifications")
+}
+
+model Branch {
+  id               String         @id @default(uuid())
+  name             String         @db.VarChar(150)
+  address          String         @db.VarChar(300)
+  timeZone         String         @default("Europe/Moscow") @map("time_zone") @db.VarChar(100)
+  archivedAt       DateTime?      @map("archived_at") @db.Timestamptz(3)
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  users            User[]
+  coaches          Coach[]
+  clients          Client[]
+  series           LessonSeries[]
+  lessons          Lesson[]
+  coachMemberships CoachBranch[]
+
+  @@map("branches")
+}
+
+model Coach {
+  id          String         @id @default(uuid())
+  userId      String?        @unique @map("user_id")
+  branchId    String         @map("branch_id")
+  name        String         @db.VarChar(150)
+  specialty   String         @default("Тренер") @db.VarChar(150)
+  phone       String?        @db.VarChar(40)
+  birthDate   DateTime?      @map("birth_date") @db.Date
+  archivedAt  DateTime?      @map("archived_at") @db.Timestamptz(3)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  user        User?          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  branch      Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  series      LessonSeries[]
+  lessons     Lesson[]
+  memberships CoachBranch[]
+
+  @@unique([id, branchId])
+  @@index([branchId, archivedAt])
+  @@map("coaches")
+}
+
+// Historical association, not an authorization decision. A coach can change
+// current branch without changing the branch/person of existing lessons.
+model CoachBranch {
+  id         String         @id @default(uuid())
+  coachId    String         @map("coach_id")
+  branchId   String         @map("branch_id")
+  assignedAt DateTime       @default(now()) @map("assigned_at") @db.Timestamptz(3)
+  endedAt    DateTime?      @map("ended_at") @db.Timestamptz(3)
+  coach      Coach          @relation(fields: [coachId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  branch     Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  lessons    Lesson[]
+  series     LessonSeries[]
+
+  @@unique([coachId, branchId])
+  @@index([branchId, endedAt])
+  @@map("coach_branches")
+}
+
+model Client {
+  id                  String              @id @default(uuid())
+  branchId            String              @map("branch_id")
+  childName           String              @map("child_name") @db.VarChar(150)
+  parentName          String              @map("parent_name") @db.VarChar(150)
+  phone               String?             @db.VarChar(40)
+  email               String?             @db.VarChar(254)
+  birthDate           DateTime?           @map("birth_date") @db.Date
+  category            Category            @default(swimming)
+  lessonsPerWeek      Int                 @default(1) @map("lessons_per_week")
+  status              ClientStatus        @default(active)
+  remainingLessons    Int                 @default(0) @map("remaining_lessons")
+  totalLessons        Int                 @default(0) @map("total_lessons")
+  ledgerVersion       Int                 @default(0) @map("ledger_version")
+  version             Int                 @default(1)
+  paidAmountMinor     BigInt              @default(0) @map("paid_amount_minor")
+  paymentBalanceMinor BigInt              @default(0) @map("payment_balance_minor")
+  purchasedAt         DateTime?           @map("purchased_at") @db.Timestamptz(3)
+  comment             String?             @db.VarChar(2000)
+  createdAt           DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  branch              Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  enrollments         LessonEnrollment[]
+  seriesEnrollments   SeriesEnrollment[]
+  payments            Payment[]
+  ledger              LessonLedgerEntry[]
+  documents           Document[]
+  documentUploads     DocumentUpload[]
+  receiptDocumentId   String?             @map("receipt_document_id")
+  receiptVersion      Int                 @default(0) @map("receipt_version")
+  currentReceipt      Document?           @relation("CurrentReceipt", fields: [receiptDocumentId, id, branchId], references: [id, clientId, branchId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([id, branchId])
+  @@index([branchId, status, childName, id])
+  @@map("clients")
+}
+
+// Series is a template; an occurrence is a concrete lesson with its own roster.
+model LessonSeries {
+  id              String             @id @default(uuid())
+  branchId        String             @map("branch_id")
+  coachId         String             @map("coach_id")
+  title           String             @db.VarChar(150)
+  location        String?            @db.VarChar(150)
+  category        Category
+  startDate       DateTime           @map("start_date") @db.Date
+  endDate         DateTime?          @map("end_date") @db.Date
+  localTime       DateTime           @map("local_time") @db.Time(0)
+  timeZone        String             @map("time_zone") @db.VarChar(100)
+  weekdays        Int[]
+  intervalWeeks   Int                @default(1) @map("interval_weeks")
+  durationMinutes Int                @default(60) @map("duration_minutes")
+  cancelledAt     DateTime?          @map("cancelled_at") @db.Timestamptz(3)
+  version         Int                @default(1)
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  branch          Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  coach           Coach              @relation(fields: [coachId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  coachMembership CoachBranch        @relation(fields: [coachId, branchId], references: [coachId, branchId], onDelete: Restrict, onUpdate: Restrict)
+  lessons         Lesson[]
+  enrollments     SeriesEnrollment[]
+
+  @@unique([id, branchId])
+  @@index([branchId, startDate])
+  @@index([coachId, branchId])
+  @@map("lesson_series")
+}
+
+model SeriesEnrollment {
+  id             String           @id @default(uuid())
+  seriesId       String           @map("series_id")
+  clientId       String           @map("client_id")
+  branchId       String           @map("branch_id")
+  status         EnrollmentStatus @default(active)
+  effectiveFrom  DateTime         @map("effective_from") @db.Date
+  effectiveUntil DateTime?        @map("effective_until") @db.Date
+  series         LessonSeries     @relation(fields: [seriesId, branchId], references: [id, branchId], onDelete: Restrict)
+  client         Client           @relation(fields: [clientId, branchId], references: [id, branchId], onDelete: Restrict)
+
+  @@unique([seriesId, clientId])
+  @@index([clientId, branchId])
+  @@map("series_enrollments")
+}
+
+model Lesson {
+  id                 String             @id @default(uuid())
+  branchId           String             @map("branch_id")
+  coachId            String             @map("coach_id")
+  seriesId           String?            @map("series_id")
+  createdById        String             @map("created_by_id")
+  title              String             @db.VarChar(150)
+  location           String?            @db.VarChar(150)
+  category           Category
+  localDate          DateTime           @map("local_date") @db.Date
+  timeZone           String             @map("time_zone") @db.VarChar(100)
+  startsAt           DateTime           @map("starts_at") @db.Timestamptz(3)
+  endsAt             DateTime           @map("ends_at") @db.Timestamptz(3)
+  status             LessonStatus       @default(scheduled)
+  capacity           Int                @default(10)
+  version            Int                @default(1)
+  rosterConfirmed    Boolean            @default(false) @map("roster_confirmed")
+  cancellationReason String?            @map("cancellation_reason") @db.VarChar(500)
+  cancelledAt        DateTime?          @map("cancelled_at") @db.Timestamptz(3)
+  createdAt          DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  branch             Branch             @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  coach              Coach              @relation(fields: [coachId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  coachMembership    CoachBranch        @relation(fields: [coachId, branchId], references: [coachId, branchId], onDelete: Restrict, onUpdate: Restrict)
+  series             LessonSeries?      @relation(fields: [seriesId, branchId], references: [id, branchId], onDelete: Restrict)
+  createdBy          User               @relation("LessonCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  enrollments        LessonEnrollment[]
+  attendanceDrafts   AttendanceDraft[]
+
+  @@unique([id, branchId])
+  @@unique([seriesId, localDate])
+  @@index([branchId, localDate, startsAt])
+  @@index([coachId, startsAt])
+  @@map("lessons")
+}
+
+model LessonEnrollment {
+  id         String           @id @default(uuid())
+  lessonId   String           @map("lesson_id")
+  clientId   String           @map("client_id")
+  branchId   String           @map("branch_id")
+  status     EnrollmentStatus @default(active)
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  removedAt  DateTime?        @map("removed_at") @db.Timestamptz(3)
+  lesson     Lesson           @relation(fields: [lessonId, branchId], references: [id, branchId], onDelete: Restrict)
+  client     Client           @relation(fields: [clientId, branchId], references: [id, branchId], onDelete: Restrict)
+  attendance Attendance?
+
+  @@unique([lessonId, clientId])
+  @@unique([id, lessonId, clientId, branchId])
+  @@index([clientId, branchId, status])
+  @@map("lesson_enrollments")
+}
+
+model Attendance {
+  id           String            @id @default(uuid())
+  enrollmentId String            @unique @map("enrollment_id")
+  lessonId     String            @map("lesson_id")
+  clientId     String            @map("client_id")
+  branchId     String            @map("branch_id")
+  status       AttendanceStatus
+  version      Int               @default(1)
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  enrollment   LessonEnrollment  @relation(fields: [enrollmentId, lessonId, clientId, branchId], references: [id, lessonId, clientId, branchId], onDelete: Restrict)
+  events       AttendanceEvent[]
+
+  @@unique([lessonId, clientId])
+  @@unique([id, clientId, branchId])
+  @@unique([enrollmentId, lessonId, clientId, branchId])
+  @@index([clientId, updatedAt])
+  @@map("attendance")
+}
+
+model AttendanceEvent {
+  id             String             @id @default(uuid())
+  attendanceId   String             @map("attendance_id")
+  clientId       String             @map("client_id")
+  branchId       String             @map("branch_id")
+  requestId      String             @map("request_id")
+  actorId        String             @map("actor_id")
+  previousStatus AttendanceStatus?  @map("previous_status")
+  status         AttendanceStatus
+  version        Int
+  reason         String?            @db.VarChar(500)
+  lessonSnapshot Json               @default("{}") @map("lesson_snapshot")
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  attendance     Attendance         @relation(fields: [attendanceId, clientId, branchId], references: [id, clientId, branchId], onDelete: Restrict)
+  request        MutationRequest    @relation(fields: [requestId, actorId], references: [id, actorId], onDelete: Restrict)
+  actor          User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  ledger         LessonLedgerEntry?
+
+  @@unique([attendanceId, version])
+  @@unique([id, clientId, branchId])
+  @@index([requestId])
+  @@index([actorId])
+  @@index([clientId, createdAt])
+  @@map("attendance_events")
+}
+
+model Payment {
+  id                String             @id @default(uuid())
+  clientId          String             @map("client_id")
+  branchId          String             @map("branch_id")
+  requestId         String             @map("request_id")
+  actorId           String             @map("actor_id")
+  amountMinor       BigInt             @map("amount_minor")
+  currency          String             @default("RUB") @db.VarChar(3)
+  category          Category
+  lessonsPerWeek    Int                @map("lessons_per_week")
+  packagePriceMinor BigInt             @map("package_price_minor")
+  packageLessons    Int                @map("package_lessons")
+  packagesCount     Int                @map("packages_count")
+  lessonsAdded      Int                @map("lessons_added")
+  paidAt            DateTime           @map("paid_at") @db.Timestamptz(3)
+  comment           String?            @db.VarChar(2000)
+  client            Client             @relation(fields: [clientId, branchId], references: [id, branchId], onDelete: Restrict)
+  actor             User               @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  request           MutationRequest    @relation(fields: [requestId, actorId], references: [id, actorId], onDelete: Restrict)
+  ledger            LessonLedgerEntry?
+
+  @@unique([requestId, clientId])
+  @@unique([id, clientId, branchId])
+  @@index([clientId, paidAt])
+  @@index([branchId, paidAt])
+  @@index([actorId])
+  @@map("payments")
+}
+
+// This is an accounting projection, not a CHECK proving aggregate consistency.
+// Ledger + client projection + operation result must commit in one transaction.
+model LessonLedgerEntry {
+  id                String           @id @default(uuid())
+  clientId          String           @map("client_id")
+  branchId          String           @map("branch_id")
+  requestId         String           @map("request_id")
+  actorId           String           @map("actor_id")
+  paymentId         String?          @unique @map("payment_id")
+  attendanceEventId String?          @unique @map("attendance_event_id")
+  type              LedgerType
+  lessonsDelta      Int              @map("lessons_delta")
+  sequence          Int
+  totalLessonsDelta Int              @map("total_lessons_delta")
+  balanceBefore     Int              @map("balance_before")
+  balanceAfter      Int              @map("balance_after")
+  totalBefore       Int              @map("total_before")
+  totalAfter        Int              @map("total_after")
+  reason            String           @db.VarChar(500)
+  comment           String?          @db.VarChar(2000)
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  client            Client           @relation(fields: [clientId, branchId], references: [id, branchId], onDelete: Restrict)
+  actor             User             @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  request           MutationRequest  @relation(fields: [requestId, actorId], references: [id, actorId], onDelete: Restrict)
+  payment           Payment?         @relation(fields: [paymentId, clientId, branchId], references: [id, clientId, branchId], onDelete: Restrict)
+  attendanceEvent   AttendanceEvent? @relation(fields: [attendanceEventId, clientId, branchId], references: [id, clientId, branchId], onDelete: Restrict)
+
+  @@unique([paymentId, clientId, branchId])
+  @@unique([clientId, sequence])
+  @@unique([attendanceEventId, clientId, branchId])
+  @@index([clientId, createdAt, id])
+  @@index([requestId])
+  @@index([actorId])
+  @@map("lesson_ledger")
+}
+
+// Durable confirmation, keyed per actor; payload hash, not raw personal data.
+// A completed result is inserted in the SAME transaction as its domain writes.
+model MutationRequest {
+  id               String              @id @default(uuid())
+  actorId          String              @map("actor_id")
+  requestKey       String              @map("request_key") @db.VarChar(150)
+  action           String              @db.VarChar(64)
+  fingerprint      String              @db.Char(64)
+  result           Json
+  completedAt      DateTime            @default(now()) @map("completed_at") @db.Timestamptz(3)
+  actor            User                @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  attendanceEvents AttendanceEvent[]
+  payments         Payment[]
+  ledger           LessonLedgerEntry[]
+  audit            AuditEvent[]
+  documents        Document[]
+
+  @@unique([actorId, requestKey])
+  @@unique([id, actorId])
+  @@index([completedAt])
+  @@map("mutation_requests")
+}
+
+model AuditEvent {
+  id            String           @id @default(uuid())
+  actorId       String?          @map("actor_id")
+  requestId     String?          @map("request_id")
+  action        String           @db.VarChar(64)
+  entityType    String           @map("entity_type") @db.VarChar(64)
+  entityId      String           @map("entity_id")
+  branchId      String?          @map("branch_id")
+  changedFields String[]         @map("changed_fields")
+  reason        String?          @db.VarChar(500)
+  source        String           @default("api") @db.VarChar(64)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  actor         User?            @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  request       MutationRequest? @relation(fields: [requestId, actorId], references: [id, actorId], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([actorId])
+  @@index([requestId])
+  @@map("audit_events")
+}
+
+// A private storage key, NEVER a filesystem path or a public receipt URL.
+model Document {
+  id           String          @id @default(uuid())
+  clientId     String          @map("client_id")
+  branchId     String          @map("branch_id")
+  uploadedById String          @map("uploaded_by_id")
+  requestId    String          @map("request_id")
+  storageKey   String          @unique @map("storage_key") @db.VarChar(100)
+  originalName String          @map("original_name") @db.VarChar(200)
+  mimeType     String          @map("mime_type") @db.VarChar(100)
+  sizeBytes    BigInt          @map("size_bytes")
+  sha256       String          @db.Char(64)
+  supersededAt DateTime?       @map("superseded_at") @db.Timestamptz(3)
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  client       Client          @relation(fields: [clientId, branchId], references: [id, branchId], onDelete: Restrict)
+  uploadedBy   User            @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  request      MutationRequest @relation(fields: [requestId, uploadedById], references: [id, actorId], onDelete: Restrict)
+  currentFor   Client[]        @relation("CurrentReceipt")
+
+  @@unique([id, clientId, branchId])
+  @@index([clientId, createdAt])
+  @@index([uploadedById])
+  @@index([requestId])
+  @@map("documents")
+}
+
+// File preparation is durable but NOT a confirmed accounting mutation. A file
+// without attached metadata stays private and can be reconciled/retried.
+model DocumentUpload {
+  id          String   @id @default(uuid())
+  actorId     String   @map("actor_id")
+  clientId    String   @map("client_id")
+  requestKey  String   @map("request_key") @db.VarChar(150)
+  fingerprint String   @db.Char(64)
+  storageKey  String   @unique @map("storage_key") @db.VarChar(100)
+  state       String   @default("pending") @db.VarChar(20)
+  payload     Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  actor       User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  @@unique([actorId, requestKey])
+  @@index([state, createdAt])
+  @@map("document_uploads")
+}
+
+// Operator import provenance, never an authorization or payment confirmation.
+model ImportBatch {
+  namespace    String         @id @db.VarChar(80)
+  sourceSha256 String         @unique @map("source_sha256") @db.Char(64)
+  planSha256   String         @map("plan_sha256") @db.Char(64)
+  actorId      String         @map("actor_id")
+  actor        User           @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  report       Json
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  records      ImportRecord[]
+
+  @@map("import_batches")
+}
+
+// Frozen private intent is not confirmation. Never store account passwords here.
+model MutationDraft {
+  id                 String   @id @default(uuid())
+  actorId            String   @map("actor_id")
+  requestKey         String   @map("request_key") @db.VarChar(150)
+  action             String   @db.VarChar(64)
+  fingerprint        String   @db.Char(64)
+  payload            Json
+  requiresCredential Boolean  @default(false) @map("requires_credential")
+  state              String   @default("pending") @db.VarChar(20)
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  actor              User     @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([actorId, requestKey])
+  @@index([actorId, state, createdAt])
+  @@map("mutation_drafts")
+}
+
+model ImportRecord {
+  id          String      @id
+  namespace   String      @db.VarChar(80)
+  entityType  String      @map("entity_type") @db.VarChar(80)
+  sourceId    String      @map("source_id") @db.VarChar(150)
+  targetId    String?     @map("target_id")
+  disposition String      @db.VarChar(40)
+  payload     Json
+  batch       ImportBatch @relation(fields: [namespace], references: [namespace], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([namespace, entityType, sourceId])
+  @@index([namespace, entityType])
+  @@map("import_records")
+}
+
+model AuthRateBucket {
+  key       String   @id @db.Char(64)
+  hits      Int
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@index([expiresAt])
+  @@map("auth_rate_buckets")
+}
+
+model RegistrationAttempt {
+  key         String   @id @db.Char(64)
+  fingerprint String   @db.Char(64)
+  userId      String   @map("user_id")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([userId])
+  @@map("registration_attempts")
+}
+
+// Private server-side recovery; never passwords, pupil names or browser tokens.
+// An unresolved attempt is kept until an explicit confirmed acknowledgement.
+model AttendanceDraft {
+  id          String   @id @default(uuid())
+  actorId     String   @map("actor_id")
+  lessonId    String   @map("lesson_id")
+  requestKey  String   @map("request_key") @db.VarChar(150)
+  fingerprint String   @db.Char(64)
+  payload     Json
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  actor       User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  lesson      Lesson   @relation(fields: [lessonId], references: [id], onDelete: Restrict)
+
+  @@unique([actorId, requestKey])
+  @@index([actorId, lessonId, createdAt])
+  @@map("attendance_drafts")
+}
