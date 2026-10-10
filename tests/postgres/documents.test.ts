@@ -13,6 +13,8 @@ import { createPostgresRouter } from '../../lib/server/postgres/http'
 import { inspectDocumentUploads, documentRoot } from '../../lib/server/postgres/documents'
 import { authDigest } from '../../lib/server/postgres/accounts'
 import { createHash } from 'node:crypto'
+import { FixtureBlob } from './blob-fixture'
+import { postgresReadiness } from '../../lib/server/postgres/health'
 
 validateEnvironment(process.env, 'test')
 const db = createPostgresClient(process.env),
@@ -95,6 +97,155 @@ before(async () => {
 })
 after(async () => {
   await db.$disconnect()
+})
+test('disabled cloud receipts reject all direct/envelope routes without storage access or SQL document writes', async () => {
+  const client = await card()
+  const beforeCounts = [await db.document.count(), await db.documentUpload.count()]
+  // SQL/auth are injected from isolated Test; the cloud profile is fictional
+  // and never passed to a connection factory or a remote storage transport.
+  const values: NodeJS.ProcessEnv = {
+    NODE_ENV: 'production',
+    APP_ENV: 'staging',
+    DEPLOY_TARGET: 'vercel',
+    CRM_BACKEND: 'postgres',
+    APP_URL: 'https://lotos-fictional-staging.vercel.app',
+    CLOUD_DATABASE_HOST: 'ep-fictional-pooler.eu-central-1.aws.neon.tech',
+    DATABASE_URL: `postgresql://lotos_runtime:${'1'.repeat(64)}@ep-fictional-pooler.eu-central-1.aws.neon.tech:5432/lotos_crm_staging?sslmode=verify-full`,
+    BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET!,
+    DOCUMENT_STORAGE: 'disabled',
+    COACH_REGISTRATION_ENABLED: 'false',
+    TRUSTED_PROXY: 'vercel',
+  }
+  const noFiles = createPostgresRouter(db, createPostgresAuth(db, process.env), values, {
+    documentStorage: {
+      maxBytes: 3 * 1024 * 1024,
+      initialize: async () => {
+        throw Error('Storage must not be contacted')
+      },
+      persist: async () => {
+        throw Error('Storage must not be contacted')
+      },
+      read: async () => {
+        throw Error('Storage must not be contacted')
+      },
+    },
+  })
+  const calls = [
+    { segments: ['receipts', client.id], method: 'GET' },
+    { segments: ['receipts', client.id], method: 'POST', body: {} },
+    { segments: ['receipts', client.id, 'attempts'], method: 'GET' },
+    {
+      segments: ['receipts', client.id, 'attempts'],
+      method: 'POST',
+      body: { requestId: 'never-created', discard: true },
+    },
+    { segments: ['crm'], method: 'POST', body: { action: 'uploadReceipt', payload: {} } },
+    { segments: ['crm'], method: 'POST', body: { action: 'getReceipt', payload: { clientId: client.id } } },
+  ]
+  for (const call of calls) {
+    const response = await noFiles(
+      new Request(values.APP_URL + '/api/' + call.segments.join('/'), {
+        method: call.method,
+        headers: { cookie: admin, origin: values.APP_URL!, 'content-type': 'application/json' },
+        ...(call.body ? { body: JSON.stringify(call.body) } : {}),
+      }),
+      call.segments,
+    )
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).code, 'FEATURE_DISABLED')
+    assert.equal(response.headers.get('x-crm-receipt-max-bytes'), '0')
+  }
+  assert.deepEqual([await db.document.count(), await db.documentUpload.count()], beforeCounts)
+  assert.equal(
+    (await noFiles(new Request(values.APP_URL + '/api/receipts/' + client.id), ['receipts', client.id])).status,
+    401,
+  )
+})
+test('disabled Vercel readiness requires SQL schema but not a Blob marker or local document directory', async () => {
+  const values: NodeJS.ProcessEnv = {
+    NODE_ENV: 'production',
+    APP_ENV: 'staging',
+    DEPLOY_TARGET: 'vercel',
+    CRM_BACKEND: 'postgres',
+    APP_URL: 'https://lotos-fictional-staging.vercel.app',
+    CLOUD_DATABASE_HOST: 'ep-fictional-pooler.eu-central-1.aws.neon.tech',
+    DATABASE_URL: `postgresql://lotos_runtime:${'1'.repeat(64)}@ep-fictional-pooler.eu-central-1.aws.neon.tech:5432/lotos_crm_staging?sslmode=verify-full`,
+    BETTER_AUTH_SECRET: '3'.repeat(64),
+    DOCUMENT_STORAGE: 'disabled',
+    COACH_REGISTRATION_ENABLED: 'false',
+    TRUSTED_PROXY: 'vercel',
+  }
+  assert.equal(await postgresReadiness(db, values), true)
+  assert.equal(await postgresReadiness(db, { ...values, DOCUMENT_STORAGE: '' }), false)
+})
+test('real SQL with private Blob transport preserves intent/recovery across failed commit and new router', async () => {
+  const fixture = new FixtureBlob(),
+    storage = fixture.store()
+  await storage.setup()
+  let cloud = createPostgresRouter(db, createPostgresAuth(db, process.env), process.env, { documentStorage: storage })
+  const call = (segments: string[], body?: unknown, cookie = admin, method = 'POST') =>
+    cloud(
+      new Request(process.env.APP_URL + '/api/' + segments.join('/'), {
+        method,
+        headers: { cookie, origin: process.env.APP_URL!, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+      segments,
+    )
+  const client = await card(),
+    data = input(client.id)
+  await db.$executeRawUnsafe(
+    `CREATE FUNCTION fail_cloud_document_attach() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Fictional cloud SQL fault'; END $$`,
+  )
+  await db.$executeRawUnsafe(
+    `CREATE TRIGGER fail_cloud_document_attach BEFORE INSERT ON documents FOR EACH ROW EXECUTE FUNCTION fail_cloud_document_attach()`,
+  )
+  try {
+    const failure = await call(['receipts', client.id], data)
+    assert.equal(failure.status, 503)
+    assert.equal((await failure.json()).code, 'SERVICE_UNAVAILABLE')
+  } finally {
+    await db.$executeRawUnsafe('DROP TRIGGER fail_cloud_document_attach ON documents')
+    await db.$executeRawUnsafe('DROP FUNCTION fail_cloud_document_attach()')
+  }
+  assert.equal(await db.document.count({ where: { clientId: client.id } }), 0)
+  assert.equal(fixture.puts, 2)
+  cloud = createPostgresRouter(db, createPostgresAuth(db, process.env), process.env, {
+    documentStorage: fixture.store(),
+  })
+  const inbox = await call(['receipts', client.id, 'attempts'], undefined, admin, 'GET')
+  assert.equal((await inbox.json()).attempts[0].resumable, true)
+  const resumed = await call(['receipts', client.id, 'attempts'], { requestId: data.requestId })
+  assert.equal(resumed.status, 200)
+  assert.equal(resumed.headers.get('x-crm-receipt-max-bytes'), String(3 * 1024 * 1024))
+  assert.equal((await call(['receipts', client.id], data)).status, 200)
+  assert.equal(await db.document.count({ where: { clientId: client.id } }), 1)
+  const receipt = await call(['receipts', client.id], undefined, admin, 'GET')
+  assert.deepEqual(Buffer.from(await receipt.arrayBuffer()), png)
+  const puts = fixture.puts,
+    gets = fixture.gets
+  assert.equal((await call(['receipts', client.id], undefined, coach, 'GET')).status, 403)
+  assert.equal(fixture.gets, gets)
+  assert.equal(fixture.puts, puts)
+})
+test('cloud-specific receipt byte limit rejects oversized uploads before SQL intents or Blob writes', async () => {
+  const fixture = new FixtureBlob(),
+    storage = fixture.store()
+  await storage.setup()
+  const cloud = createPostgresRouter(db, createPostgresAuth(db, process.env), process.env, { documentStorage: storage })
+  const client = await card()
+  const data = input(client.id, { fileBase64: Buffer.alloc(storage.maxBytes + 1).toString('base64') })
+  const response = await cloud(
+    new Request(process.env.APP_URL + '/api/receipts/' + client.id, {
+      method: 'POST',
+      headers: { cookie: admin, origin: process.env.APP_URL!, 'content-type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+    ['receipts', client.id],
+  )
+  assert.equal(response.status, 413)
+  assert.equal(await db.documentUpload.count({ where: { clientId: client.id } }), 0)
+  assert.equal(fixture.puts, 1)
 })
 test('receipt is private, downloaded as attachment, byte-exact and never grants credits', async () => {
   const client = await card(),

@@ -41,6 +41,42 @@ export async function accountingState(tx: Prisma.TransactionClient | PrismaClien
   ])
   return calculateAccountingState(client, ledger, payments, secret)
 }
+// Request-local snapshot AFTER client locks, never a persisted balance cache.
+export async function requireClientsReconciled(tx: Prisma.TransactionClient, clients: Client[], secret: string) {
+  if (!clients.length) return
+  const ids = clients.map((client) => client.id)
+  const [ledger, payments] = await Promise.all([
+    tx.lessonLedgerEntry.findMany({
+      where: { clientId: { in: ids } },
+      orderBy: [{ clientId: 'asc' }, { sequence: 'asc' }],
+    }),
+    tx.payment.findMany({
+      where: { clientId: { in: ids } },
+      orderBy: [{ clientId: 'asc' }, { paidAt: 'asc' }, { id: 'asc' }],
+    }),
+  ])
+  const ledgerByClient = new Map<string, LessonLedgerEntry[]>(),
+    paymentsByClient = new Map<string, Payment[]>()
+  for (const row of ledger) {
+    const list = ledgerByClient.get(row.clientId) || []
+    list.push(row)
+    ledgerByClient.set(row.clientId, list)
+  }
+  for (const row of payments) {
+    const list = paymentsByClient.get(row.clientId) || []
+    list.push(row)
+    paymentsByClient.set(row.clientId, list)
+  }
+  for (const client of clients)
+    requireReconciled(
+      calculateAccountingState(
+        client,
+        ledgerByClient.get(client.id) || [],
+        paymentsByClient.get(client.id) || [],
+        secret,
+      ),
+    )
+}
 export function calculateAccountingState(
   client: Client,
   ledger: LessonLedgerEntry[],

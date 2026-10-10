@@ -13,6 +13,8 @@ import { authDigest } from './accounts'
 import { domainMutation } from './mutations'
 import { requestKeySchema } from './auth-input'
 import { PostgresApiError } from './errors'
+import { receiptUploadLimit } from '../../receipt-limits'
+import { createBlobStorage, type DocumentStorage } from './blob-storage'
 
 const LIMIT = 5 * 1024 * 1024
 const uploadSchema = z
@@ -121,6 +123,28 @@ async function persistFile(root: string, key: string, bytes: Buffer) {
   }
 }
 
+export function assertReceiptsEnabled(values: NodeJS.ProcessEnv) {
+  if (receiptUploadLimit(values) === 0)
+    throw new PostgresApiError(409, 'FEATURE_DISABLED', 'Квитанции отключены на тестовом стенде')
+}
+
+function storageFor(values: NodeJS.ProcessEnv, injected?: DocumentStorage): DocumentStorage {
+  assertReceiptsEnabled(values)
+  if (injected) return injected // Only code-level injection in integration tests.
+  if (values.DEPLOY_TARGET === 'vercel') return createBlobStorage(values)
+  const root = documentRoot(values)
+  return {
+    maxBytes: receiptUploadLimit(values),
+    initialize: () => directories(root),
+    persist: (key, bytes) => persistFile(root, key, bytes),
+    read: (key, digest, size) => {
+      if (!/^[a-zA-Z0-9_-]{20,100}$/.test(key))
+        throw new PostgresApiError(503, 'SCHEMA', 'Некорректная ссылка хранилища')
+      return verifyFile(path.join(root, 'objects', key), digest, size)
+    },
+  }
+}
+
 const pdfWorker = `
 const {parentPort,workerData}=require('node:worker_threads');
 const {PDFDocument,PDFDict,PDFArray,PDFName}=require(workerData.module);
@@ -209,10 +233,17 @@ async function validateContent(bytes: Buffer, mime: string) {
     decodes--
   }
 }
-export async function uploadReceipt(db: PrismaClient, actor: Actor, input: unknown, values: NodeJS.ProcessEnv) {
+export async function uploadReceipt(
+  db: PrismaClient,
+  actor: Actor,
+  input: unknown,
+  values: NodeJS.ProcessEnv,
+  injectedStorage?: DocumentStorage,
+) {
   requireAdmin(actor)
+  assertReceiptsEnabled(values)
   const data = uploadSchema.parse(input),
-    root = documentRoot(values)
+    storage = storageFor(values, injectedStorage)
   const encoded = data.fileBase64
   // Linear scan, not a repeated-group regexp that can exhaust V8's regexp
   // stack on a valid multi-megabyte file.
@@ -233,8 +264,12 @@ export async function uploadReceipt(db: PrismaClient, actor: Actor, input: unkno
   const bytes = Buffer.from(data.fileBase64, 'base64')
   if (bytes.toString('base64') !== encoded)
     throw new PostgresApiError(400, 'VALIDATION', 'Неканоническое содержимое файла')
-  if (!bytes.length || bytes.length > LIMIT)
-    throw new PostgresApiError(413, 'PAYLOAD_TOO_LARGE', 'Квитанция должна быть не более 5 МиБ')
+  if (!bytes.length || bytes.length > storage.maxBytes)
+    throw new PostgresApiError(
+      413,
+      'PAYLOAD_TOO_LARGE',
+      'Квитанция должна быть не более ' + storage.maxBytes / (1024 * 1024) + ' МиБ',
+    )
   const payload = {
     clientId: data.clientId,
     expectedReceiptVersion: data.expectedReceiptVersion,
@@ -308,7 +343,7 @@ export async function uploadReceipt(db: PrismaClient, actor: Actor, input: unkno
         throw new PostgresApiError(409, 'CONFLICT', 'Квитанция изменилась. Обновите карточку.')
       // File is durable before a SQL reference can become visible. On an unknown
       // SQL outcome NEVER delete it: retry resolves the marker/intent safely.
-      await persistFile(root, intent.storageKey, bytes)
+      await storage.persist(intent.storageKey, bytes)
       await tx.document.updateMany({
         where: { clientId: client.id, supersededAt: null },
         data: { supersededAt: new Date() },
@@ -371,9 +406,15 @@ const recoveryPayload = z
     sizeBytes: z.number().int().positive().max(LIMIT),
   })
   .strict()
-export async function receiptAttempts(db: PrismaClient, actor: Actor, clientId: string, values: NodeJS.ProcessEnv) {
+export async function receiptAttempts(
+  db: PrismaClient,
+  actor: Actor,
+  clientId: string,
+  values: NodeJS.ProcessEnv,
+  injectedStorage?: DocumentStorage,
+) {
   requireAdmin(actor)
-  const root = documentRoot(values)
+  const storage = storageFor(values, injectedStorage)
   const rows = await db.documentUpload.findMany({
     where: { actorId: actor.id, clientId, state: 'pending' },
     orderBy: { createdAt: 'asc' },
@@ -386,8 +427,8 @@ export async function receiptAttempts(db: PrismaClient, actor: Actor, clientId: 
         let resumable = false
         if (parsed.success) {
           try {
-            await directories(root)
-            await verifyFile(path.join(root, 'objects', row.storageKey), parsed.data.sha256, parsed.data.sizeBytes)
+            await storage.initialize()
+            await storage.read(row.storageKey, parsed.data.sha256, parsed.data.sizeBytes)
             resumable = true
           } catch {}
         }
@@ -407,8 +448,10 @@ export async function resumeReceipt(
   clientId: string,
   input: unknown,
   values: NodeJS.ProcessEnv,
+  injectedStorage?: DocumentStorage,
 ) {
   requireAdmin(actor)
+  assertReceiptsEnabled(values)
   const data = z.object({ requestId: requestKeySchema }).strict().parse(input)
   const row = await db.documentUpload.findUnique({
     where: { actorId_requestKey: { actorId: actor.id, requestKey: data.requestId } },
@@ -417,11 +460,11 @@ export async function resumeReceipt(
   const payload = recoveryPayload.safeParse(row.payload)
   if (!payload.success || payload.data.clientId !== clientId)
     throw new PostgresApiError(409, 'CONFLICT', 'Для старой попытки нужен исходный файл и проверка оператора')
-  const root = documentRoot(values)
-  await directories(root)
+  const storage = storageFor(values, injectedStorage)
+  await storage.initialize()
   let bytes: Buffer
   try {
-    bytes = await verifyFile(path.join(root, 'objects', row.storageKey), payload.data.sha256, payload.data.sizeBytes)
+    bytes = await storage.read(row.storageKey, payload.data.sha256, payload.data.sizeBytes)
   } catch {
     throw new PostgresApiError(409, 'CONFLICT', 'Исходный файл попытки отсутствует или повреждён. Требуется сверка.')
   }
@@ -436,6 +479,7 @@ export async function resumeReceipt(
     actor,
     { ...metadata, requestId: data.requestId, fileBase64: bytes.toString('base64') },
     values,
+    injectedStorage,
   )
 }
 export async function closeReceiptAttempt(db: PrismaClient, actor: Actor, clientId: string, requestId: string) {
@@ -465,30 +509,39 @@ export async function closeReceiptAttempt(db: PrismaClient, actor: Actor, client
     return { success: true, alreadyConfirmed: false }
   })
 }
-export async function readReceipt(db: PrismaClient, actor: Actor, clientId: string, values: NodeJS.ProcessEnv) {
+export async function readReceipt(
+  db: PrismaClient,
+  actor: Actor,
+  clientId: string,
+  values: NodeJS.ProcessEnv,
+  injectedStorage?: DocumentStorage,
+) {
   requireAdmin(actor)
+  assertReceiptsEnabled(values)
   const client = await db.client.findUnique({ where: { id: clientId }, include: { currentReceipt: true } }),
     document = client?.currentReceipt
   if (!client) throw new PostgresApiError(404, 'NOT_FOUND', 'Клиент не найден')
   if (!document) throw new PostgresApiError(404, 'NOT_FOUND', 'Квитанция не найдена')
-  const root = documentRoot(values)
-  await directories(root)
+  const storage = storageFor(values, injectedStorage)
+  await storage.initialize()
   if (!/^[a-zA-Z0-9_-]{20,100}$/.test(document.storageKey))
     throw new PostgresApiError(503, 'SCHEMA', 'Некорректная ссылка хранилища')
   let bytes: Buffer
   try {
-    bytes = await verifyFile(
-      path.join(root, 'objects', document.storageKey),
-      document.sha256,
-      Number(document.sizeBytes),
-    )
+    bytes = await storage.read(document.storageKey, document.sha256, Number(document.sizeBytes))
   } catch {
     throw new PostgresApiError(503, 'SERVICE_UNAVAILABLE', 'Файл квитанции недоступен или требует проверки')
   }
   return { bytes, document }
 }
-export async function receiptResponse(db: PrismaClient, actor: Actor, clientId: string, values: NodeJS.ProcessEnv) {
-  const { bytes, document } = await readReceipt(db, actor, clientId, values)
+export async function receiptResponse(
+  db: PrismaClient,
+  actor: Actor,
+  clientId: string,
+  values: NodeJS.ProcessEnv,
+  injectedStorage?: DocumentStorage,
+) {
+  const { bytes, document } = await readReceipt(db, actor, clientId, values, injectedStorage)
   const extension =
     { 'image/png': '.png', 'image/jpeg': '.jpg', 'application/pdf': '.pdf' }[document.mimeType] || '.bin'
   const downloadName =

@@ -27,9 +27,11 @@ export function ClientReceiptPanel({
     [readError, setReadError] = useState(''),
     [reload, setReload] = useState(0)
   const version = store.authStore.sessionVersion,
-    userId = store.authStore.user?.id
+    userId = store.authStore.user?.id,
+    enabled = apiClient.isReceiptsEnabled()
   const sameSession = () => store.authStore.sessionVersion === version && store.authStore.user?.id === userId
   useEffect(() => {
+    if (!enabled) return
     const controller = new AbortController()
     void apiClient
       .receiptAttempts(clientId, controller.signal)
@@ -51,7 +53,7 @@ export function ClientReceiptPanel({
         if (!controller.signal.aborted && store.authStore.sessionVersion === version) setChecking(false)
       })
     return () => controller.abort()
-  }, [clientId, version, userId, store, reload])
+  }, [clientId, version, userId, store, reload, enabled])
   async function recover(attempt: ReceiptAttempt, discard = false) {
     if (running.current) return
     if (discard && !window.confirm('Закрыть эту попытку? Подтверждённая квитанция и файлы не будут удалены.')) return
@@ -131,11 +133,20 @@ export function ClientReceiptPanel({
       setBusy(false)
     }
   }
+  if (!enabled)
+    return (
+      <section aria-label="Квитанция клиента" className="rounded-2xl border border-slate-200 bg-white p-4">
+        <p className="text-sm text-slate-500">
+          Квитанции отключены на тестовом стенде. Оплаты и посещаемость работают без прикрепления файлов.
+        </p>
+      </section>
+    )
   return (
     <section aria-label="Квитанция клиента" className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4">
       <h3 className="font-semibold">Квитанция</h3>
       <p className="text-sm text-slate-500">
-        Приватный JPG, PNG или PDF до 5 МиБ. Квитанция — только документ, не платёж.
+        Приватный JPG, PNG или PDF до {apiClient.getReceiptMaxBytes() / (1024 * 1024)} МиБ. Квитанция — только документ,
+        не платёж.
       </p>
       {checking && <p role="status">Проверяем незавершённые загрузки…</p>}
       {readError && (

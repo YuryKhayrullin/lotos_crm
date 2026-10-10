@@ -35,7 +35,11 @@ function valuesFromFile(expected) {
 function childEnvironment(values) {
   const inherited = { ...process.env }
   for (const name of Object.keys(inherited)) {
-    if (/^(COMPOSE_|DOCKER_|POSTGRES_|PG|DATABASE_URL$|DIRECT_URL$|GAS_|SESSION_SECRET$|UPSTASH_|SMOKE_)/.test(name))
+    if (
+      /^(COMPOSE_|DOCKER_|POSTGRES_|PG|DATABASE_URL$|DIRECT_URL$|GAS_|SESSION_SECRET$|UPSTASH_|SMOKE_|DEPLOY_TARGET$|CLOUD_|BLOB_|VERCEL|NEXT_PUBLIC_VERCEL|DOCUMENT_STORAGE$|TRUSTED_PROXY$)/.test(
+        name,
+      )
+    )
       delete inherited[name]
   }
   return {
@@ -172,7 +176,9 @@ try {
         environment !== 'local' &&
         !(
           environment === 'test' &&
-          ['test', 'integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser'].includes(action)
+          ['test', 'integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser', 'operations-test'].includes(
+            action,
+          )
         )
       )
         throw new Error('Docker actions are allowed only for local or disposable tests')
@@ -187,11 +193,14 @@ try {
           'domain-test',
           'auth-http',
           'auth-browser',
+          'operations-test',
         ].includes(action)
       )
         throw new Error('Unknown environment action')
       if (
-        ['test', 'integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser'].includes(action) !==
+        ['test', 'integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser', 'operations-test'].includes(
+          action,
+        ) !==
         (environment === 'test')
       )
         throw new Error('Test execution requires the explicit test environment')
@@ -231,11 +240,14 @@ try {
             ],
             { ...options, input: smokeSql },
           )
-          if (['integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser'].includes(action)) {
+          if (
+            ['integration', 'auth-test', 'domain-test', 'auth-http', 'auth-browser', 'operations-test'].includes(action)
+          ) {
             const documentsRoot = fs.mkdtempSync('/tmp/lotos-crm-documents-test-')
             fs.chmodSync(documentsRoot, 0o700)
             const testEnv = { ...childEnvironment(values), NODE_ENV: 'test', DOCUMENTS_DIR: documentsRoot }
             testEnv.AUTH_BROWSER_TESTS = action === 'auth-browser' ? 'true' : 'false'
+            if (action === 'operations-test' || action === 'auth-test') testEnv.LOTOS_TEST_CONTAINER = project + '-db-1'
             if (!testEnv.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(path.join(root, '.tools/playwright')))
               testEnv.PLAYWRIGHT_BROWSERS_PATH = path.join(root, '.tools/playwright')
             const prisma = path.join(root, 'node_modules/prisma/build/index.js')
@@ -244,6 +256,12 @@ try {
               // Applying twice checks a fresh install and the migration history.
               for (let attempt = 0; attempt < 2; attempt++)
                 run(process.execPath, [prisma, 'migrate', 'deploy'], { env: testEnv })
+              if (action === 'auth-test')
+                run(
+                  process.execPath,
+                  ['--conditions=react-server', '--import', 'tsx', '--test', 'tests/postgres/bootstrap-libpq.test.ts'],
+                  { env: testEnv, stdio: ['ignore', 'inherit', 'inherit'] },
+                )
               run(
                 process.execPath,
                 [
@@ -253,20 +271,30 @@ try {
                   '--test',
                   '--test-concurrency=1',
                   ...(testEnv.LOTOS_TEST_NAME_PATTERN ? ['--test-name-pattern', testEnv.LOTOS_TEST_NAME_PATTERN] : []),
-                  action === 'auth-http' || action === 'auth-browser'
-                    ? 'tests/postgres/auth-http.test.ts'
-                    : action === 'domain-test'
-                      ? 'tests/postgres/domain.test.ts'
-                      : action === 'auth-test'
-                        ? 'tests/postgres/auth.test.ts'
-                        : 'tests/postgres/foundation.test.ts',
+                  action === 'operations-test'
+                    ? 'tests/postgres/performance.test.ts'
+                    : action === 'auth-http' || action === 'auth-browser'
+                      ? 'tests/postgres/auth-http.test.ts'
+                      : action === 'domain-test'
+                        ? 'tests/postgres/domain.test.ts'
+                        : action === 'auth-test'
+                          ? 'tests/postgres/auth.test.ts'
+                          : 'tests/postgres/foundation.test.ts',
                   ...(action === 'domain-test'
                     ? [
                         'tests/postgres/schedule-attendance.test.ts',
                         'tests/postgres/accounting.test.ts',
                         'tests/postgres/documents.test.ts',
+                        'tests/postgres/blob-storage.test.ts',
                         'tests/postgres/import.test.ts',
                         'tests/postgres/recovery.test.ts',
+                      ]
+                    : []),
+                  ...(action === 'operations-test'
+                    ? [
+                        'tests/postgres/supabase-roles.test.ts',
+                        'tests/postgres/roles.test.ts',
+                        'tests/postgres/restore.test.ts',
                       ]
                     : []),
                 ],

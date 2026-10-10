@@ -14,7 +14,7 @@
 
 | Компонент                        | Версия                                       |
 | -------------------------------- | -------------------------------------------- |
-| Node.js                          | 22.23.3; engines `>=22.23.3 <23`             |
+| Node.js                          | Local/CI 22.23.3; engines `>=22.23.2 <23`    |
 | PostgreSQL                       | 17.11; закреплённый Docker digest из этапа 2 |
 | Prisma CLI / Client / adapter-pg | 7.10.0                                       |
 | Better Auth / prisma-adapter     | 1.7.7                                        |

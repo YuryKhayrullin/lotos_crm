@@ -12,6 +12,7 @@ import { checkAuthRate } from './rate-limit'
 import { PostgresApiError, publicPostgresError } from './errors'
 import { clientHistory } from './history'
 import {
+  assertReceiptsEnabled,
   uploadReceipt,
   readReceipt,
   receiptResponse,
@@ -36,6 +37,8 @@ import {
 } from './attendance'
 import { catalogSchemas, mutateCatalog, clientsPage, catalogSheet, clientOptions, type CatalogAction } from './catalog'
 import { mutationDrafts, closeMutationDraft, recoverableActions } from './mutations'
+import type { DocumentStorage } from './blob-storage'
+import { receiptUploadLimit } from '../../receipt-limits'
 
 export async function readBoundedJson(request: Request, maxBytes: number): Promise<unknown> {
   if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || ''))
@@ -98,7 +101,12 @@ function cookieHeaders(response: Response) {
   })
 }
 
-export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, values: NodeJS.ProcessEnv) {
+export function createPostgresRouter(
+  db: PrismaClient,
+  auth: PostgresAuth,
+  values: NodeJS.ProcessEnv,
+  dependencies: { documentStorage?: DocumentStorage } = {},
+) {
   validateEnvironment(values, values.APP_ENV)
   const origin = new URL(values.APP_URL!).origin
   const internalAuth = (path: string, body?: unknown, cookie?: string) =>
@@ -109,7 +117,7 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
     )
-  return async function handle(request: Request, segments: string[]): Promise<Response> {
+  const handle = async (request: Request, segments: string[]): Promise<Response> => {
     try {
       const path = segments.join('/')
       if (segments.some((segment) => segment.includes('/')))
@@ -181,7 +189,9 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
         if (segments.length === 3 && segments[0] === 'receipts' && segments[2] === 'attempts') {
           const actor = await requireActor(db, auth, request.headers)
           authorizeAction('uploadReceipt', actor)
-          if (request.method === 'GET') return postgresJson(await receiptAttempts(db, actor, segments[1], values))
+          assertReceiptsEnabled(values)
+          if (request.method === 'GET')
+            return postgresJson(await receiptAttempts(db, actor, segments[1], values, dependencies.documentStorage))
           if (request.method === 'POST') {
             requireTrustedPost(request, values)
             const input = z
@@ -191,7 +201,14 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
             return postgresJson(
               input.discard === true
                 ? await closeReceiptAttempt(db, actor, segments[1], input.requestId)
-                : await resumeReceipt(db, actor, segments[1], { requestId: input.requestId }, values),
+                : await resumeReceipt(
+                    db,
+                    actor,
+                    segments[1],
+                    { requestId: input.requestId },
+                    values,
+                    dependencies.documentStorage,
+                  ),
             )
           }
           return new Response(null, { status: 405, headers: { allow: 'GET, POST', 'cache-control': 'no-store' } })
@@ -200,15 +217,20 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
           const actor = await requireActor(db, auth, request.headers)
           if (request.method === 'GET') {
             authorizeAction('getReceipt', actor)
-            return await receiptResponse(db, actor, segments[1], values)
+            assertReceiptsEnabled(values)
+            return await receiptResponse(db, actor, segments[1], values, dependencies.documentStorage)
           }
           if (request.method === 'POST') {
             requireTrustedPost(request, values)
             authorizeAction('uploadReceipt', actor)
-            const input = await readBoundedJson(request, 8 * 1024 * 1024)
+            assertReceiptsEnabled(values)
+            const input = await readBoundedJson(
+              request,
+              Math.ceil(((dependencies.documentStorage?.maxBytes ?? receiptUploadLimit(values)) * 4) / 3) + 32_768,
+            )
             if (!input || typeof input !== 'object' || !('clientId' in input) || input.clientId !== segments[1])
               throw new PostgresApiError(400, 'VALIDATION', 'Клиент не соответствует адресу загрузки')
-            return postgresJson(await uploadReceipt(db, actor, input, values))
+            return postgresJson(await uploadReceipt(db, actor, input, values, dependencies.documentStorage))
           }
           return new Response(null, { status: 405, headers: { allow: 'GET, POST', 'cache-control': 'no-store' } })
         }
@@ -285,6 +307,7 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
         .strict()
         .parse(await readBoundedJson(request, 65_536))
       authorizeAction(envelope.action, actor)
+      if (envelope.action === 'uploadReceipt' || envelope.action === 'getReceipt') assertReceiptsEnabled(values)
       if (Object.hasOwn(scheduleSchemas, envelope.action))
         return postgresJson(
           await mutateSchedule(
@@ -364,13 +387,13 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
       if (envelope.action === 'getClientHistory')
         return postgresJson(await clientHistory(db, actor, envelope.payload, values.BETTER_AUTH_SECRET!))
       if (envelope.action === 'uploadReceipt')
-        return postgresJson(await uploadReceipt(db, actor, envelope.payload, values))
+        return postgresJson(await uploadReceipt(db, actor, envelope.payload, values, dependencies.documentStorage))
       if (envelope.action === 'getReceipt') {
         const input = z
           .object({ clientId: z.string().min(1).max(100) })
           .strict()
           .parse(envelope.payload)
-        const result = await readReceipt(db, actor, input.clientId, values)
+        const result = await readReceipt(db, actor, input.clientId, values, dependencies.documentStorage)
         return postgresJson({
           success: true,
           fileName: result.document.originalName,
@@ -404,5 +427,15 @@ export function createPostgresRouter(db: PrismaClient, auth: PostgresAuth, value
         failure.status,
       )
     }
+  }
+  return async (request: Request, segments: string[]) => {
+    const response = await handle(request, segments)
+    response.headers.set(
+      'x-crm-receipt-max-bytes',
+      String(
+        receiptUploadLimit(values) === 0 ? 0 : (dependencies.documentStorage?.maxBytes ?? receiptUploadLimit(values)),
+      ),
+    )
+    return response
   }
 }

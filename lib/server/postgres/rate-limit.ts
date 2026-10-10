@@ -11,6 +11,17 @@ export function trustedClientIp(headers: Headers, values: NodeJS.ProcessEnv) {
     const candidate = headers.get('x-lotos-client-ip') || ''
     if (isIP(candidate)) return candidate
   }
+  if (
+    values.TRUSTED_PROXY === 'vercel' &&
+    values.DEPLOY_TARGET === 'vercel' &&
+    values.APP_ENV === 'staging' &&
+    values.VERCEL === '1'
+  ) {
+    // The platform overwrites this dedicated header. A bare Node server or
+    // arbitrary XFF cannot opt into trust by supplying request headers.
+    const candidate = headers.get('x-vercel-forwarded-for') || ''
+    if (isIP(candidate)) return candidate
+  }
   return 'unknown'
 }
 

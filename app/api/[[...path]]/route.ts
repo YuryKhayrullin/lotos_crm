@@ -15,6 +15,7 @@ import { assertPasswordPolicy, hashPassword, isScryptPasswordHash, verifyPasswor
 import { clearSession, createSession, getSession, SessionError } from '@/lib/server/session'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
 
 type RouteContext = { params: Promise<{ path?: string[] }> }
 type JsonRecord = Record<string, unknown>

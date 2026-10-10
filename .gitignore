@@ -36,3 +36,4 @@ node_modules
 
 # User-supplied migration source: may contain personal data/password hashes.
 /База данных.xlsx
+.vercel

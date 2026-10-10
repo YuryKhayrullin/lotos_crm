@@ -3,6 +3,8 @@ import { before, after, test } from 'node:test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { setTimeout as delay } from 'node:timers/promises'
 import { hashPassword } from 'better-auth/crypto'
 import { validateEnvironment } from '../../scripts/lib/environment.mjs'
@@ -34,6 +36,53 @@ async function post(path: string, body: unknown, cookie = '') {
   })
 }
 const crm = (action: string, payload: unknown, cookie = adminCookie) => post('crm', { action, payload }, cookie)
+
+test('real HTML uses fresh nonces, ignores spoofed/prefetch headers and cannot be shared-cached', async () => {
+  const nonces = new Set<string>()
+  const cases: Array<{ path: string; status: number; headers: Record<string, string> }> = [
+    { path: '/', status: 200, headers: {} },
+    {
+      path: '/',
+      status: 200,
+      headers: { 'x-nonce': 'attacker-nonce', 'content-security-policy': "script-src 'unsafe-inline'" },
+    },
+    { path: '/', status: 200, headers: { purpose: 'prefetch', 'next-router-prefetch': '1' } },
+    { path: '/register', status: 200, headers: {} },
+    { path: '/icon-not-an-asset', status: 404, headers: {} },
+  ]
+  for (const item of cases) {
+    const response = await fetch(origin + item.path, { headers: item.headers })
+    assert.equal(response.status, item.status)
+    const csp = response.headers.get('content-security-policy') || ''
+    const nonce = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)?.[1]
+    assert.ok(nonce)
+    assert.equal(Buffer.from(nonce, 'base64').length, 32)
+    assert.equal(nonces.has(nonce), false)
+    nonces.add(nonce)
+    const html = await response.text()
+    const scripts = [...html.matchAll(/<script\b([^>]*)>/g)]
+    assert.ok(scripts.length)
+    for (const script of scripts) assert.ok(script[1].includes('nonce="' + nonce + '"'))
+    assert.doesNotMatch(csp.split(';').find((part) => part.trim().startsWith('script-src ')) || '', /unsafe-/)
+    assert.match(response.headers.get('cache-control') || '', /no-store/)
+    assert.doesNotMatch(html, /attacker-nonce|_vercel\/insights/)
+  }
+})
+
+test('real HTTP health is no-store and generic, with baseline browser protection', async () => {
+  for (const [path, expected] of [
+    ['live', 'ok'],
+    ['ready', 'ready'],
+  ] as const) {
+    const response = await fetch(origin + '/api/health/' + path)
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { status: expected })
+    assert.match(response.headers.get('cache-control') || '', /no-store/)
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+    assert.match(response.headers.get('content-security-policy') || '', /object-src 'none'/)
+    assert.equal(response.headers.has('x-powered-by'), false)
+  }
+})
 
 before(async () => {
   // Never attach tests to an existing development/production listener.
@@ -149,6 +198,90 @@ test('real Next routes authenticate both workspaces with the existing session/bo
   assert.equal((await crm('getUsers', {})).status, 200)
 })
 
+test('real HTTP enforces UTF-8 and chunked request limits BEFORE JSON parsing', async () => {
+  const oversized = JSON.stringify({ username: 'я'.repeat(9000), password: 'not-a-credential' })
+  assert.ok(Buffer.byteLength(oversized, 'utf8') > 16_384)
+  const responses = [
+    await fetch(origin + '/api/auth/login', {
+      method: 'POST',
+      headers: { origin, 'content-type': 'application/json' },
+      body: oversized,
+    }),
+    await fetch(origin + '/api/auth/login', {
+      method: 'POST',
+      headers: { origin, 'content-type': 'application/json' },
+      body: new ReadableStream({
+        start(controller) {
+          for (let i = 0; i < 5; i++) controller.enqueue(new Uint8Array(4096).fill(32))
+          controller.close()
+        },
+      }),
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' }),
+  ]
+  for (const response of responses) {
+    assert.equal(response.status, 413)
+    const body = await response.json()
+    assert.equal(body.code, 'PAYLOAD_TOO_LARGE')
+    assert.doesNotMatch(JSON.stringify(body), /not-a-credential|я{10}/)
+  }
+})
+
+test(
+  'real HTTP parallel read smoke preserves account isolation without errors or growing response sizes',
+  { timeout: 60_000 },
+  async () => {
+    const latencies: number[] = []
+    let largestResponseBytes = 0
+    const started = performance.now()
+    await Promise.all(
+      Array.from({ length: 4 }, async (_, worker) => {
+        const coach = worker % 2 === 1
+        for (let round = 0; round < 35; round++) {
+          const requestStarted = performance.now()
+          const response = await fetch(origin + '/api/auth/session', {
+            headers: { cookie: coach ? coachCookie : adminCookie },
+            signal: AbortSignal.timeout(10_000),
+          })
+          assert.equal(response.status, 200)
+          const text = await response.text()
+          const data = JSON.parse(text)
+          assert.equal(data.user.role, coach ? 'coach' : 'admin')
+          assert.equal(data.user.branchId, coach ? branch : null)
+          assert.equal('password' in data.user || 'passwordHash' in data.user, false)
+          largestResponseBytes = Math.max(largestResponseBytes, Buffer.byteLength(text))
+          latencies.push(performance.now() - requestStarted)
+          await delay(50)
+        }
+      }),
+    )
+    latencies.sort((left, right) => left - right)
+    const quantile = (p: number) => latencies[Math.ceil(latencies.length * p) - 1]
+    assert.equal(latencies.length, 140)
+    assert.ok(largestResponseBytes < 4096)
+    mkdirSync('.artifacts', { recursive: true, mode: 0o700 })
+    writeFileSync(
+      '.artifacts/http-load-latest.json',
+      JSON.stringify(
+        {
+          scope: 'Local production Next HTTP + disposable PostgreSQL; small auth fixture, not VPS/SLO/soak',
+          concurrency: 4,
+          successfulRequests: latencies.length,
+          failedRequests: 0,
+          elapsedMs: Math.round(performance.now() - started),
+          p50Ms: quantile(0.5),
+          p95Ms: quantile(0.95),
+          p99Ms: quantile(0.99),
+          largestResponseBytes,
+        },
+        null,
+        2,
+      ) + '\n',
+      { mode: 0o600 },
+    )
+  },
+)
+
 test('real pending activation and reset revoke cookies across independently instantiated Next services', async () => {
   assert.equal((await post('auth/login', { username: 'http-pending-coach', password })).status, 401)
   assert.equal(
@@ -200,6 +333,56 @@ test('real proxy-facing API requires trusted origin and logout removes the datab
 // own production server as the HTTP suite. No mock auth, real user, saved auth
 // state, screenshots containing credentials or external requests are needed.
 if (process.env.AUTH_BROWSER_TESTS === 'true') {
+  test('browser CSP blocks injected inline scripts and event handlers while login remains functional', async () => {
+    assert.ok(browser)
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    try {
+      // Parse malicious HTML with the policy from a REAL Next response. Using
+      // DevTools evaluate() to construct scripts can bypass browser CSP checks
+      // and is not a faithful simulation of server-rendered injected markup.
+      const policy = (await fetch(origin)).headers.get('content-security-policy')!
+      await context.route(origin + '/csp-injection-fixture', (route) =>
+        route.fulfill({
+          status: 200,
+          headers: { 'content-type': 'text/html', 'content-security-policy': policy },
+          body: '<!doctype html><html><head><script>window.lotosCspProbe = true</script></head><body><button onclick="window.lotosCspProbe = true">CSP probe</button></body></html>',
+        }),
+      )
+      await page.addInitScript(() => {
+        const target = window as typeof window & { cspViolations?: string[] }
+        target.cspViolations = []
+        document.addEventListener('securitypolicyviolation', (event) => {
+          target.cspViolations!.push(event.effectiveDirective)
+        })
+      })
+      await page.goto(origin + '/csp-injection-fixture')
+      await page.getByRole('button', { name: 'CSP probe', exact: true }).click()
+      await expect
+        .poll(() => page.evaluate(() => (window as typeof window & { cspViolations: string[] }).cspViolations.length))
+        .toBeGreaterThanOrEqual(2)
+      assert.equal(
+        await page.evaluate(() => (window as typeof window & { lotosCspProbe?: boolean }).lotosCspProbe),
+        undefined,
+      )
+      await page.goto(origin)
+      await expect(page.getByText('Вход в CRM', { exact: true })).toBeVisible()
+      assert.deepEqual(
+        await page.evaluate(() => (window as typeof window & { cspViolations: string[] }).cspViolations),
+        [],
+      )
+      await page.getByRole('textbox', { name: 'Логин', exact: true }).fill('http-test-admin')
+      await page.getByLabel('Пароль', { exact: true }).fill(password)
+      await page.getByLabel('Пароль', { exact: true }).press('Enter')
+      await expect(page.getByText('Администрирование', { exact: true }).first()).toBeVisible()
+      assert.deepEqual(errors, [])
+    } finally {
+      await context.close()
+    }
+  })
+
   async function focusTrap(page: Page, dialog: Locator) {
     await expect(dialog).toBeVisible()
     const title = await dialog.getByRole('heading').first().textContent()
@@ -651,6 +834,44 @@ if (process.env.AUTH_BROWSER_TESTS === 'true') {
         await expect(dialog).toBeHidden()
         assert.deepEqual(admin.runtimeErrors, [])
       } finally {
+        await admin.context.close()
+      }
+    },
+  )
+  test(
+    'browser without receipts shows disabled status and makes no document requests',
+    { timeout: 60000 },
+    async () => {
+      await db.authRateBucket.deleteMany()
+      const card = await db.client.create({
+        data: { branchId: branch, childName: 'Disabled receipts fictional pupil', parentName: 'Fictional parent' },
+      })
+      const admin = await workspace({ width: 1440, height: 1000 })
+      let documentRequests = 0
+      // Advertise the disabled staging capability on genuine Next/SQL responses.
+      // Separate router tests verify backend denial for the same configuration.
+      await admin.page.route('**/api/crm', async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response, headers: { ...response.headers(), 'x-crm-receipt-max-bytes': '0' } })
+      })
+      admin.page.on('request', (request) => {
+        if (new URL(request.url()).pathname.startsWith('/api/receipts/')) documentRequests++
+      })
+      try {
+        await admin.login('http-test-admin')
+        await admin.page.getByRole('button', { name: 'Клиенты и дети', exact: true }).click()
+        await admin.page.getByRole('button', { name: new RegExp(card.childName) }).click()
+        const panel = admin.page.getByRole('region', { name: 'Квитанция клиента' })
+        await expect(panel).toContainText('Квитанции отключены на тестовом стенде')
+        await expect(panel.locator('input[type=file]')).toHaveCount(0)
+        await expect(panel.getByRole('button')).toHaveCount(0)
+        await expect(panel.getByRole('link')).toHaveCount(0)
+        assert.equal(documentRequests, 0)
+        assert.deepEqual(admin.runtimeErrors, [])
+      } finally {
+        // Finish outstanding mocked-header responses before disposing the browser
+        // request context; otherwise a route.fetch can reject after test teardown.
+        await admin.page.unrouteAll({ behavior: 'wait' })
         await admin.context.close()
       }
     },

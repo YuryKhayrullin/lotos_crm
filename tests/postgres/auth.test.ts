@@ -9,6 +9,29 @@ import { apiUser, requireActor, authorizeAction } from '../../lib/server/postgre
 import { bootstrapAdmin, mutateCoachAccount } from '../../lib/server/postgres/accounts'
 import { createPostgresRouter } from '../../lib/server/postgres/http'
 import { incrementAuthBucket, trustedClientIp } from '../../lib/server/postgres/rate-limit'
+
+test('only explicit Vercel staging on the platform trusts its overwritten IP header', () => {
+  const headers = new Headers({
+    'x-vercel-forwarded-for': '198.51.100.7',
+    'x-forwarded-for': '192.0.2.99',
+    'x-lotos-client-ip': '192.0.2.99',
+  })
+  const values: NodeJS.ProcessEnv = {
+    NODE_ENV: 'production',
+    APP_ENV: 'staging',
+    DEPLOY_TARGET: 'vercel',
+    TRUSTED_PROXY: 'vercel',
+    VERCEL: '1',
+  }
+  assert.equal(trustedClientIp(headers, values), '198.51.100.7')
+  assert.equal(trustedClientIp(headers, { ...values, VERCEL: undefined }), 'unknown')
+  assert.equal(trustedClientIp(headers, { ...values, DEPLOY_TARGET: 'self-hosted' }), 'unknown')
+  assert.equal(trustedClientIp(headers, { ...values, APP_ENV: 'local' }), 'unknown')
+  assert.equal(
+    trustedClientIp(new Headers({ 'x-vercel-forwarded-for': '198.51.100.7, 192.0.2.99' }), values),
+    'unknown',
+  )
+})
 import { hashPassword as legacyHashPassword } from '../../lib/server/passwords'
 
 validateEnvironment(process.env, 'test')

@@ -14,17 +14,44 @@ async function managementLock(tx: Prisma.TransactionClient) {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('lotos-auth-management-v1', 0))`
 }
 
-export async function bootstrapAdmin(db: PrismaClient, input: unknown) {
+export type BootstrapStep =
+  | 'password-hash'
+  | 'transaction-start'
+  | 'transaction-guard'
+  | 'management-lock'
+  | 'admin-check'
+  | 'user-create'
+  | 'credential-create'
+  | 'audit-create'
+  | 'transaction-commit'
+
+export async function bootstrapAdmin(db: PrismaClient, input: unknown, progress?: (step: BootstrapStep) => void) {
   const data = bootstrapAdminSchema.parse(input)
+  progress?.('password-hash')
   const password = await hashPassword(data.password)
+  progress?.('transaction-start')
   return db.$transaction(async (tx) => {
+    progress?.('transaction-guard')
+    // Client-side expiration is not a server-side rollback guarantee through
+    // a remote pooler. Bound idle time on PostgreSQL too, within this transaction
+    // only; never change the role/session defaults or the HTTP transaction limit.
+    await tx.$executeRaw`SET LOCAL idle_in_transaction_session_timeout = '10s'`
+    progress?.('management-lock')
     await managementLock(tx)
+    progress?.('admin-check')
     if (await tx.user.count({ where: { role: 'admin' } }))
       throw new PostgresApiError(409, 'CONFLICT', 'Первый администратор уже существует')
+    progress?.('user-create')
     const user = await tx.user.create({
       data: { name: data.name, username: data.username, role: 'admin', status: 'active' },
+      select: { id: true, username: true },
     })
-    await tx.account.create({ data: { userId: user.id, accountId: user.id, providerId: 'credential', password } })
+    progress?.('credential-create')
+    await tx.account.create({
+      data: { userId: user.id, accountId: user.id, providerId: 'credential', password },
+      select: { id: true },
+    })
+    progress?.('audit-create')
     await tx.auditEvent.create({
       data: {
         actorId: user.id,
@@ -34,7 +61,9 @@ export async function bootstrapAdmin(db: PrismaClient, input: unknown) {
         changedFields: ['username', 'role', 'status', 'password'],
         source: 'bootstrap-cli',
       },
+      select: { id: true },
     })
+    progress?.('transaction-commit')
     return { id: user.id, username: user.username! }
   })
 }

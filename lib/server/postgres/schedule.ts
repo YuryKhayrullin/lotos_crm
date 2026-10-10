@@ -62,7 +62,7 @@ export type DisplayLesson = Lesson & {
   coach: { name: string; userId: string | null }
   _count?: { enrollments: number }
 }
-export function lessonDto(lesson: DisplayLesson, actor: Actor) {
+export function lessonDto(lesson: DisplayLesson, actor: Actor, clock?: Intl.DateTimeFormat) {
   const owns = actor.role === 'admin' || (lesson.branchId === actor.branchId && lesson.coach.userId === actor.id)
   return {
     id: lesson.id,
@@ -72,12 +72,15 @@ export function lessonDto(lesson: DisplayLesson, actor: Actor) {
     title: lesson.title,
     category: lesson.category === 'swimming' ? 'плавание' : 'синхронное плавание',
     date: lesson.localDate.toISOString().slice(0, 10),
-    time: new Intl.DateTimeFormat('en-GB', {
-      timeZone: lesson.timeZone,
-      hour: '2-digit',
-      minute: '2-digit',
-      hourCycle: 'h23',
-    }).format(lesson.startsAt),
+    time: (
+      clock ||
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: lesson.timeZone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+    ).format(lesson.startsAt),
     timeZone: lesson.timeZone,
     startsAt: lesson.startsAt.toISOString(),
     endsAt: lesson.endsAt.toISOString(),
@@ -471,5 +474,20 @@ export async function scheduleRows(db: PrismaClient, actor: Actor, input: unknow
     take: 5001,
   })
   if (rows.length > 5000) throw new PostgresApiError(422, 'VALIDATION', 'Уточните период: больше 5000 занятий')
-  return rows.map((row) => lessonDto(row, actor))
+  // Per-request formatters, not cached rows/private DTOs. Constructing Intl
+  // for every occurrence dominates CPU when a week contains many lessons.
+  const clocks = new Map<string, Intl.DateTimeFormat>()
+  return rows.map((row) => {
+    let clock = clocks.get(row.timeZone)
+    if (!clock) {
+      clock = new Intl.DateTimeFormat('en-GB', {
+        timeZone: row.timeZone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+      clocks.set(row.timeZone, clock)
+    }
+    return lessonDto(row, actor, clock)
+  })
 }

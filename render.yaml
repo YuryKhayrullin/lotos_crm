@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: lotos-crm-staging
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health/ready
+    autoDeploy: false
+    envVars:
+      # Keep the existing cloud/Supabase profile. Render runs the same
+      # standalone Node image; no migration or seed is executed on deploy.
+      - key: APP_ENV
+        value: staging
+      - key: DEPLOY_TARGET
+        value: vercel
+      - key: CRM_BACKEND
+        value: postgres
+      - key: CLOUD_DATABASE_PROVIDER
+        value: supabase
+      - key: CLOUD_DATABASE_ISOLATED
+        value: "true"
+      - key: CLOUD_SUPABASE_PROJECT_REF
+        value: iuptzojewbihjwhijocq
+      - key: DOCUMENT_STORAGE
+        value: disabled
+      - key: COACH_REGISTRATION_ENABLED
+        value: "false"
+      - key: TRUSTED_PROXY
+        value: vercel
+      # Fill APP_URL with the generated https://<service>.onrender.com URL
+      # in Render Dashboard before the first public login test.
+      - key: APP_URL
+        sync: false
+      - key: CLOUD_DATABASE_HOST
+        value: aws-0-eu-west-1.pooler.supabase.com
+      - key: DATABASE_URL
+        sync: false
+      - key: CLOUD_DATABASE_CA_BASE64
+        sync: false
+      - key: BETTER_AUTH_SECRET
+        sync: false

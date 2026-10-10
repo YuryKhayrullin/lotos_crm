@@ -338,6 +338,17 @@ class ApiClient {
   private readGeneration = 0
   private sessionEpoch = 0
   private postgresAccounts = false
+  private receiptLimit = 5 * 1024 * 1024
+  getReceiptMaxBytes(): number {
+    return this.receiptLimit
+  }
+  isReceiptsEnabled(): boolean {
+    return this.receiptLimit > 0
+  }
+  private requireReceiptsEnabled() {
+    if (!this.isReceiptsEnabled())
+      throw new ApiError(409, { code: 'FEATURE_DISABLED', message: 'Квитанции отключены на тестовом стенде' })
+  }
   isPostgresBackend(): boolean {
     return this.postgresAccounts
   }
@@ -412,6 +423,7 @@ class ApiClient {
     this.inFlightReads.clear()
     this.accountAttempts.clear()
     this.postgresAccounts = false
+    this.receiptLimit = 5 * 1024 * 1024
     clearAttendanceDrafts()
   }
 
@@ -505,7 +517,16 @@ class ApiClient {
           code: 'STALE_CONTEXT',
           message: 'Сессия изменилась. Ответ предыдущего пользователя отброшен.',
         })
-      if (response.headers?.get('x-crm-backend') === 'postgres') this.postgresAccounts = true
+      if (response.headers?.get('x-crm-backend') === 'postgres') {
+        this.postgresAccounts = true
+        const rawLimit = response.headers.get('x-crm-receipt-max-bytes')
+        if (rawLimit !== null && rawLimit !== undefined) {
+          const limit = Number(rawLimit)
+          if (!['0', String(3 * 1024 * 1024), String(5 * 1024 * 1024)].includes(rawLimit))
+            throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Некорректный лимит загрузки документов' })
+          this.receiptLimit = limit
+        }
+      }
 
       const object = data && typeof data === 'object' ? (data as JsonObject) : null
       if (!response.ok) {
@@ -1023,7 +1044,9 @@ class ApiClient {
     expectedReceiptVersion?: number,
     recovery?: ReceiptAttempt,
   ): Promise<{ success: boolean; receiptVersion?: number; receiptUrl?: string }> {
-    if (file.size > 5 * 1024 * 1024) throw new ApiError(413, 'Файл слишком большой (максимум 5 МБ)')
+    this.requireReceiptsEnabled()
+    if (file.size > this.receiptLimit)
+      throw new ApiError(413, 'Файл слишком большой (максимум ' + this.receiptLimit / (1024 * 1024) + ' МиБ)')
     if (!['image/jpeg', 'image/png', 'application/pdf'].includes(file.type)) {
       throw new ApiError(415, 'Разрешены только JPG, PNG и PDF')
     }
@@ -1334,6 +1357,7 @@ class ApiClient {
     return this.fetchBranches()
   }
   async receiptAttempts(clientId: string, signal?: AbortSignal): Promise<ReceiptAttempt[]> {
+    this.requireReceiptsEnabled()
     const { response, data } = await fetchJson('/api/receipts/' + encodeURIComponent(clientId) + '/attempts', {
       credentials: 'same-origin',
       signal,
@@ -1381,6 +1405,7 @@ class ApiClient {
     payload: JsonObject,
     attemptRoute = true,
   ): Promise<{ success: boolean; alreadyConfirmed?: boolean }> {
+    this.requireReceiptsEnabled()
     const pending = this.accountAttempts.get('uploadReceipt:' + clientId)
     const { response, data } = await fetchJson(
       '/api/receipts/' + encodeURIComponent(clientId) + (attemptRoute ? '/attempts' : ''),

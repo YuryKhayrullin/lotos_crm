@@ -38,6 +38,59 @@ function apiWithFetch(fetch, timers = {}) {
   return exports.apiClient
 }
 
+test('cloud receipt limit comes from the same-session server and is checked before reading a file', async () => {
+  const api = apiWithFetch(
+    async () =>
+      new Response('[]', {
+        headers: {
+          'x-crm-backend': 'postgres',
+          'x-crm-receipt-max-bytes': String(3 * 1024 * 1024),
+        },
+      }),
+  )
+  await api.fetchUsers()
+  assert.equal(api.getReceiptMaxBytes(), 3 * 1024 * 1024)
+  await assert.rejects(
+    api.uploadReceipt('fictional-client', { size: 3 * 1024 * 1024 + 1, type: 'image/png' }, 0),
+    (error) => error.status === 413,
+  )
+  api.clearPrivateState()
+  assert.equal(api.getReceiptMaxBytes(), 5 * 1024 * 1024)
+})
+test('disabled receipts prevent encoding/upload/inbox calls and reset between sessions', async () => {
+  let calls = 0
+  const api = apiWithFetch(async () => {
+    calls++
+    return new Response('[]', { headers: { 'x-crm-backend': 'postgres', 'x-crm-receipt-max-bytes': '0' } })
+  })
+  await api.fetchUsers()
+  assert.equal(api.isReceiptsEnabled(), false)
+  await assert.rejects(
+    api.uploadReceipt('fictional-client', { size: 1, type: 'image/png' }, 0),
+    (error) => error.status === 409 && error.code === 'FEATURE_DISABLED',
+  )
+  await assert.rejects(api.receiptAttempts('fictional-client'), (error) => error.code === 'FEATURE_DISABLED')
+  await assert.rejects(
+    api.receiptRecoveryPost('fictional-client', { requestId: 'old-attempt' }),
+    (error) => error.code === 'FEATURE_DISABLED',
+  )
+  assert.equal(calls, 1)
+  api.clearPrivateState()
+  assert.equal(api.isReceiptsEnabled(), true)
+})
+test('malformed server receipt limits fail closed instead of promising an unsupported upload', async () => {
+  const api = apiWithFetch(
+    async () =>
+      new Response('[]', {
+        headers: {
+          'x-crm-backend': 'postgres',
+          'x-crm-receipt-max-bytes': '999999999',
+        },
+      }),
+  )
+  await assert.rejects(api.fetchUsers(), (error) => error.status === 502)
+})
+
 test('PostgreSQL account retries reuse the original key after a lost response', async () => {
   const requests = []
   let lost = true
@@ -647,7 +700,7 @@ test('native attendance keeps one exact key and versions through prepare, write 
     return {
       ok: true,
       status: 200,
-      headers: { get: () => 'postgres' },
+      headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
       json: async () =>
         data.action === 'recordBulkAttendance'
           ? { success: true, results: [{ clientId: 'child-1', success: true }] }
@@ -678,7 +731,12 @@ test('native attendance refuses 101 marks before sending any partial transaction
   let calls = 0
   const api = apiWithFetch(async () => {
     calls++
-    return { ok: true, status: 200, headers: { get: () => 'postgres' }, json: async () => [] }
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
+      json: async () => [],
+    }
   })
   await api.fetchUsers()
   calls = 0
@@ -707,7 +765,12 @@ test('lesson cancellation invalidates an in-flight native schedule read', { time
   const api = apiWithFetch(async (_url, options) => {
     const { action } = JSON.parse(options.body)
     if (action === 'getUsers')
-      return { ok: true, status: 200, headers: { get: () => 'postgres' }, json: async () => [] }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
+        json: async () => [],
+      }
     if (action === 'getSchedule') {
       const version = ++reads
       if (version === 1) await gate

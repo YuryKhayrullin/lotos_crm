@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  poweredByHeader: false,
+  output: 'standalone',
+  outputFileTracingIncludes: { '/*': ['./.generated/prisma/**/*'] },
   serverExternalPackages: ['pdf-lib'],
   typescript: {
     ignoreBuildErrors: false,
@@ -16,6 +19,10 @@ const nextConfig = {
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+          {
+            key: 'Content-Security-Policy',
+            value: "object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
+          },
         ],
       },
     ]

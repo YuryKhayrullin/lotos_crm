@@ -1,6 +1,6 @@
 import 'server-only'
 import { z } from 'zod'
-import type { Prisma, PrismaClient } from '../../../.generated/prisma/client'
+import { Prisma, type PrismaClient } from '../../../.generated/prisma/client'
 import { type Actor, lockActor } from './access'
 import { authDigest } from './accounts'
 import { requestKeySchema } from './auth-input'
@@ -8,7 +8,7 @@ import { dateOnlySchema } from './validation'
 import { domainMutation } from './mutations'
 import { lessonDto, requireOccurrence } from './schedule'
 import { PostgresApiError } from './errors'
-import { accountingState, requireReconciled } from './accounting-state'
+import { requireClientsReconciled } from './accounting-state'
 
 const id = z.string().min(1).max(100)
 const item = z
@@ -188,10 +188,13 @@ export async function recordAttendance(db: PrismaClient, actor: Actor, input: un
         await tx.$queryRaw`SELECT id FROM lessons WHERE id=${first.lessonId} FOR UPDATE`
         // Lock clients in stable ID order across different lessons. This protects
         // the last credit without serializing every attendance request globally.
-        for (const mark of data.attendance)
-          await tx.$queryRaw`SELECT id FROM clients WHERE id=${mark.clientId} FOR UPDATE`
+        await tx.$queryRaw`SELECT id FROM clients WHERE id IN (${Prisma.join(data.attendance.map((mark) => mark.clientId))}) ORDER BY id FOR UPDATE`
         const { lesson, rows } = await validateMarks(tx, canonical, data)
-        for (const row of rows) requireReconciled(await accountingState(tx, row.client, secret))
+        await requireClientsReconciled(
+          tx,
+          rows.map((row) => row.client),
+          secret,
+        )
         const results = []
         for (const mark of data.attendance) {
           const row = rows.find((entry) => entry.clientId === mark.clientId)!,
