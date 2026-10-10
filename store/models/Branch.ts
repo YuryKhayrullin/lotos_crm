@@ -4,6 +4,7 @@ export const BranchModel = types.model('Branch', {
   id: types.union(types.string, types.number),
   name: types.optional(types.string, ''),
   address: types.optional(types.string, ''),
+  timeZone: types.optional(types.string, 'Europe/Moscow'),
 })
 
 export type IBranch = Instance<typeof BranchModel>

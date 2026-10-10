@@ -1,4 +1,4 @@
-import { flow, types, Instance } from 'mobx-state-tree'
+import { flow, types, Instance, applySnapshot } from 'mobx-state-tree'
 import { apiClient, ApiError, type CoachAccount } from '@/lib/api-client'
 import { ClientStore } from './ClientStore'
 import { AuthStore } from './AuthStore'
@@ -112,6 +112,7 @@ const RootStoreModel = types
     const addLessonToStore = (lessonData: any) => {
       self.lessons.push(lessonData)
     }
+    const sessionIdentity = () => `${String(self.authStore.user?.id || '')}:${self.authStore.sessionVersion}`
 
     return {
       closeBranchMenu,
@@ -236,13 +237,15 @@ const RootStoreModel = types
         }
       }),
       addBranch: flow(function* (name: string, address: string) {
+        const identity = sessionIdentity()
         try {
           const response = yield apiClient.createBranch({ name, address })
-          self.branches.push(response)
+          if (sessionIdentity() !== identity) return
+          if (!self.branches.some((branch) => branch.id === response.id)) self.branches.push(response)
           setBranch(response.id)
           self.branchMenuOpen = false
         } catch (error) {
-          self.error = 'Ошибка создания филиала'
+          if (sessionIdentity() === identity) self.error = 'Ошибка создания филиала'
         }
       }),
       createCoach: flow(function* (coachData: {
@@ -254,6 +257,7 @@ const RootStoreModel = types
         username?: string
         password?: string
       }) {
+        const identity = sessionIdentity()
         if (!coachData.name.trim() || !coachData.specialty.trim() || !coachData.branchId) {
           throw new Error('Укажите имя, специализацию и филиал тренера')
         }
@@ -273,33 +277,43 @@ const RootStoreModel = types
             birthDate: coachData.birthDate?.trim() || '',
             ...(coachData.username ? { username: coachData.username.trim(), password: coachData.password } : {}),
           })
-          self.coaches.push(coach)
+          if (sessionIdentity() !== identity)
+            throw new Error('Сессия изменилась; ответ предыдущего пользователя отброшен')
+          if (!self.coaches.some((existing) => existing.id === coach.id)) self.coaches.push(coach)
           return coach
         } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
+          if (sessionIdentity() === identity)
+            self.error = error instanceof ApiError ? error.message : 'Ошибка создания тренера'
           throw error
         }
       }),
       deleteCoach: flow(function* (coachId: string) {
+        const identity = sessionIdentity()
         try {
           yield apiClient.deleteCoach(coachId)
+          if (sessionIdentity() !== identity) return
           const coach = self.coaches.find((c: ICoach) => c.id === coachId)
           if (coach) self.coaches.remove(coach)
         } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
+          if (sessionIdentity() === identity)
+            self.error = error instanceof ApiError ? error.message : 'Ошибка удаления тренера'
           throw error
         }
       }),
       deleteLesson: flow(function* (lessonId: string) {
+        const identity = sessionIdentity()
         try {
           yield apiClient.deleteLesson(lessonId)
+          if (sessionIdentity() !== identity) return
           const lesson = self.lessons.find((l: ILesson) => l.id === lessonId)
           if (lesson) self.lessons.remove(lesson)
         } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка удаления занятия'
+          if (sessionIdentity() === identity)
+            self.error = error instanceof ApiError ? error.message : 'Ошибка удаления занятия'
         }
       }),
       attachCoach: flow(function* () {
+        const identity = sessionIdentity()
         if (!self.attachCoachId) return
         const branch = self.currentBranch
         if (!branch) return
@@ -312,15 +326,20 @@ const RootStoreModel = types
             initials: coach.initials,
             branchId: String(branch.id),
           })
+          if (sessionIdentity() !== identity) return
           self.coaches.push(attached)
           self.attachCoachId = ''
         } catch (error) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка прикрепления тренера'
+          if (sessionIdentity() === identity)
+            self.error = error instanceof ApiError ? error.message : 'Ошибка прикрепления тренера'
         }
       }),
       createLesson: flow(function* (lessonData: any) {
+        const identity = sessionIdentity()
         try {
           const response = yield apiClient.createLesson(lessonData)
+          if (sessionIdentity() !== identity)
+            throw new Error('Сессия изменилась; ответ предыдущего пользователя отброшен')
           // Нормализуем ответ от сервера, так как Code.gs возвращает объект с ключами из таблицы
           const newLesson = normalizeLesson(response)
           const existingLesson = self.lessons.find((lesson) => lesson.id === newLesson.id)
@@ -328,10 +347,20 @@ const RootStoreModel = types
           self.lessons.push(newLesson)
           return newLesson
         } catch (error: any) {
-          self.error = error instanceof ApiError ? error.message : 'Ошибка создания урока'
+          if (sessionIdentity() === identity)
+            self.error = error instanceof ApiError ? error.message : 'Ошибка создания урока'
           throw error
         }
       }),
+      rememberSchedule(rows: unknown[], from: string, to: string, branchId?: string) {
+        // Replace only the freshly loaded scope. Keep other dates for dashboard
+        // counters without reviving removed lessons inside the requested week.
+        const outside = self.lessons.filter(
+          (lesson) =>
+            (branchId && lesson.branchId !== branchId) || !lesson.date || lesson.date < from || lesson.date > to,
+        )
+        applySnapshot(self.lessons, [...outside.map((lesson) => ({ ...lesson })), ...rows.map(normalizeLesson)])
+      },
     }
   })
 

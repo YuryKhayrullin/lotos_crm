@@ -8,11 +8,25 @@ const {
   lessonOccurrenceDate,
   parseTimeToHHMM,
   lessonTemporalStatus,
+  calendarDayInZone,
+  instantTemporalStatus,
+  isFutureLocalTime,
 } = require('../.test-dist/utils/date-core.js')
 
 const lesson = (date, dayOfWeek, isRecurring = false) => ({ date, dayOfWeek, isRecurring })
 const weekStart = new Date('2026-09-21T00:00:00')
 const weekEnd = new Date('2026-09-27T00:00:00')
+
+test('native calendar uses Moscow day and actual instants, not the browser wall clock', () => {
+  const now = new Date('2026-10-08T21:30:00Z')
+  const date = calendarDayInZone(now, 'Europe/Moscow')
+  assert.equal(date.getFullYear(), 2026)
+  assert.equal(date.getMonth(), 9)
+  assert.equal(date.getDate(), 9)
+  assert.equal(instantTemporalStatus('2026-10-08T21:00:00Z', '2026-10-08T22:00:00Z', now), 'ongoing')
+  assert.equal(isFutureLocalTime('2026-10-09', '00:00', now, 'Europe/Moscow'), false)
+  assert.equal(isFutureLocalTime('2026-10-09', '01:00', now, 'Europe/Moscow'), true)
+})
 
 test('schedule separates upcoming, ongoing and completed at exact start and end boundaries', () => {
   const status = (hour, minute = 0) =>

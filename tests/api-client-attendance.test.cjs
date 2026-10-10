@@ -14,7 +14,13 @@ function apiWithFetch(fetch, timers = {}) {
   const exports = {}
   const context = {
     exports,
-    fetch,
+    fetch: (url, options) => {
+      // An accepted form result acknowledges delivery separately. Model this
+      // endpoint independently; mutation-call counters below count CRM writes.
+      if (url === '/api/mutation-drafts' && options?.body && JSON.parse(options.body).mode === 'acknowledge')
+        return Promise.resolve(new Response(JSON.stringify({ success: true, confirmed: true })))
+      return fetch(url, options)
+    },
     AbortController,
     setTimeout,
     clearTimeout,
@@ -32,6 +38,158 @@ function apiWithFetch(fetch, timers = {}) {
   return exports.apiClient
 }
 
+test('cloud receipt limit comes from the same-session server and is checked before reading a file', async () => {
+  const api = apiWithFetch(
+    async () =>
+      new Response('[]', {
+        headers: {
+          'x-crm-backend': 'postgres',
+          'x-crm-receipt-max-bytes': String(3 * 1024 * 1024),
+        },
+      }),
+  )
+  await api.fetchUsers()
+  assert.equal(api.getReceiptMaxBytes(), 3 * 1024 * 1024)
+  await assert.rejects(
+    api.uploadReceipt('fictional-client', { size: 3 * 1024 * 1024 + 1, type: 'image/png' }, 0),
+    (error) => error.status === 413,
+  )
+  api.clearPrivateState()
+  assert.equal(api.getReceiptMaxBytes(), 5 * 1024 * 1024)
+})
+test('disabled receipts prevent encoding/upload/inbox calls and reset between sessions', async () => {
+  let calls = 0
+  const api = apiWithFetch(async () => {
+    calls++
+    return new Response('[]', { headers: { 'x-crm-backend': 'postgres', 'x-crm-receipt-max-bytes': '0' } })
+  })
+  await api.fetchUsers()
+  assert.equal(api.isReceiptsEnabled(), false)
+  await assert.rejects(
+    api.uploadReceipt('fictional-client', { size: 1, type: 'image/png' }, 0),
+    (error) => error.status === 409 && error.code === 'FEATURE_DISABLED',
+  )
+  await assert.rejects(api.receiptAttempts('fictional-client'), (error) => error.code === 'FEATURE_DISABLED')
+  await assert.rejects(
+    api.receiptRecoveryPost('fictional-client', { requestId: 'old-attempt' }),
+    (error) => error.code === 'FEATURE_DISABLED',
+  )
+  assert.equal(calls, 1)
+  api.clearPrivateState()
+  assert.equal(api.isReceiptsEnabled(), true)
+})
+test('malformed server receipt limits fail closed instead of promising an unsupported upload', async () => {
+  const api = apiWithFetch(
+    async () =>
+      new Response('[]', {
+        headers: {
+          'x-crm-backend': 'postgres',
+          'x-crm-receipt-max-bytes': '999999999',
+        },
+      }),
+  )
+  await assert.rejects(api.fetchUsers(), (error) => error.status === 502)
+})
+
+test('PostgreSQL account retries reuse the original key after a lost response', async () => {
+  const requests = []
+  let lost = true
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    if (body.mode === 'acknowledge') return new Response(JSON.stringify({ success: true, confirmed: true }))
+    requests.push(body)
+    if (lost) {
+      lost = false
+      throw new Error('lost acknowledgement')
+    }
+    return new Response(JSON.stringify({ success: true }), { headers: { 'x-crm-backend': 'postgres' } })
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.resetCoachPassword('test-user', 'temporary-test-password'))
+  await api.resetCoachPassword('test-user', 'temporary-test-password')
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].payload.requestId, requests[1].payload.requestId)
+  await api.resetCoachPassword('test-user', 'another-test-password')
+  assert.notEqual(requests[1].payload.requestId, requests[2].payload.requestId)
+})
+
+test('changed account input cannot silently replace an unconfirmed PostgreSQL attempt', async () => {
+  let writes = 0
+  const api = apiWithFetch(async (_url, options) => {
+    if (JSON.parse(options.body).action === 'getUsers')
+      return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    writes++
+    throw new Error('network unavailable')
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.assignUserBranch('test-user', 'first-branch'))
+  await assert.rejects(api.assignUserBranch('test-user', 'different-branch'), (error) => error.status === 409)
+  assert.equal(writes, 1)
+})
+
+test('an HTTP timeout does not discard an account mutation key or allow changed retry data', async () => {
+  const writes = []
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    writes.push(body)
+    if (writes.length === 1)
+      return new Response(JSON.stringify({ code: 'TIMEOUT', message: 'Acknowledgement timed out' }), { status: 408 })
+    return new Response(JSON.stringify({ success: true }))
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.resetCoachPassword('test-user', 'original-test-password'))
+  await assert.rejects(api.resetCoachPassword('test-user', 'changed-test-password'), (error) => error.status === 409)
+  await api.resetCoachPassword('test-user', 'original-test-password')
+  assert.equal(writes.length, 2)
+  assert.equal(writes[0].payload.requestId, writes[1].payload.requestId)
+})
+
+test('simultaneous account clicks share one PostgreSQL mutation and its explicit key', async () => {
+  let writes = 0,
+    release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const api = apiWithFetch(async (_url, options) => {
+    if (JSON.parse(options.body).action === 'getUsers')
+      return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    writes++
+    await gate
+    return new Response(JSON.stringify({ success: true }))
+  })
+  await api.fetchUsers()
+  const first = api.revokeUserSessions('test-user'),
+    second = api.revokeUserSessions('test-user')
+  assert.equal(writes, 1)
+  release()
+  await Promise.all([first, second])
+})
+
+test('unconfirmed success bodies retain the account attempt while logout clears private attempt data', async () => {
+  const requests = []
+  let confirmed = false
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    requests.push(body)
+    return new Response(JSON.stringify({ success: confirmed }))
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.deactivateUser('test-user'))
+  confirmed = true
+  await api.deactivateUser('test-user')
+  assert.equal(requests[0].payload.requestId, requests[1].payload.requestId)
+  confirmed = false
+  await assert.rejects(api.resetCoachPassword('test-user', 'first-test-password'))
+  api.clearPrivateState()
+  await api.fetchUsers()
+  confirmed = true
+  await api.resetCoachPassword('test-user', 'different-test-password')
+  assert.notEqual(requests[2].payload.requestId, requests[3].payload.requestId)
+})
+
 const accountingSnapshot = {
   remainingLessons: 4,
   totalLessons: 4,
@@ -41,6 +199,100 @@ const accountingSnapshot = {
   lessonsPerWeek: 1,
   status: 'Активен',
 }
+
+test('catalogue creation retains its key and rejects changed data after a lost response', async () => {
+  const requests = []
+  let lost = true
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    requests.push(body)
+    if (lost) {
+      lost = false
+      throw new Error('lost acknowledgement')
+    }
+    return new Response(JSON.stringify({ id: 'confirmed-id', name: 'Test', branchId: 'test-branch' }))
+  })
+  await api.fetchUsers()
+  const input = { name: 'Test', branchId: 'test-branch' }
+  await assert.rejects(api.createCoach(input))
+  await assert.rejects(api.createCoach({ ...input, name: 'Changed' }), (error) => error.status === 409)
+  await api.createCoach(input)
+  assert.equal(requests[0].payload.requestId, requests[1].payload.requestId)
+  assert.equal(requests.length, 2)
+})
+
+test('a refreshed version cannot change the original unknown client-edit attempt', async () => {
+  const requests = []
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    requests.push(body)
+    if (requests.length === 1) throw new Error('lost acknowledgement')
+    return new Response(JSON.stringify({ success: true }))
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.updateClient('test-client', { childName: 'New', expectedVersion: 1 }))
+  await api.updateClient('test-client', { childName: 'New', expectedVersion: 2 })
+  assert.equal(requests[0].payload.requestId, requests[1].payload.requestId)
+  assert.equal(requests[1].payload.expectedVersion, 1)
+})
+
+test('PostgreSQL client creation never forwards form-computed subscription credits', async () => {
+  let sent
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    if (body.mode === 'acknowledge') return new Response(JSON.stringify({ success: true, confirmed: true }))
+    sent = body.payload
+    return new Response(JSON.stringify({ id: 'created-id' }))
+  })
+  await api.fetchUsers()
+  await api.createClient(
+    { childName: 'Test', paidAmount: 0, subscription: { remainingLessons: 4, totalLessons: 4 } },
+    'original-key',
+  )
+  assert.equal('subscription' in sent, false)
+  assert.equal(sent.paidAmount, 0)
+  assert.equal(sent.requestId, 'original-key')
+})
+
+test('recovery metadata rejects malformed replies rather than claiming an empty inbox', async () => {
+  const api = apiWithFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          items: [{ requestId: 'key', action: 'createClient', confirmed: 'yes', createdAt: '2026' }],
+          hasMore: false,
+        }),
+      ),
+  )
+  await assert.rejects(api.mutationDrafts(), /незавершённые попытки/)
+  await assert.rejects(api.resolveMutationDraft('original-key', 'recover'), /не подтверждён/)
+})
+test('receipt recovery rejects foreign metadata and duplicate attempt IDs', async () => {
+  const attempt = {
+    requestId: 'original-key',
+    resumable: false,
+    createdAt: '2026-10-08',
+    metadata: {
+      clientId: 'foreign',
+      expectedReceiptVersion: 0,
+      fileName: 'Test.png',
+      mimeType: 'image/png',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 100,
+    },
+  }
+  let attempts = [attempt]
+  const api = apiWithFetch(async () => new Response(JSON.stringify({ attempts })))
+  await assert.rejects(api.receiptAttempts('own-client'), /незавершённые загрузки/)
+  attempts = [
+    { ...attempt, metadata: null },
+    { ...attempt, metadata: null },
+  ]
+  await assert.rejects(api.receiptAttempts('own-client'), /незавершённые загрузки/)
+})
 
 test('client creation sends the explicit retry key and rejects an unconfirmed success body', async () => {
   const requests = []
@@ -417,9 +669,125 @@ test('fresh reads do not join pre-mutation or previous-session requests', async 
   api.clearPrivateState()
   assert.equal((await api.fetchClients())[0].id, 'client-3')
   release()
-  await before
+  await assert.rejects(before, (error) => error.code === 'STALE_CONTEXT')
 })
 
+test('a later 4xx cannot discard a previously unknown account mutation key', async () => {
+  const requests = []
+  const api = apiWithFetch(async (_url, options) => {
+    const body = JSON.parse(options.body)
+    if (body.action === 'getUsers') return new Response('[]', { headers: { 'x-crm-backend': 'postgres' } })
+    requests.push(body)
+    if (requests.length === 1) throw Error('Fictional lost response')
+    if (requests.length === 2)
+      return new Response(JSON.stringify({ code: 'CONFLICT', message: 'Fictional conflict' }), { status: 409 })
+    return new Response(JSON.stringify({ success: true }))
+  })
+  await api.fetchUsers()
+  await assert.rejects(api.assignUserBranch('coach', 'original'))
+  await assert.rejects(api.assignUserBranch('coach', 'original'))
+  await assert.rejects(api.assignUserBranch('coach', 'different'), (error) => error.status === 409)
+  await api.assignUserBranch('coach', 'original')
+  assert.equal(requests.length, 3)
+  assert.ok(requests.every((row) => row.payload.requestId === requests[0].payload.requestId))
+})
+
+test('native attendance keeps one exact key and versions through prepare, write and acknowledgement', async () => {
+  const requests = []
+  const api = apiWithFetch(async (_url, options) => {
+    const data = JSON.parse(options.body)
+    requests.push(data)
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
+      json: async () =>
+        data.action === 'recordBulkAttendance'
+          ? { success: true, results: [{ clientId: 'child-1', success: true }] }
+          : data.action === 'getUsers'
+            ? []
+            : { success: true },
+    }
+  })
+  // Discover the native mode through the normal response contract.
+  await api.fetchUsers()
+  requests.length = 0
+  await api.recordBulkAttendance(
+    [{ clientId: 'child-1', status: 'absent', expectedVersion: 7 }],
+    'lesson-1',
+    '2026-10-07',
+    'same-key',
+    { expectedLessonVersion: 3 },
+  )
+  assert.deepEqual(
+    requests.map((request) => request.action),
+    ['prepareAttendance', 'recordBulkAttendance', 'acknowledgeAttendance'],
+  )
+  assert.ok(requests.every((request) => request.payload.requestId === 'same-key'))
+  assert.equal(requests[1].payload.attendance[0].expectedVersion, 7)
+  assert.equal(requests[1].payload.expectedLessonVersion, 3)
+})
+test('native attendance refuses 101 marks before sending any partial transaction', async () => {
+  let calls = 0
+  const api = apiWithFetch(async () => {
+    calls++
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
+      json: async () => [],
+    }
+  })
+  await api.fetchUsers()
+  calls = 0
+  await assert.rejects(
+    api.recordBulkAttendance(
+      Array.from({ length: 101 }, (_, index) => ({
+        clientId: 'child-' + index,
+        status: 'attended',
+        expectedVersion: 0,
+      })),
+      'lesson-1',
+      '2026-10-07',
+      'key',
+      { expectedLessonVersion: 1 },
+    ),
+    (error) => error.status === 400,
+  )
+  assert.equal(calls, 0)
+})
+test('lesson cancellation invalidates an in-flight native schedule read', { timeout: 2000 }, async () => {
+  let reads = 0,
+    release
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const api = apiWithFetch(async (_url, options) => {
+    const { action } = JSON.parse(options.body)
+    if (action === 'getUsers')
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (name === 'x-crm-backend' ? 'postgres' : null) },
+        json: async () => [],
+      }
+    if (action === 'getSchedule') {
+      const version = ++reads
+      if (version === 1) await gate
+      return { ok: true, status: 200, json: async () => ({ items: [{ id: 'lesson-' + version }] }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ success: true }) }
+  })
+  await api.fetchUsers()
+  const stale = api.fetchSchedule('2030-10-07', '2030-10-13')
+  try {
+    await api.changeLesson('cancelLesson', 'lesson-1', { expectedVersion: 1, reason: 'Test' })
+    assert.equal((await api.fetchSchedule('2030-10-07', '2030-10-13'))[0].id, 'lesson-2')
+  } finally {
+    release()
+    await stale
+  }
+})
 test('failure of a later chunk retains unknown outcome even on a business rejection', async () => {
   const api = apiWithFetch(async (_url, options) => {
     const { payload } = JSON.parse(options.body)

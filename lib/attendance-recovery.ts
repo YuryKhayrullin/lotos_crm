@@ -4,7 +4,9 @@ export type AttendanceAttempt = {
   lessonId: string
   date: string
   requestId: string
-  attendanceList: { clientId: string; status: AttendanceStatus }[]
+  attendanceList: { clientId: string; status: AttendanceStatus; expectedVersion?: number }[]
+  expectedLessonVersion?: number
+  reason?: string
 }
 export type AttendanceDraft = {
   attendance: AttendanceMap

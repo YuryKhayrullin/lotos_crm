@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+    restart: 'no'
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Use the test environment script}
+      POSTGRES_USER: ${POSTGRES_USER:?Use the test environment script}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Use the test environment script}
+    ports:
+      - '127.0.0.1:55433:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'PGPASSWORD="$$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=2 psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null'
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m

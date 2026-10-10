@@ -1,0 +1,17 @@
+**/.env*
+.git
+node_modules
+.next
+.generated
+.test-dist
+.tools
+.artifacts
+.private
+.migration-baseline
+storage
+**/*.xlsx
+**/*.dump
+**/*.log
+tests
+docs
+tsconfig.tsbuildinfo

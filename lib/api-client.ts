@@ -11,6 +11,7 @@ const MUTATING_ACTIONS = new Set([
   'deactivateUser',
   'activateUser',
   'resetCoachPassword',
+  'revokeUserSessions',
   'linkCoachUser',
   'createClient',
   'createLesson',
@@ -20,11 +21,14 @@ const MUTATING_ACTIONS = new Set([
   'updateClient',
   'assignClientLesson',
   'updateLesson',
+  'cancelLesson',
   'deleteClient',
   'deleteCoach',
   'deleteLesson',
   'recordAttendance',
   'recordBulkAttendance',
+  'prepareAttendance',
+  'acknowledgeAttendance',
   'recordPayment',
   'recordAdjustment',
   'repairLessonLedger',
@@ -67,6 +71,8 @@ export type CoachAccount = {
   status: 'Активен' | 'Отключен' | 'Ожидает подтверждения'
   disabledAt: string | null
   disabledBy: string | null
+  canRevokeSessions?: boolean
+  profileArchived?: boolean
 }
 
 export class ApiError extends Error {
@@ -95,6 +101,20 @@ const fileToBase64 = (file: File): Promise<string> =>
     reader.onload = () => resolve((reader.result as string).split(',')[1] ?? '')
     reader.onerror = reject
   })
+
+export type ReceiptAttempt = {
+  requestId: string
+  resumable: boolean
+  createdAt: string
+  metadata: {
+    clientId: string
+    expectedReceiptVersion: number
+    fileName: string
+    mimeType: string
+    sha256: string
+    sizeBytes: number
+  } | null
+}
 
 type JsonObject = Record<string, unknown>
 
@@ -142,9 +162,17 @@ export type LessonRosterClient = {
   status: string
   remainingLessons: number
   mark: 'attended' | 'absent' | null
+  version?: number
+  canMark?: boolean
 }
 
-export type LessonRoster = { lessonId: string; date: string; clients: LessonRosterClient[] }
+export type LessonRoster = {
+  lessonId: string
+  date: string
+  clients: LessonRosterClient[]
+  lessonVersion?: number
+  pendingAttempt?: import('./attendance-recovery').AttendanceAttempt | null
+}
 
 export type AttendanceResult = {
   clientId: string
@@ -218,6 +246,7 @@ export type LessonLedgerDiscrepancy = {
   paymentIssues: string[]
   missingPaymentIds: string[]
   repairable: boolean
+  auditFingerprint?: string
 }
 
 export type LessonLedgerAudit = {
@@ -240,6 +269,9 @@ export type ClientHistory = {
   success: boolean
   payments: JsonObject[]
   ledger: JsonObject[]
+  attendanceHistory?: JsonObject[]
+  attendanceTotal?: number
+  legacyHistory?: { namespace: string; history: JsonObject[] }[]
 }
 
 export type ClientAccounting = ClientHistory & {
@@ -304,14 +336,165 @@ function validLedgerAudit(value: unknown): value is LessonLedgerAudit {
 class ApiClient {
   private readonly inFlightReads = new Map<string, Promise<unknown>>()
   private readGeneration = 0
+  private sessionEpoch = 0
+  private postgresAccounts = false
+  private receiptLimit = 5 * 1024 * 1024
+  getReceiptMaxBytes(): number {
+    return this.receiptLimit
+  }
+  isReceiptsEnabled(): boolean {
+    return this.receiptLimit > 0
+  }
+  private requireReceiptsEnabled() {
+    if (!this.isReceiptsEnabled())
+      throw new ApiError(409, { code: 'FEATURE_DISABLED', message: 'Квитанции отключены на тестовом стенде' })
+  }
+  isPostgresBackend(): boolean {
+    return this.postgresAccounts
+  }
+
+  async mutationDrafts(signal?: AbortSignal): Promise<{
+    items: { requestId: string; action: string; confirmed: boolean; createdAt: string; requiresCredential?: boolean }[]
+    hasMore: boolean
+  }> {
+    const { response, data } = await fetchJson('/api/mutation-drafts', { credentials: 'same-origin', signal })
+    if (!response.ok) throw new ApiError(response.status, data as JsonObject)
+    const value = data as {
+      items?: {
+        requestId: string
+        action: string
+        confirmed: boolean
+        createdAt: string
+        requiresCredential?: boolean
+      }[]
+      hasMore?: boolean
+    } | null
+    if (
+      !value ||
+      !Array.isArray(value.items) ||
+      value.items.length > 20 ||
+      typeof value.hasMore !== 'boolean' ||
+      !value.items.every(
+        (item) =>
+          item &&
+          typeof item.requestId === 'string' &&
+          typeof item.action === 'string' &&
+          typeof item.confirmed === 'boolean' &&
+          typeof item.createdAt === 'string' &&
+          (item.requiresCredential === undefined || typeof item.requiresCredential === 'boolean'),
+      )
+    )
+      throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Не удалось проверить незавершённые попытки' })
+    return { items: value.items, hasMore: value.hasMore }
+  }
+
+  async resolveMutationDraft(
+    requestId: string,
+    mode: 'recover' | 'acknowledge' | 'close',
+    password?: string,
+  ): Promise<{ success: true; confirmed: boolean }> {
+    const { response, data } = await fetchJson('/api/mutation-drafts', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId, mode, ...(password === undefined ? {} : { password }) }),
+    })
+    if (!response.ok) throw new ApiError(response.status, data as JsonObject)
+    const value = data as { success?: boolean; confirmed?: boolean } | null
+    if (!value || value.success !== true || typeof value.confirmed !== 'boolean')
+      throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Исход попытки пока не подтверждён' })
+    this.readGeneration++
+    this.inFlightReads.clear()
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('crm:mutation-attempt'))
+    return { success: true, confirmed: value.confirmed }
+  }
+
+  private acknowledgeMutation(requestId: string) {
+    if (this.postgresAccounts) void this.resolveMutationDraft(requestId, 'acknowledge').catch(() => undefined)
+  }
+  private readonly accountAttempts = new Map<
+    string,
+    { fingerprint: string; requestId: string; payload: JsonObject; pending?: Promise<unknown>; uncertain?: boolean }
+  >()
 
   clearPrivateState(): void {
+    this.sessionEpoch++
     this.readGeneration += 1
     this.inFlightReads.clear()
+    this.accountAttempts.clear()
+    this.postgresAccounts = false
+    this.receiptLimit = 5 * 1024 * 1024
     clearAttendanceDrafts()
   }
 
+  private async accountMutation(action: string, userId: string, payload: JsonObject): Promise<{ success: boolean }> {
+    return this.stableMutation(action, userId, payload, (result: { success: boolean }) => result?.success === true)
+  }
+
+  private async stableMutation<T>(
+    action: string,
+    entityKey: string,
+    payload: JsonObject,
+    confirmed: (result: T) => boolean,
+    execute?: (payload: JsonObject) => Promise<T>,
+  ): Promise<T> {
+    if (!this.postgresAccounts) return this.request(action, payload)
+    const key = action + ':' + entityKey
+    const semanticPayload = { ...payload }
+    delete semanticPayload.expectedVersion
+    delete semanticPayload.expectedReceiptVersion
+    const fingerprint = JSON.stringify(semanticPayload)
+    let attempt = this.accountAttempts.get(key)
+    if (attempt && attempt.fingerprint !== fingerprint)
+      throw new ApiError(409, {
+        code: 'CONFLICT',
+        message: 'Предыдущая попытка не подтверждена. Повторите её с исходными данными.',
+      })
+    if (attempt?.pending) return attempt.pending as Promise<T>
+    attempt ??= { fingerprint, requestId: createRequestId(), payload: { ...payload } }
+    this.accountAttempts.set(key, attempt)
+    const current = attempt
+    const frozen = { ...current.payload, requestId: current.requestId }
+    const operation = (execute ? execute(frozen) : this.request<T>(action, frozen))
+      .then((result) => {
+        if (!confirmed(result))
+          throw new ApiError(502, {
+            code: 'INVALID_RESPONSE',
+            message: 'Изменение не подтверждено. Повторите ту же попытку.',
+          })
+        if (this.accountAttempts.get(key) === current) this.accountAttempts.delete(key)
+        if (action !== 'uploadReceipt') this.acknowledgeMutation(current.requestId)
+        return result
+      })
+      .catch((error) => {
+        if (
+          !(error instanceof ApiError) ||
+          typeof error.status !== 'number' ||
+          error.status === 408 ||
+          error.status >= 500
+        )
+          current.uncertain = true
+        if (
+          error instanceof ApiError &&
+          typeof error.status === 'number' &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408 && // A proxy timeout does not prove the mutation was rejected.
+          !current.uncertain &&
+          this.accountAttempts.get(key) === current
+        )
+          this.accountAttempts.delete(key)
+        throw error
+      })
+      .finally(() => {
+        current.pending = undefined
+      })
+    current.pending = operation
+    return operation
+  }
+
   private async request<T = unknown>(action: string, payload: JsonObject = {}, signal?: AbortSignal): Promise<T> {
+    const sessionEpoch = this.sessionEpoch
     const isMutation = MUTATING_ACTIONS.has(action)
     const requestPayload =
       isMutation && payload.requestId === undefined ? { ...payload, requestId: createRequestId() } : payload
@@ -329,6 +512,21 @@ class ApiClient {
         signal: isMutation ? signal : undefined,
       })
       devLog('api.request.response', { action, status: response.status, ok: response.ok })
+      if (sessionEpoch !== this.sessionEpoch)
+        throw new ApiError(409, {
+          code: 'STALE_CONTEXT',
+          message: 'Сессия изменилась. Ответ предыдущего пользователя отброшен.',
+        })
+      if (response.headers?.get('x-crm-backend') === 'postgres') {
+        this.postgresAccounts = true
+        const rawLimit = response.headers.get('x-crm-receipt-max-bytes')
+        if (rawLimit !== null && rawLimit !== undefined) {
+          const limit = Number(rawLimit)
+          if (!['0', String(3 * 1024 * 1024), String(5 * 1024 * 1024)].includes(rawLimit))
+            throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Некорректный лимит загрузки документов' })
+          this.receiptLimit = limit
+        }
+      }
 
       const object = data && typeof data === 'object' ? (data as JsonObject) : null
       if (!response.ok) {
@@ -353,6 +551,14 @@ class ApiClient {
         // Never join a pre-mutation read when refreshing the result.
         this.readGeneration += 1
         this.inFlightReads.clear()
+        if (
+          this.postgresAccounts &&
+          typeof window !== 'undefined' &&
+          action !== 'uploadReceipt' &&
+          action !== 'recordAttendance' &&
+          action !== 'recordBulkAttendance'
+        )
+          window.dispatchEvent(new Event('crm:mutation-attempt'))
       }
     }
 
@@ -577,17 +783,23 @@ class ApiClient {
   }
 
   async createClient(clientData: CreateClientDto, requestId: string): Promise<IClient> {
-    const response = await this.request<IClient>('createClient', { ...clientData, requestId } as unknown as JsonObject)
+    const data = { ...clientData } as unknown as JsonObject
+    if (this.postgresAccounts) delete data.subscription
+    const response = await this.request<IClient>('createClient', { ...data, requestId })
     if (!response || typeof response.id !== 'string' || !response.id.trim())
       throw new ApiError(502, {
         code: 'INVALID_RESPONSE',
         message: 'Создание клиента не подтверждено. Повторите тот же запрос.',
       })
+    this.acknowledgeMutation(requestId)
     return response
   }
 
-  async deleteClient(id: string): Promise<void> {
-    await this.request('deleteClient', { id })
+  async deleteClient(id: string, expectedVersion?: number): Promise<void> {
+    await this.accountMutation('deleteClient', id, {
+      id,
+      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+    })
   }
 
   async fetchBranches(signal?: AbortSignal, branchId?: string): Promise<IBranch[]> {
@@ -690,6 +902,7 @@ class ApiClient {
             id: String(value.id),
             name: String(value.name || ''),
             address: String(value.address || ''),
+            timeZone: String(value.timeZone || 'Europe/Moscow'),
           } as IBranch
         }),
         coaches: rowsWithIds(data.coaches).map((value) => {
@@ -721,6 +934,7 @@ class ApiClient {
   }
 
   async createLesson(lessonData: JsonObject): Promise<ILesson> {
+    lessonData = { ...lessonData, requestId: lessonData.requestId || createRequestId() }
     const count = Array.isArray(lessonData.clientIds) ? lessonData.clientIds.length : 0
     const response = await this.request<ILesson & { clientsAssigned?: number }>(
       count ? 'createLessonWithClients' : 'createLesson',
@@ -735,10 +949,32 @@ class ApiClient {
       throw new ApiError(502, {
         message: 'Сервис не подтвердил запись всех клиентов. Обновите расписание перед повтором.',
       })
+    this.acknowledgeMutation(String(lessonData.requestId))
     return response
   }
+  async fetchSchedule(from: string, to: string, branchId?: string, signal?: AbortSignal): Promise<ILesson[]> {
+    const data = await this.request<{ items: ILesson[] }>(
+      'getSchedule',
+      { from, to, ...(branchId ? { branchId } : {}) },
+      signal,
+    )
+    return rowsWithIds(data?.items).map(normalizeLesson) as ILesson[]
+  }
+  async changeLesson(action: 'updateLesson' | 'cancelLesson' | 'deleteLesson', lessonId: string, payload: JsonObject) {
+    return this.stableMutation(
+      action,
+      lessonId,
+      { id: lessonId, ...payload },
+      (result: { success?: boolean }) => result?.success === true,
+    )
+  }
   async createBranch(branchData: { id?: string; name: string; address: string }): Promise<IBranch> {
-    return this.request<IBranch>('createBranch', branchData)
+    return this.stableMutation(
+      'createBranch',
+      'form',
+      branchData,
+      (result: IBranch) => typeof result?.id === 'string' && Boolean(result.id.trim()),
+    )
   }
   async createCoach(coachData: {
     name: string
@@ -750,55 +986,115 @@ class ApiClient {
     username?: string
     password?: string
   }): Promise<ICoach> {
-    return this.request<ICoach>('createCoach', coachData)
+    return this.stableMutation(
+      'createCoach',
+      'form',
+      coachData,
+      (result: ICoach) => typeof result?.id === 'string' && Boolean(result.id.trim()),
+    )
   }
   async fetchUsers(): Promise<CoachAccount[]> {
     return this.request('getUsers')
   }
   async assignUserBranch(userId: string, branchId: string): Promise<{ success: boolean }> {
-    return this.request('assignUserBranch', { userId, branchId })
+    return this.accountMutation('assignUserBranch', userId, { userId, branchId })
   }
   async deactivateUser(userId: string): Promise<{ success: boolean }> {
-    return this.request('deactivateUser', { userId })
+    return this.accountMutation('deactivateUser', userId, { userId })
   }
   async activateUser(userId: string): Promise<{ success: boolean }> {
-    return this.request('activateUser', { userId })
+    return this.accountMutation('activateUser', userId, { userId })
   }
   async resetCoachPassword(userId: string, newPassword: string): Promise<{ success: boolean }> {
-    return this.request('resetCoachPassword', { userId, newPassword })
+    return this.accountMutation('resetCoachPassword', userId, { userId, newPassword })
+  }
+  async revokeUserSessions(userId: string): Promise<{ success: boolean }> {
+    return this.accountMutation('revokeUserSessions', userId, { userId })
   }
   async linkCoachUser(coachId: string, userId: string): Promise<{ success: boolean }> {
-    return this.request('linkCoachUser', { coachId, userId })
+    return this.accountMutation('linkCoachUser', userId, { coachId, userId })
   }
   async deleteCoach(id: string): Promise<void> {
-    await this.request('deleteCoach', { id })
+    await this.accountMutation('deleteCoach', id, { id })
   }
   async deleteLesson(id: string): Promise<void> {
     await this.request('deleteLesson', { id })
   }
   async updateClient(id: string, data: JsonObject): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>('updateClient', { id, ...data })
+    return this.accountMutation('updateClient', id, { id, ...data })
   }
 
   async assignClientLesson(
     clientId: string,
     lessonId: string,
     requestId = createRequestId(),
+    expectedVersion?: number,
   ): Promise<{ success: boolean }> {
-    return this.request<{ success: boolean }>('assignClientLesson', { clientId, lessonId, requestId })
+    return this.request<{ success: boolean }>('assignClientLesson', {
+      clientId,
+      lessonId,
+      requestId,
+      ...(this.postgresAccounts ? { expectedVersion } : {}),
+    })
   }
 
-  async uploadReceipt(clientId: string, file: File): Promise<{ success: boolean }> {
-    if (file.size > 5 * 1024 * 1024) throw new ApiError(413, 'Файл слишком большой (максимум 5 МБ)')
+  async uploadReceipt(
+    clientId: string,
+    file: File,
+    expectedReceiptVersion?: number,
+    recovery?: ReceiptAttempt,
+  ): Promise<{ success: boolean; receiptVersion?: number; receiptUrl?: string }> {
+    this.requireReceiptsEnabled()
+    if (file.size > this.receiptLimit)
+      throw new ApiError(413, 'Файл слишком большой (максимум ' + this.receiptLimit / (1024 * 1024) + ' МиБ)')
     if (!['image/jpeg', 'image/png', 'application/pdf'].includes(file.type)) {
       throw new ApiError(415, 'Разрешены только JPG, PNG и PDF')
     }
-    return this.request<{ success: boolean }>('uploadReceipt', {
+    const payload = {
       clientId,
       fileBase64: await fileToBase64(file),
       fileName: file.name,
       mimeType: file.type,
-    })
+      ...(this.postgresAccounts ? { expectedReceiptVersion } : {}),
+    }
+    if (!this.postgresAccounts) return this.request('uploadReceipt', payload)
+    if (recovery) {
+      if (!recovery.metadata) throw new ApiError(409, 'Для старой попытки требуется проверка оператора')
+      return this.receiptRecoveryPost(
+        clientId,
+        {
+          ...payload,
+          fileName: recovery.metadata.fileName,
+          mimeType: recovery.metadata.mimeType,
+          expectedReceiptVersion: recovery.metadata.expectedReceiptVersion,
+          requestId: recovery.requestId,
+        },
+        false,
+      )
+    }
+    return this.stableMutation(
+      'uploadReceipt',
+      clientId,
+      payload,
+      (result: { success: boolean; receiptVersion?: number }) =>
+        result?.success === true && Number.isInteger(result.receiptVersion),
+      async (frozen) => {
+        try {
+          const { response, data } = await fetchJson('/api/receipts/' + encodeURIComponent(clientId), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(frozen),
+          })
+          if (!response.ok || (data && typeof data === 'object' && 'status' in data && data.status === 'error'))
+            throw new ApiError(response.status, data as JsonObject)
+          return data as { success: boolean; receiptVersion?: number; receiptUrl?: string }
+        } finally {
+          this.readGeneration++
+          this.inFlightReads.clear()
+        }
+      },
+    )
   }
 
   async recordAdjustment(
@@ -808,7 +1104,15 @@ class ApiClient {
     comment = '',
     requestId?: string,
   ): Promise<{ success: boolean; duplicate?: boolean; client?: Record<string, unknown> }> {
-    return this.request('recordAdjustment', { clientId, lessonsDelta, reason, comment, requestId })
+    requestId ||= createRequestId()
+    const result = await this.request<{ success: boolean; duplicate?: boolean; client?: Record<string, unknown> }>(
+      'recordAdjustment',
+      { clientId, lessonsDelta, reason, comment, requestId },
+    )
+    if (result?.success !== true)
+      throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Корректировка не подтверждена' })
+    this.acknowledgeMutation(requestId)
+    return result
   }
 
   async auditLessonLedger(clientId?: string): Promise<LessonLedgerAudit> {
@@ -821,6 +1125,7 @@ class ApiClient {
     expectedTotalLessons: number,
     reason: string,
     requestId?: string,
+    auditFingerprint?: string,
   ): Promise<{ success: boolean; duplicate?: boolean; repaired?: boolean }> {
     return this.request('repairLessonLedger', {
       clientId,
@@ -829,6 +1134,7 @@ class ApiClient {
       reason,
       confirmed: true,
       requestId,
+      ...(this.postgresAccounts ? { auditFingerprint } : {}),
     })
   }
 
@@ -840,6 +1146,7 @@ class ApiClient {
     comment?: string,
     requestId?: string,
   ): Promise<PaymentResult> {
+    requestId ||= createRequestId()
     const result = await this.request<PaymentResult>('recordPayment', {
       clientId,
       amount,
@@ -862,6 +1169,7 @@ class ApiClient {
         message: 'Подтверждение платежа неполное. Проверяем историю.',
       })
     }
+    this.acknowledgeMutation(requestId)
     return {
       ...result,
       ledgerEntry:
@@ -883,7 +1191,17 @@ class ApiClient {
     if (result?.success !== true) {
       throw new ApiError(502, { code: 'INVALID_RESPONSE', message: 'Не удалось загрузить историю платежей.' })
     }
-    const history = { success: true, payments: rowsWithIds(result.payments), ledger: rowsWithIds(result.ledger) }
+    const history = {
+      success: true,
+      ...(Array.isArray(result.legacyHistory)
+        ? { legacyHistory: result.legacyHistory as { namespace: string; history: JsonObject[] }[] }
+        : {}),
+      payments: rowsWithIds(result.payments),
+      ledger: rowsWithIds(result.ledger),
+      ...(result.attendanceHistory !== undefined
+        ? { attendanceHistory: rowsWithIds(result.attendanceHistory), attendanceTotal: result.attendanceTotal }
+        : {}),
+    }
     const client = validAccountingSnapshot(result.client) ? result.client : undefined
     if (Object.prototype.hasOwnProperty.call(result, 'audit')) {
       return {
@@ -915,11 +1233,43 @@ class ApiClient {
   }
 
   async recordBulkAttendance(
-    attendanceList: { clientId: string; status: 'attended' | 'absent' }[],
+    attendanceList: { clientId: string; status: 'attended' | 'absent'; expectedVersion?: number }[],
     lessonId: string,
     date: string,
     requestId: string = createRequestId(),
+    metadata?: { expectedLessonVersion?: number; reason?: string },
   ) {
+    if (this.postgresAccounts) {
+      // One native transaction, never silently split an atomic packet.
+      if (!attendanceList.length || attendanceList.length > 100)
+        throw new ApiError(400, { code: 'VALIDATION', message: 'Допустимо от 1 до 100 отметок за одно сохранение' })
+      const payload = {
+        requestId,
+        expectedLessonVersion: metadata?.expectedLessonVersion,
+        reason: metadata?.reason || '',
+        attendance: attendanceList.map((mark) => ({ ...mark, lessonId, date, isWalkin: false })),
+      }
+      await this.request('prepareAttendance', payload)
+      const response = await this.request<{ success: boolean; results: AttendanceResult[] }>(
+        'recordBulkAttendance',
+        payload,
+      )
+      const confirmed = new Set(response?.results?.filter((mark) => mark.success === true).map((mark) => mark.clientId))
+      if (
+        response?.success !== true ||
+        response.results?.length !== attendanceList.length ||
+        confirmed.size !== attendanceList.length ||
+        attendanceList.some((mark) => !confirmed.has(mark.clientId))
+      )
+        throw new ApiError(502, {
+          code: 'INVALID_RESPONSE',
+          message: 'Сохранение не подтверждено. Повторите тот же запрос.',
+        })
+      // Losing the acknowledgement cannot undo a confirmed write. The durable
+      // draft may reappear and be replayed safely after reopening the roster.
+      await this.request('acknowledgeAttendance', { requestId }).catch(() => undefined)
+      return response
+    }
     const results: AttendanceResult[] = []
     for (let offset = 0; offset < attendanceList.length; offset += 100) {
       const chunk = attendanceList.slice(offset, offset + 100)
@@ -1005,6 +1355,75 @@ class ApiClient {
 
   async getBranches(): Promise<IBranch[]> {
     return this.fetchBranches()
+  }
+  async receiptAttempts(clientId: string, signal?: AbortSignal): Promise<ReceiptAttempt[]> {
+    this.requireReceiptsEnabled()
+    const { response, data } = await fetchJson('/api/receipts/' + encodeURIComponent(clientId) + '/attempts', {
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) throw new ApiError(response.status, data)
+    if (
+      !data ||
+      typeof data !== 'object' ||
+      !('attempts' in data) ||
+      !Array.isArray(data.attempts) ||
+      data.attempts.length > 20 ||
+      !data.attempts.every((value: unknown) => {
+        if (!value || typeof value !== 'object') return false
+        const row = value as ReceiptAttempt,
+          metadata = row.metadata
+        return (
+          typeof row.requestId === 'string' &&
+          row.requestId.length > 0 &&
+          row.requestId.length <= 150 &&
+          typeof row.resumable === 'boolean' &&
+          typeof row.createdAt === 'string' &&
+          (metadata === null ||
+            (metadata &&
+              metadata.clientId === clientId &&
+              Number.isInteger(metadata.expectedReceiptVersion) &&
+              metadata.expectedReceiptVersion >= 0 &&
+              typeof metadata.fileName === 'string' &&
+              metadata.fileName.length > 0 &&
+              metadata.fileName.length <= 200 &&
+              ['image/png', 'image/jpeg', 'application/pdf'].includes(metadata.mimeType) &&
+              /^[a-f0-9]{64}$/.test(metadata.sha256) &&
+              Number.isInteger(metadata.sizeBytes) &&
+              metadata.sizeBytes > 0 &&
+              metadata.sizeBytes <= 5 * 1024 * 1024)) &&
+          (!row.resumable || metadata !== null)
+        )
+      }) ||
+      new Set(data.attempts.map((row: ReceiptAttempt) => row.requestId)).size !== data.attempts.length
+    )
+      throw new ApiError(502, 'Не удалось проверить незавершённые загрузки')
+    return data.attempts as ReceiptAttempt[]
+  }
+  async receiptRecoveryPost(
+    clientId: string,
+    payload: JsonObject,
+    attemptRoute = true,
+  ): Promise<{ success: boolean; alreadyConfirmed?: boolean }> {
+    this.requireReceiptsEnabled()
+    const pending = this.accountAttempts.get('uploadReceipt:' + clientId)
+    const { response, data } = await fetchJson(
+      '/api/receipts/' + encodeURIComponent(clientId) + (attemptRoute ? '/attempts' : ''),
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    )
+    if (!response.ok) throw new ApiError(response.status, data)
+    if (!data || typeof data !== 'object' || !('success' in data) || data.success !== true)
+      throw new ApiError(502, 'Сохранение не подтверждено. Повторите исходную попытку.')
+    if (this.accountAttempts.get('uploadReceipt:' + clientId) === pending && pending?.requestId === payload.requestId)
+      this.accountAttempts.delete('uploadReceipt:' + clientId)
+    this.readGeneration++
+    this.inFlightReads.clear()
+    return data as { success: boolean; alreadyConfirmed?: boolean }
   }
   async getCoaches(): Promise<ICoach[]> {
     return this.fetchCoaches()

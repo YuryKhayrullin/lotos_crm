@@ -1,0 +1,11 @@
+[Unit]
+Description=Proposed daily Lotos backup (%i); enable only after approved RPO
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+Unit=lotos-backup@%i.service
+
+[Install]
+WantedBy=timers.target

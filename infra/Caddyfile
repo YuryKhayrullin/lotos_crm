@@ -1,0 +1,29 @@
+{
+    email {$ACME_EMAIL}
+    servers {
+        timeouts {
+            read_header 5s
+            read_body 30s
+            write 30s
+            idle 60s
+        }
+    }
+}
+{$CRM_DOMAIN} {
+    @internal_readiness path /api/health/ready
+    respond @internal_readiness 404
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    request_body {
+        max_size 8MB
+    }
+    reverse_proxy app:3000 {
+        # Caddy is the FIRST internet-facing proxy. Never accept the client's
+        # X-Lotos-Client-IP / XFF as authorization or rate-limit identity.
+        header_up X-Lotos-Client-IP {http.request.remote.host}
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+}

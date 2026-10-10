@@ -49,7 +49,17 @@ export function ClientAttendanceHistory({
           className="grid max-h-72 gap-2 overflow-y-auto border-t border-slate-100 p-3"
         >
           {entries.map((entry, index) => {
-            const lesson = lessons.find((item) => item.id === String(entry.lessonId))
+            const context =
+              entry.lessonContext && typeof entry.lessonContext === 'object'
+                ? (entry.lessonContext as Record<string, unknown>)
+                : null
+            const lesson = context?.title
+              ? {
+                  title: String(context.title),
+                  time: String(context.time || ''),
+                  coachName: String(context.coachName || ''),
+                }
+              : lessons.find((item) => item.id === String(entry.lessonId))
             const came = entry.status === 'attended'
             const charged = came && entry.isWalkin !== true
             return (

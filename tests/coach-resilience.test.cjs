@@ -74,10 +74,70 @@ const bootstrap = () => ({
   lessons: [{ id: 'lesson-1', branchId: 'branch-1', title: 'Swimming', time: '17:00' }],
 })
 
+test('late mutation replies cannot populate a new session’s root store', async () => {
+  const { applySnapshot, getSnapshot } = require('mobx-state-tree')
+  for (const kind of ['branch', 'lesson', 'coach']) {
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const root = rootStoreWith({
+      clearPrivateState() {},
+      createBranch: () => gate,
+      createLesson: () => gate,
+      createCoach: () => gate,
+    })
+    const operation =
+      kind === 'branch'
+        ? root.addBranch('Fictional', 'Test')
+        : kind === 'lesson'
+          ? root.createLesson({})
+          : root.createCoach({ name: 'Fictional', specialty: 'Test', branchId: 'branch-1' })
+    const handled = Promise.resolve(operation).catch((error) => error)
+    applySnapshot(root.authStore, {
+      ...getSnapshot(root.authStore),
+      user: { ...coach, id: 'next-user' },
+      sessionVersion: root.authStore.sessionVersion + 1,
+    })
+    release({
+      id: 'old-result',
+      name: 'Fictional',
+      specialty: 'Test',
+      branchId: 'branch-1',
+      title: 'Fictional',
+      time: '17:00',
+    })
+    await handled
+    assert.equal(root.branches.length, 0)
+    assert.equal(root.coaches.length, 0)
+    assert.equal(root.lessons.length, 0)
+    assert.equal(root.error, null)
+  }
+})
+
 test('admin bootstrap hydrates account cards together with profiles before opening the workspace', async () => {
   const { applySnapshot, getSnapshot } = require('mobx-state-tree')
-  const root = rootStoreWith({ clearPrivateState() {}, fetchBootstrapData: async () => ({ ...bootstrap(), coachAccounts: [{ id: 'anna', username: 'anna', role: 'coach', branchId: 'branch-1', status: 'Активен', disabledAt: null, disabledBy: null }] }) })
-  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin', username: 'admin', role: 'admin', branchId: null } })
+  const root = rootStoreWith({
+    clearPrivateState() {},
+    fetchBootstrapData: async () => ({
+      ...bootstrap(),
+      coachAccounts: [
+        {
+          id: 'anna',
+          username: 'anna',
+          role: 'coach',
+          branchId: 'branch-1',
+          status: 'Активен',
+          disabledAt: null,
+          disabledBy: null,
+        },
+      ],
+    }),
+  })
+  applySnapshot(root.authStore, {
+    ...getSnapshot(root.authStore),
+    user: { id: 'admin', username: 'admin', role: 'admin', branchId: null },
+  })
   await root.initialize()
   assert.equal(root.hasLoadedCoachAccounts, true)
   assert.equal(root.currentCoachAccounts[0].username, 'anna')
@@ -87,17 +147,31 @@ test('admin bootstrap hydrates account cards together with profiles before openi
 test('trainer display snapshots are admin-only and cannot carry over to another session', () => {
   const { applySnapshot, getSnapshot } = require('mobx-state-tree')
   const root = rootStoreWith({ clearPrivateState() {} })
-  const account = { id: 'anna', username: 'anna', role: 'coach', branchId: 'branch-1', status: 'Активен', disabledAt: null, disabledBy: null }
+  const account = {
+    id: 'anna',
+    username: 'anna',
+    role: 'coach',
+    branchId: 'branch-1',
+    status: 'Активен',
+    disabledAt: null,
+    disabledBy: null,
+  }
   root.rememberCoachAccounts([account])
   assert.equal(root.currentCoachAccounts.length, 0, 'coach sessions cannot retain admin account lists')
-  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin', username: 'admin', role: 'admin', branchId: null } })
+  applySnapshot(root.authStore, {
+    ...getSnapshot(root.authStore),
+    user: { id: 'admin', username: 'admin', role: 'admin', branchId: null },
+  })
   root.rememberCoachAccounts([account])
   assert.equal(root.currentCoachAccounts.length, 1)
   assert.equal(root.hasLoadedCoachAccounts, true)
   root.authStore.expireSession()
   assert.equal(root.currentCoachAccounts.length, 0)
   assert.equal(root.hasLoadedCoachAccounts, false)
-  applySnapshot(root.authStore, { ...getSnapshot(root.authStore), user: { id: 'admin-2', username: 'admin-2', role: 'admin', branchId: null } })
+  applySnapshot(root.authStore, {
+    ...getSnapshot(root.authStore),
+    user: { id: 'admin-2', username: 'admin-2', role: 'admin', branchId: null },
+  })
   assert.equal(root.currentCoachAccounts.length, 0, 'the new administrator must obtain a fresh server snapshot')
 })
 
@@ -288,7 +362,9 @@ test('coach workspace has only two sections and no polling, finance or admin war
   const page = fs.readFileSync(path.join(root, 'app/page.tsx'), 'utf8')
   const route = fs.readFileSync(path.join(root, 'app/api/[[...path]]/route.ts'), 'utf8')
   assert.match(workspace, /\['Дашборд', 'Расписание'\]/)
-  assert.doesNotMatch(workspace, /getFinanceSummary|fetchClientsPage|setInterval|setTimeout|localStorage/)
+  assert.doesNotMatch(workspace, /getFinanceSummary|fetchClientsPage|setTimeout|localStorage/)
+  assert.match(workspace, /const refresh\s*=\s*\(\)\s*=>\s*setNow\(new Date\(\)\)/)
+  assert.match(workspace, /setInterval\(refresh,\s*30000\)/)
   assert.match(page, /if \(store.authStore.isCoach\) return <CoachWorkspace/)
   assert.doesNotMatch(route, /crmReadCache\.getOrLoad/)
   assert.match(route, /await dispatchCrmAction\(\{ action, payload, user \}\)/)

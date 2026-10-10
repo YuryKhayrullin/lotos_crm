@@ -1,5 +1,5 @@
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
+import { headers } from 'next/headers'
 import { Geist, Geist_Mono } from 'next/font/google'
 import './globals.css'
 import { StoreProvider } from '@/store' // Import StoreProvider
@@ -24,12 +24,14 @@ export const viewport: Viewport = {
   themeColor: '#f5f9fb',
 }
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  // Reading request headers opts the entire shell into dynamic rendering.
+  // A static/cached shell cannot safely reuse a request-specific CSP nonce.
+  await headers()
   return (
     <html lang="ru" className="bg-background">
       <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased`}>
         <StoreProvider>{children}</StoreProvider>
-        {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
   )

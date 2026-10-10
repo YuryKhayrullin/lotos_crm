@@ -1,0 +1,17 @@
+[Unit]
+Description=Lotos CRM quiesced SQL/files offsite backup (%i)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/srv/lotos-crm
+EnvironmentFile=/etc/lotos/backup-%i.env
+ExecStart=/usr/bin/flock -n /run/lotos-backup-%i.lock /bin/sh /srv/lotos-crm/infra/ops/backup-host.sh %i /srv/lotos-crm
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0077
+# Root/Docker socket access is privileged; install only reviewed operator code.

@@ -1,5 +1,7 @@
 'use client'
 
+import { MutationRecoveryPanel } from './MutationRecoveryPanel'
+
 import { observer } from 'mobx-react-lite'
 import { useEffect, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
@@ -25,7 +27,14 @@ import { nav } from '@/lib/constants/nav'
 import { WorkspaceBoundary } from '@/components/WorkspaceBoundary'
 import { AttendanceModal } from '@/components/AttendanceModal'
 import { ILesson } from '@/store/models'
-import { isLessonOnDay, lessonTemporalStatus, parseTimeToHHMM, toLocalDateOnly } from '@/lib/utils/date'
+import {
+  isLessonOnDay,
+  lessonTemporalStatus,
+  parseTimeToHHMM,
+  toLocalDateOnly,
+  calendarDayInZone,
+  instantTemporalStatus,
+} from '@/lib/utils/date'
 import { apiClient, type AttendanceResult, type DashboardSummary } from '@/lib/api-client'
 import { selectBranchAndReload } from '@/lib/branch-selection'
 
@@ -102,12 +111,20 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
     return () => controller.abort()
   }, [dashboardBranchId, isCoach, summaryRefreshToken])
 
-  const todayLessons = store.sortedBranchLessons.filter((lesson) => isLessonOnDay(lesson, now))
-  const todayDate = toLocalDateOnly(now)
+  const native = apiClient.isPostgresBackend?.() === true
+  const calendarNow = native ? calendarDayInZone(now, store.currentBranch?.timeZone || 'Europe/Moscow') : now
+  const todayLessons = store.sortedBranchLessons.filter((lesson) => isLessonOnDay(lesson, calendarNow))
+  const todayDate = toLocalDateOnly(calendarNow)
   const displayedLessons = todayLessons
     .map((lesson) => {
       const time = parseTimeToHHMM(lesson.time)
-      return { lesson, time, status: lessonTemporalStatus(todayDate, time, lesson.duration, now) }
+      return {
+        lesson,
+        time,
+        status: native
+          ? instantTemporalStatus(lesson.startsAt, lesson.endsAt, now)
+          : lessonTemporalStatus(todayDate, time, lesson.duration, now),
+      }
     })
     .sort((left, right) => left.time.localeCompare(right.time))
   const metrics = [
@@ -129,7 +146,12 @@ const Dashboard = observer(({ setScreen }: { setScreen: (s: string) => void }) =
           <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200">Оперативная сводка</p>
           <h2 className="text-2xl font-semibold tracking-tight">{store.currentBranch?.name || 'Все филиалы'}</h2>
           <p className="mt-2 text-sm text-cyan-50/80">
-            {now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+            {calendarNow.toLocaleDateString('ru-RU', {
+              weekday: 'long',
+              day: 'numeric',
+              month: 'long',
+              year: 'numeric',
+            })}
           </p>
         </div>
         <button
@@ -550,6 +572,7 @@ export const AdminWorkspace = observer(() => {
         </Sheet>
 
         <main className="mx-auto w-full max-w-[1440px] p-4 sm:p-8">
+          <MutationRecoveryPanel key={store.authStore.sessionVersion} />
           {store.error && (
             <div
               role="alert"

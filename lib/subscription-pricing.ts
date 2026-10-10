@@ -20,14 +20,30 @@ export function packageLessonsFromFrequency(lessonsPerWeek: unknown): number {
   return frequency * BILLING_WEEKS
 }
 
-export function calculatePaymentLessons(category: unknown, lessonsPerWeek: unknown, amount: unknown) {
+export function calculatePaymentLessons(
+  category: unknown,
+  lessonsPerWeek: unknown,
+  amount: unknown,
+  existingBalance: unknown = 0,
+) {
   const price = packagePrice(category, lessonsPerWeek)
   const paid = Number(amount)
   if (!price || !Number.isFinite(paid) || paid < 0)
     return { price, packages: 0, lessons: 0, remainder: Math.max(0, paid || 0) }
-  const packages = Math.floor(paid / price)
+  const cents = (value: unknown) => {
+    const text = String(value)
+    if (!/^\d+(\.\d{1,2})?$/.test(text)) return null
+    const [rubles, fraction = ''] = text.split('.')
+    return BigInt(rubles) * BigInt(100) + BigInt(fraction.padEnd(2, '0'))
+  }
+  const incoming = cents(amount),
+    carry = cents(existingBalance)
+  if (incoming === null || carry === null) return { price, packages: 0, lessons: 0, remainder: 0 }
+  const total = incoming + carry,
+    packageMinor = BigInt(price) * BigInt(100)
+  const packages = Number(total / packageMinor)
   const packageLessons = packageLessonsFromFrequency(lessonsPerWeek)
-  return { price, packages, lessons: packages * packageLessons, remainder: paid - packages * price }
+  return { price, packages, lessons: packages * packageLessons, remainder: Number(total % packageMinor) / 100 }
 }
 
 export function countAttendedLessons(history: unknown): number {

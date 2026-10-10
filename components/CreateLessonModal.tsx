@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useStore } from '@/store/StoreProvider'
-import { isValidDateOnly, parseTimeToHHMM } from '@/lib/utils/date'
+import { isValidDateOnly, parseTimeToHHMM, calendarDayInZone, isFutureLocalTime } from '@/lib/utils/date'
 import { apiClient, ApiError, createRequestId, type ClientOption } from '@/lib/api-client'
 import { CreationRetry } from '@/lib/creation-retry'
 import { trainerOptions } from '@/lib/trainer-options'
@@ -17,21 +17,29 @@ const LESSON_TIME_OPTIONS = Array.from({ length: 36 }, (_, index) => {
   const minutes = 6 * 60 + index * 30
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
 })
-const futureTimes = (date: string, now = new Date()) =>
-  LESSON_TIME_OPTIONS.filter((time) => new Date(`${date}T${time}:00`).getTime() > now.getTime())
+const futureTimes = (date: string, now = new Date(), timeZone?: string) =>
+  LESSON_TIME_OPTIONS.filter((time) => isFutureLocalTime(date, time, now, timeZone))
 
 export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) => {
   const store = useStore()
+  const native = apiClient.isPostgresBackend?.() === true
+  const coachCreates = native && !store.authStore.isAdmin
   const creationRetry = useRef(new CreationRetry<Record<string, unknown>>())
   const [creationPending, setCreationPending] = useState(false)
   const today = () => {
-    const date = new Date()
+    const date = native ? calendarDayInZone(new Date(), store.currentBranch?.timeZone || 'Europe/Moscow') : new Date()
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
   }
-  const defaultBranchId = store.selectedBranchId || (store.branches.length === 1 ? String(store.branches[0].id) : '')
+  const defaultBranchId = String(
+    (coachCreates ? store.authStore.user?.branchId : store.selectedBranchId) ||
+      (store.branches.length === 1 ? store.branches[0].id : ''),
+  )
+  const [repeatWeekly, setRepeatWeekly] = useState(false)
+  const [endDate, setEndDate] = useState('')
   const [formData, setFormData] = useState({
     date: today(),
-    time: futureTimes(today())[0] || '',
+    time:
+      futureTimes(today(), new Date(), native ? store.currentBranch?.timeZone || 'Europe/Moscow' : undefined)[0] || '',
     coachKey: '',
     clientIds: [] as string[],
     branchId: defaultBranchId,
@@ -45,12 +53,15 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     const timer = setInterval(() => setClock(new Date()), 30000)
     return () => clearInterval(timer)
   }, [isOpen])
-  const availableTimes = futureTimes(formData.date, clock)
+  const timeZone = native
+    ? store.branches.find((branch) => String(branch.id) === formData.branchId)?.timeZone || 'Europe/Moscow'
+    : undefined
+  const availableTimes = futureTimes(formData.date, clock, timeZone)
   useEffect(() => {
-    const times = futureTimes(formData.date, clock)
+    const times = futureTimes(formData.date, clock, timeZone)
     if (isOpen && !creationRetry.current.attempt && !times.includes(formData.time))
       setFormData((previous) => ({ ...previous, time: times[0] || '' }))
-  }, [isOpen, formData.date, formData.time, clock])
+  }, [isOpen, formData.date, formData.time, clock, timeZone])
   const [clientOptions, setClientOptions] = useState<ClientOption[]>([])
   const [clientsLoading, setClientsLoading] = useState(false)
   const [clientSearchRequested, setClientSearchRequested] = useState(false)
@@ -132,13 +143,13 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     if (submitInFlight.current) return
     setFormError('')
     if (!formData.branchId) return setFormError('Выберите филиал')
-    if (!selectedCoach && !creationRetry.current.attempt)
+    if (!coachCreates && !selectedCoach && !creationRetry.current.attempt)
       return setFormError('Выберите тренера из списка выбранного филиала')
     if (!isValidDateOnly(formData.date)) return setFormError('Выберите корректную дату')
 
     const timeStr = parseTimeToHHMM(formData.time)
     if (timeStr === '--:--') return setFormError('Введите время в формате ЧЧ:ММ')
-    if (!creationRetry.current.attempt && new Date(`${formData.date}T${timeStr}:00`).getTime() <= Date.now())
+    if (!creationRetry.current.attempt && !isFutureLocalTime(formData.date, timeStr, new Date(), timeZone))
       return setFormError('Время занятия уже прошло. Выберите будущую дату и время.')
 
     const [year, month, day] = formData.date.split('-').map(Number)
@@ -155,11 +166,19 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
           time: timeStr,
           title: formData.category === 'синхронное плавание' ? 'Синхронное плавание' : 'Плавание',
           coachName: selectedCoach?.name || '',
+          ...(native
+            ? coachCreates
+              ? { coachUserId: store.authStore.user?.id }
+              : selectedCoach?.value.startsWith('profile:')
+                ? { coachId: selectedCoach.value.slice(8) }
+                : { coachUserId: selectedCoach?.value.slice(8) }
+            : {}),
           category: formData.category,
           pool: 'Основной бассейн',
           duration: '1 час',
           maxCapacity: Math.max(10, formData.clientIds.length),
-          isRecurring: false,
+          isRecurring: native && repeatWeekly,
+          ...(native && repeatWeekly ? { endDate } : {}),
           clientIds: formData.clientIds,
         },
         createRequestId,
@@ -170,10 +189,14 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
       )
 
       onClose()
+      setRepeatWeekly(false)
+      setEndDate('')
       setClientOptions([])
       setFormData({
         date: today(),
-        time: futureTimes(today())[0] || '',
+        time:
+          futureTimes(today(), new Date(), native ? store.currentBranch?.timeZone || 'Europe/Moscow' : undefined)[0] ||
+          '',
         coachKey: '',
         clientIds: [],
         branchId: defaultBranchId,
@@ -182,7 +205,10 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
     } catch (error) {
       setFormError(
         creationRetry.current.attempt
-          ? 'Создание не подтверждено. Повтор использует прежние данные и ключ. Не создавайте занятие заново и не перезагружайте страницу. ' +
+          ? 'Создание не подтверждено. Повтор использует прежние данные и ключ. Не создавайте занятие заново. ' +
+              (native
+                ? 'После перезагрузки проверьте панель восстановления операций. '
+                : 'До проверки исхода не перезагружайте страницу. ') +
               (error instanceof Error ? error.message : '')
           : error instanceof Error
             ? error.message
@@ -214,6 +240,30 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
         </div>
         <div className="grid gap-4 p-6">
           <fieldset disabled={isSubmitting || creationPending} className="contents">
+            {native && (
+              <div className="grid gap-2 text-sm">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={repeatWeekly}
+                    onChange={(event) => setRepeatWeekly(event.target.checked)}
+                  />{' '}
+                  Повторять еженедельно (до 52 занятий)
+                </label>
+                {repeatWeekly && (
+                  <label>
+                    Последняя дата серии
+                    <Input
+                      type="date"
+                      min={formData.date}
+                      value={endDate}
+                      onChange={(event) => setEndDate(event.target.value)}
+                    />
+                  </label>
+                )}
+                {coachCreates && <p>Занятие будет назначено вам в вашем филиале.</p>}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <label className="grid gap-1.5 text-sm font-medium text-slate-700">
                 <span className="flex items-center gap-1.5">
@@ -239,7 +289,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
                   disabled={isSubmitting}
                   onValueChange={(time) => time && setFormData({ ...formData, time })}
                 >
-                  <SelectTrigger className="h-11 w-full rounded-xl bg-white">
+                  <SelectTrigger aria-label="Время занятия" className="h-11 w-full rounded-xl bg-white">
                     <SelectValue placeholder="Выберите время" />
                   </SelectTrigger>
                   <SelectContent alignItemWithTrigger={false} align="start" className="max-h-72 rounded-xl bg-white">
@@ -296,7 +346,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
               </SelectContent>
             </Select>
 
-            <label className="grid gap-1.5 text-sm font-medium text-slate-700">
+            <label hidden={coachCreates} className="grid gap-1.5 text-sm font-medium text-slate-700">
               <span className="flex items-center gap-1.5">
                 <UserRound className="size-3.5 text-cyan-600" />
                 Тренер
@@ -343,7 +393,7 @@ export const CreateLessonModal = observer(({ isOpen, onClose }: { isOpen: boolea
               )}
             </label>
 
-            {store.authStore.isAdmin && (
+            {(store.authStore.isAdmin || native) && (
               <section
                 className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4"
                 aria-label="Клиенты занятия"

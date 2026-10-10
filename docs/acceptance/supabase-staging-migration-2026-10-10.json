@@ -1,0 +1,101 @@
+{
+  "completedAt": "2026-10-10T10:50:26.666Z",
+  "project": "lotos-crm-staging",
+  "ref": "iuptzojewbihjwhijocq",
+  "host": "aws-0-eu-west-1.pooler.supabase.com",
+  "caFingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA",
+  "engineSha256": "29557c21d47da6f1695ec1a747cb6c607dade5e44e8b3e4fa687bd4dc226956d",
+  "schemaSha256": "36df89f8c0c6c4153d64d164255ee0bddf543e7869ce90be98ced41c53e8a2e6",
+  "migrations": [
+    {
+      "name": "202610070001_foundation",
+      "sha256": "84375df834ba3fb17386529a57ecb5c1593d778e4b0f7ecef1ba20b6aa9540b6"
+    },
+    {
+      "name": "202610070002_integrity",
+      "sha256": "2ac18367b1a214b8a9d024b0afa92f9a5fffb10598519b5b15c2da9ac541a771"
+    },
+    {
+      "name": "202610070003_coach_memberships",
+      "sha256": "87ec4f3c04959f90d9fd6ceae43b0d3f76fb1d0986876aa995cd3f2a7351377e"
+    },
+    {
+      "name": "202610070004_auth_support",
+      "sha256": "16916e7ddad1911676eecad99241469f82954808026a6fbd38e1e11fa6e123f4"
+    },
+    {
+      "name": "202610070005_catalog_versions",
+      "sha256": "dc9b2c7be0d8f953778113b54680f1a228f7c06eab43503167b98d60cbfc9601"
+    },
+    {
+      "name": "202610070006_schedule_recovery",
+      "sha256": "a91db62ab55bdabe1eadb313491694bbbd158cd2cfe36b19caa78a7021533aa9"
+    },
+    {
+      "name": "202610080007_documents",
+      "sha256": "269d7595a3f84311c31bf7135e58004f77151c3c7dee4dd43294a1006d2b05e1"
+    },
+    {
+      "name": "202610080008_recovery_import",
+      "sha256": "e4c1d2c8ea17426be1d91037896921763fe9ce2389469360bbabccde8e8d46f2"
+    },
+    {
+      "name": "202610080009_complete_recovery",
+      "sha256": "b73404a8e841bf2ec30d6fceebf3944161ba09692da1493d7b638b46d53e0407"
+    }
+  ],
+  "tables": [
+    "accounts",
+    "attendance",
+    "attendance_drafts",
+    "attendance_events",
+    "audit_events",
+    "auth_rate_buckets",
+    "branches",
+    "clients",
+    "coach_branches",
+    "coaches",
+    "document_uploads",
+    "documents",
+    "import_batches",
+    "import_records",
+    "lesson_enrollments",
+    "lesson_ledger",
+    "lesson_series",
+    "lessons",
+    "mutation_drafts",
+    "mutation_requests",
+    "payments",
+    "registration_attempts",
+    "series_enrollments",
+    "sessions",
+    "users",
+    "verifications"
+  ],
+  "operatorAuthorization": "Owner explicitly approved build-only migrator credentials, Prisma schema/migrations and creation of staging tables.",
+  "prismaVersion": "7.10.0",
+  "nodeVersion": "22.23.2",
+  "nativeStatusBefore": {
+    "exitCode": 1,
+    "pending": 9
+  },
+  "nativeDeploy": {
+    "exitCode": 0,
+    "applied": 9
+  },
+  "nativeStatusAfter": {
+    "exitCode": 0,
+    "upToDate": true
+  },
+  "publicTables": 27,
+  "historyChecksumsMatched": true,
+  "runtimeTablePrivilegesVerified": true,
+  "anonAuthenticatedTableAccess": false,
+  "crmRowsAtVerification": 0,
+  "crmAccountsCreatedByJob": 0,
+  "documentStorage": "disabled",
+  "standardCloudVerify": "passed",
+  "operatorDeployment": "dpl_AYJ4jxPqAnUZfj7LeFuYjrMfYp2a",
+  "operatorDeploymentDeleted": true,
+  "crmApplicationPublished": false
+}

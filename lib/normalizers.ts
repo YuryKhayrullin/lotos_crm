@@ -23,6 +23,15 @@ export const normalizeLesson = (l: any): SnapshotIn<typeof import('@/store/model
   title: String(l.title || 'Занятие'),
   category: l.category === 'синхронное плавание' ? 'синхронное плавание' : 'плавание',
   coachName: String(l.coachName || ''),
+  coachId: String(l.coachId || ''),
+  timeZone: String(l.timeZone || ''),
+  startsAt: String(l.startsAt || ''),
+  endsAt: String(l.endsAt || ''),
+  version: Number.isInteger(l.version) && l.version > 0 ? l.version : 0,
+  status: String(l.status || 'scheduled'),
+  canEdit: l.canEdit === true,
+  canCancel: l.canCancel === true,
+  canDelete: l.canDelete === true,
   pool: String(l.pool || ''),
   duration: String(l.duration || '1 час'),
   maxCapacity: Number.isFinite(Number(l.maxCapacity)) && Number(l.maxCapacity) > 0 ? Number(l.maxCapacity) : 10,
@@ -86,8 +95,11 @@ export const normalizeClient = (c: any): SnapshotIn<typeof import('@/store/model
     : flatSubscription
 
   return {
+    receiptVersion: Number.isInteger(c.receiptVersion) && c.receiptVersion >= 0 ? c.receiptVersion : 0,
     id: String(c.id || ''),
     childName: String(c.childName || ''),
+    version: Number.isInteger(c.version) && c.version > 0 ? c.version : undefined,
+    canDelete: typeof c.canDelete === 'boolean' ? c.canDelete : undefined,
     parentName: String(c.parentName || ''),
     phone: String(c.phone || ''),
     email: String(c.email || ''),

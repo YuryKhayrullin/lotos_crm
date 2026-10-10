@@ -4,6 +4,9 @@ import { SubscriptionModel, ISubscription, ISubscriptionSnapshot } from './Subsc
 export const ClientModel = types
   .model('Client', {
     id: types.identifier,
+    receiptVersion: types.optional(types.number, 0),
+    version: types.maybe(types.number),
+    canDelete: types.maybe(types.boolean),
     childName: types.optional(types.string, ''),
     parentName: types.optional(types.string, ''),
     phone: types.optional(types.string, ''),

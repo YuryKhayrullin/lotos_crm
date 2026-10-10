@@ -25,8 +25,12 @@ import {
   isLessonOnDay,
   lessonOccurrenceDate,
   lessonTemporalStatus,
+  calendarDayInZone,
+  instantTemporalStatus,
 } from '@/lib/utils/date'
 import { RoleGuard } from './RoleGuard'
+import { apiClient } from '@/lib/api-client'
+import { LessonManagementModal } from './LessonManagementModal'
 
 const store = getStore()
 const CreateLessonModal = dynamic(() => import('./CreateLessonModal').then((module) => module.CreateLessonModal))
@@ -41,8 +45,7 @@ const getStartOfWeek = (offset: number, today: string) => {
   return start
 }
 
-const isToday = (date: Date) => {
-  const today = new Date()
+const isToday = (date: Date, today = new Date()) => {
   return (
     date.getDate() === today.getDate() &&
     date.getMonth() === today.getMonth() &&
@@ -53,6 +56,10 @@ const isToday = (date: Date) => {
 export const ScheduleView = observer(() => {
   const [weekOffset, setWeekOffset] = useState(0)
   const [isCreateLessonOpen, setIsCreateLessonOpen] = useState(false)
+  const [managementLesson, setManagementLesson] = useState<ILesson | null>(null)
+  const [scheduleRefresh, setScheduleRefresh] = useState(0)
+  const [scheduleError, setScheduleError] = useState('')
+  const [scheduleLoading, setScheduleLoading] = useState(false)
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const refresh = () => setNow(new Date())
@@ -63,7 +70,9 @@ export const ScheduleView = observer(() => {
       window.removeEventListener('focus', refresh)
     }
   }, [])
-  const todayKey = now.toDateString()
+  const native = apiClient.isPostgresBackend?.() === true
+  const calendarNow = native ? calendarDayInZone(now, store.currentBranch?.timeZone || 'Europe/Moscow') : now
+  const todayKey = calendarNow.toDateString()
 
   const startOfWeek = useMemo(() => getStartOfWeek(weekOffset, todayKey), [weekOffset, todayKey])
   const endOfWeek = useMemo(() => {
@@ -71,6 +80,30 @@ export const ScheduleView = observer(() => {
     end.setDate(startOfWeek.getDate() + 6)
     return end
   }, [startOfWeek])
+  const canCreate = store.authStore.isAdmin || native
+  const selectedBranchId = store.selectedBranchId
+  useEffect(() => {
+    if (!native) return
+    const controller = new AbortController()
+    const date = (value: Date) =>
+      `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+    setScheduleLoading(true)
+    setScheduleError('')
+    void apiClient
+      .fetchSchedule(date(startOfWeek), date(endOfWeek), selectedBranchId || undefined, controller.signal)
+      .then((rows) => {
+        if (!controller.signal.aborted)
+          store.rememberSchedule(rows, date(startOfWeek), date(endOfWeek), selectedBranchId || undefined)
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setScheduleError(error instanceof Error ? error.message : 'Не удалось загрузить расписание')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setScheduleLoading(false)
+      })
+    return () => controller.abort()
+  }, [native, startOfWeek, endOfWeek, selectedBranchId, scheduleRefresh])
 
   const DAYS = useMemo(
     () =>
@@ -82,9 +115,8 @@ export const ScheduleView = observer(() => {
     [startOfWeek],
   )
 
-  const [selectedDay, setSelectedDay] = useState(
-    DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]?.key || 'Пн',
-  )
+  const [dayChoice, setSelectedDay] = useState<string | null>(null)
+  const selectedDay = dayChoice || DAYS[calendarNow.getDay() === 0 ? 6 : calendarNow.getDay() - 1]?.key || 'Пн'
   const [selectedLesson, setSelectedLesson] = useState<ILesson | null>(null)
   const [selectedOccurrenceDate, setSelectedOccurrenceDate] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'день' | 'неделя'>('день')
@@ -120,7 +152,9 @@ export const ScheduleView = observer(() => {
       return {
         lesson,
         occurrenceDate,
-        status: lessonTemporalStatus(occurrenceDate, parseTimeToHHMM(lesson.time), lesson.duration, now),
+        status: native
+          ? instantTemporalStatus(lesson.startsAt, lesson.endsAt, now)
+          : lessonTemporalStatus(occurrenceDate, parseTimeToHHMM(lesson.time), lesson.duration, now),
       }
     })
     .sort(
@@ -172,7 +206,7 @@ export const ScheduleView = observer(() => {
                 </Button>
               ))}
             </div>
-            <RoleGuard roles={['admin']}>
+            <RoleGuard roles={native ? ['admin', 'coach'] : ['admin']}>
               <Button
                 onClick={() => setIsCreateLessonOpen(true)}
                 className="h-10 flex-1 rounded-xl bg-cyan-600 px-4 text-white shadow-sm hover:bg-cyan-700 sm:flex-none"
@@ -197,7 +231,10 @@ export const ScheduleView = observer(() => {
             {weekOffset !== 0 && (
               <button
                 type="button"
-                onClick={() => setWeekOffset(0)}
+                onClick={() => {
+                  setWeekOffset(0)
+                  setSelectedDay(null)
+                }}
                 className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-cyan-700 hover:bg-cyan-50"
               >
                 <RotateCcw className="size-3" /> Сегодня
@@ -227,7 +264,7 @@ export const ScheduleView = observer(() => {
             className={`min-w-[74px] rounded-2xl border px-4 py-2.5 text-sm font-semibold whitespace-nowrap shadow-sm transition-all ${
               viewMode === 'день' && selectedDay === d.key
                 ? 'bg-cyan-500 text-white border-cyan-500 shadow-cyan-100'
-                : isToday(d.fullDate)
+                : isToday(d.fullDate, calendarNow)
                   ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
                   : 'bg-white text-slate-700 border-slate-100 hover:border-cyan-200 hover:bg-slate-50'
             }`}
@@ -244,8 +281,30 @@ export const ScheduleView = observer(() => {
         occurrenceDate={selectedOccurrenceDate}
       />
 
-      {store.authStore.isAdmin && isCreateLessonOpen && (
-        <CreateLessonModal isOpen onClose={() => setIsCreateLessonOpen(false)} />
+      {canCreate && isCreateLessonOpen && (
+        <CreateLessonModal
+          isOpen
+          onClose={() => {
+            setIsCreateLessonOpen(false)
+            setScheduleRefresh((value) => value + 1)
+          }}
+        />
+      )}
+      {managementLesson && (
+        <LessonManagementModal
+          lesson={managementLesson}
+          onClose={() => setManagementLesson(null)}
+          onSaved={() => setScheduleRefresh((value) => value + 1)}
+        />
+      )}
+      {scheduleLoading && <p role="status">Загружаем выбранную неделю…</p>}
+      {scheduleError && (
+        <p role="alert">
+          {scheduleError}{' '}
+          <Button variant="outline" onClick={() => setScheduleRefresh((value) => value + 1)}>
+            Повторить загрузку
+          </Button>
+        </p>
       )}
 
       <div className="grid gap-4">
@@ -258,7 +317,7 @@ export const ScheduleView = observer(() => {
             <p className="mx-auto mt-1 max-w-sm text-sm text-slate-500">
               {viewMode === 'день' ? `На ${selectedDateLabel} ничего не запланировано` : 'На этой неделе занятий нет'}
             </p>
-            <RoleGuard roles={['admin']}>
+            <RoleGuard roles={native ? ['admin', 'coach'] : ['admin']}>
               <Button
                 onClick={() => setIsCreateLessonOpen(true)}
                 className="mt-5 rounded-xl bg-cyan-600 text-white hover:bg-cyan-700"
@@ -285,6 +344,7 @@ export const ScheduleView = observer(() => {
                   key={lesson.id}
                   className="group cursor-pointer overflow-hidden rounded-3xl border border-slate-200/80 bg-white ring-0 shadow-none transition-all hover:border-cyan-200 hover:shadow-md"
                   onClick={() => {
+                    if (lesson.status === 'cancelled') return
                     setSelectedOccurrenceDate(occurrenceDate)
                     setSelectedLesson({ ...lesson })
                   }}
@@ -309,20 +369,34 @@ export const ScheduleView = observer(() => {
                                   : 'bg-cyan-50 text-cyan-700'
                             }
                           >
-                            {status === 'completed'
-                              ? 'Завершено'
-                              : status === 'ongoing'
-                                ? 'Идёт сейчас'
-                                : status === 'upcoming'
-                                  ? 'Запланировано'
-                                  : 'Проверьте время'}
+                            {lesson.status === 'cancelled'
+                              ? 'Отменено'
+                              : status === 'completed'
+                                ? 'Завершено'
+                                : status === 'ongoing'
+                                  ? 'Идёт сейчас'
+                                  : status === 'upcoming'
+                                    ? 'Запланировано'
+                                    : 'Проверьте время'}
                           </Badge>
                           <p className="text-xl font-extrabold tabular-nums text-cyan-950">
                             {parseTimeToHHMM(lesson.time)}
                           </p>
                           <p className="text-xs font-semibold text-cyan-700">{cleanDate(occurrenceDate)}</p>
                         </div>
-                        <p className="mt-1 truncate font-semibold text-slate-900">{lesson.title}</p>
+                        <button
+                          type="button"
+                          disabled={lesson.status === 'cancelled'}
+                          aria-label={'Открыть занятие: ' + lesson.title + ' · ' + cleanDate(occurrenceDate)}
+                          className="mt-1 block max-w-full truncate text-left font-semibold text-slate-900 focus-visible:rounded focus-visible:outline-2 focus-visible:outline-cyan-700"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setSelectedOccurrenceDate(occurrenceDate)
+                            setSelectedLesson({ ...lesson })
+                          }}
+                        >
+                          {lesson.title}
+                        </button>
                         <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
                           <span className="inline-flex items-center gap-1">
                             <Users className="size-3.5" /> {lesson.coachName || 'Тренер не назначен'}
@@ -341,6 +415,17 @@ export const ScheduleView = observer(() => {
                       <Badge className="rounded-xl bg-cyan-50 px-2.5 py-1 text-xs font-bold text-cyan-700 sm:text-sm">
                         До {maxCap}
                       </Badge>
+                      {native && (lesson.canEdit || lesson.canCancel || lesson.canDelete) && (
+                        <Button
+                          variant="outline"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setManagementLesson({ ...lesson })
+                          }}
+                        >
+                          Изменить
+                        </Button>
+                      )}
                       <div className="px-1 text-xl font-bold text-slate-300 transition-colors group-hover:text-cyan-600 sm:px-2">
                         ›
                       </div>
