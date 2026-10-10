@@ -80,7 +80,6 @@ PostgreSQL-наборы запускаем **последовательно**: �
 
 Обновлённая полная локальная приёмка cloud-адаптации: **287 Node + 28 foundation + 36 auth + 88 domain + 7 operations + 8 Next HTTP + 15 Chromium = 469**. Предыдущие 445/455 не прибавляются. TypeScript/ESLint/форматирование/secret scan/Compose config пройдены; Webpack production-build выполнен в явном cloud-профиле с вымышленными endpoint и без реальных credentials. `npm audit --omit=dev`: 0; полный audit: прежние 5 high в инструментальном графе, 0 critical. Реальные API-подключения, сертификат, pooler/Blob/платформенный IP, sustained HTTP-SLO и offsite cloud restore пока не выполнены. Доступ к Vercel/Neon не подтверждён, публикации/привилегированного bootstrap не было. Инструкция: [VERCEL_STAGING.md](VERCEL_STAGING.md); GO/NO-GO переключения: [CUTOVER_RUNBOOK.md](CUTOVER_RUNBOOK.md).
 
-
 ## Приёмка Supabase-профиля, 9 октября
 
 Самостоятельно выполнено 482 проверки, без суммирования прежних срезов: 296 Node, 28 foundation, 36 auth, 90 domain, 8 operations и 24 Next HTTP/Chromium. Повторно пройдены TypeScript/ESLint/форматирование/Gitleaks и Supabase cloud Webpack build. Новая SQL-role процедура проверена под оператором без superuser, TLS hostname — на настоящем локальном TLS-соединении. Это не real Supabase/TLS/pooler/public deployment. Актуальный audit после согласия владельца: runtime 0; full 5 high/0 critical, latest braces 3.0.3 по-прежнему affected. Измерения, local restore и реальные внешние зависимости: [RELEASE_READINESS.md](RELEASE_READINESS.md).
